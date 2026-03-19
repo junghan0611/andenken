@@ -29,8 +29,8 @@ const CONCURRENCY = parseInt(process.env.INDEX_CONCURRENCY ?? "", 10) || DEFAULT
 const DB_WRITE_BATCH = 2000; // flush to DB every N chunks → fewer fragments
 
 function getGeminiConfig(dimensions?: 768 | 3072): GeminiEmbeddingConfig {
-  const apiKey = process.env.GEMINI_API_KEY ?? "";
-  if (!apiKey) throw new Error("GEMINI_API_KEY not set");
+  const apiKey = process.env.GOOGLE_AI_API_KEY ?? process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY ?? "";
+  if (!apiKey) throw new Error("GEMINI_API_KEY (or GOOGLE_AI_API_KEY / GOOGLE_API_KEY) not set");
   return {
     apiKey,
     model: "gemini-embedding-2-preview",

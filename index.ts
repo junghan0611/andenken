@@ -77,7 +77,7 @@ function dictcliExpand(query: string): string[] {
 
 function getGeminiConfig(dimensions?: 768 | 3072): GeminiEmbeddingConfig | null {
   const apiKey =
-    process.env.GOOGLE_AI_API_KEY ?? process.env.GEMINI_API_KEY ?? "";
+    process.env.GOOGLE_AI_API_KEY ?? process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY ?? "";
   if (!apiKey) return null;
   return {
     apiKey,
@@ -135,11 +135,16 @@ export default function (pi: ExtensionAPI) {
 
   // --- Initialize on session start ---
   pi.on("session_start", async (_event, ctx) => {
-    const gemini = getGeminiConfig();
+    // env-loader may not have run yet — retry after short delay
+    let gemini = getGeminiConfig();
+    if (!gemini) {
+      await new Promise((r) => setTimeout(r, 500));
+      gemini = getGeminiConfig();
+    }
     if (!gemini) {
       ctx.ui.setStatus(
         "semantic-memory",
-        "⚠ GOOGLE_AI_API_KEY not set — semantic memory disabled",
+        "⚠ GEMINI_API_KEY not set — semantic memory disabled",
       );
       return;
     }
