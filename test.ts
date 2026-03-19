@@ -20,8 +20,10 @@ import * as path from "node:path";
 import { VectorStore } from "./store.ts";
 import {
   findSessionFiles,
+  findSessionFilesBySource,
   extractSessionChunks,
   extractProjectName,
+  detectSource,
 } from "./session-indexer.ts";
 import {
   rrfFusion,
@@ -69,21 +71,85 @@ async function testSessionIndexer() {
     "all files are .jsonl",
   );
 
-  // extractProjectName
+  // extractProjectName — pi format
   assert(
     extractProjectName(
       "/home/user/.pi/agent/sessions/--home-user-repos-gh-agent-config--/file.jsonl",
-    ) === "config",
-    'extractProjectName: "config" from agent-config dir',
+    ) === "agent-config",
+    'extractProjectName pi: "agent-config"',
   );
   assert(
     extractProjectName(
       "/home/user/.pi/agent/sessions/--home-user--/file.jsonl",
-    ) === "user",
-    'extractProjectName: "user" from home dir',
+    ) === "home",
+    'extractProjectName pi: "home" from home dir',
+  );
+  // extractProjectName — claude format
+  assert(
+    extractProjectName(
+      "/home/user/.claude/projects/-home-user-repos-gh-andenken/abc.jsonl",
+    ) === "andenken",
+    'extractProjectName claude: "andenken"',
+  );
+  assert(
+    extractProjectName(
+      "/home/user/.claude/projects/-home-user/abc.jsonl",
+    ) === "home",
+    'extractProjectName claude: "home" from home dir',
+  );
+  assert(
+    extractProjectName(
+      "/home/junghan/.claude/projects/-home-junghan-repos-work-sks-hub-zig/abc.jsonl",
+    ) === "sks-hub-zig",
+    'extractProjectName claude: "sks-hub-zig" (work repo)',
   );
 
-  // extractSessionChunks — test with first file
+  // detectSource
+  assert(
+    detectSource("/home/user/.pi/agent/sessions/--x--/f.jsonl") === "pi",
+    'detectSource: pi path → "pi"',
+  );
+  assert(
+    detectSource("/home/user/.claude/projects/-x/f.jsonl") === "claude",
+    'detectSource: claude path → "claude"',
+  );
+
+  // findSessionFilesBySource
+  const piFiles = findSessionFilesBySource("pi");
+  const claudeFiles = findSessionFilesBySource("claude");
+  assert(piFiles.length > 0, `pi sessions: ${piFiles.length} files`);
+  assert(claudeFiles.length > 0, `claude sessions: ${claudeFiles.length} files`);
+  assert(
+    files.length === piFiles.length + claudeFiles.length,
+    `total (${files.length}) = pi (${piFiles.length}) + claude (${claudeFiles.length})`,
+  );
+
+  // extractSessionChunks — test pi session
+  if (piFiles.length > 0) {
+    const piChunks = await extractSessionChunks(piFiles[0]);
+    if (piChunks.length > 0) {
+      assert(piChunks[0].source === "pi", 'pi chunk has source="pi"');
+    }
+  }
+
+  // extractSessionChunks — test claude session (find one with content)
+  if (claudeFiles.length > 0) {
+    let claudeChunks: Awaited<ReturnType<typeof extractSessionChunks>> = [];
+    for (const cf of claudeFiles.slice(0, 10)) {
+      claudeChunks = await extractSessionChunks(cf);
+      if (claudeChunks.length > 0) break;
+    }
+    if (claudeChunks.length > 0) {
+      assert(claudeChunks[0].source === "claude", 'claude chunk has source="claude"');
+      assert(claudeChunks[0].role === "user" || claudeChunks[0].role === "assistant",
+        `claude chunk role: "${claudeChunks[0].role}"`,
+      );
+    } else {
+      skip("claude sessions found but no extractable chunks in first 10");
+    }
+  }
+
+  // extractSessionChunks — test with first file (backward compat)
   if (files.length > 0) {
     const chunks = await extractSessionChunks(files[0]);
     assert(chunks.length > 0, `extractSessionChunks: ${chunks.length} chunks from first file`);
@@ -449,7 +515,7 @@ async function testSearchQuery(query: string) {
 const args = process.argv.slice(2);
 const mode = args[0] ?? "all";
 
-console.log("🧠 Semantic Memory Test Suite\n");
+console.log("🧠 andenken Test Suite\n");
 
 if (mode === "unit" || mode === "all") {
   await testSessionIndexer();

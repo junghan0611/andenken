@@ -156,18 +156,22 @@ export function extractProjectName(sessionFile: string): string {
     dirName = path.basename(path.dirname(sessionFile));
   }
 
-  // Normalize: strip leading/trailing hyphens, extract last path segment
+  // Normalize: strip leading/trailing hyphens
   const cleaned = dirName.replace(/^-+|-+$/g, "");
-  for (const prefix of [
-    "home-junghan-repos-gh-",
-    "home-junghan-repos-work-",
-    "home-junghan-repos-3rd-",
-    "home-junghan-",
-  ]) {
-    if (cleaned.startsWith(prefix)) {
-      return cleaned.slice(prefix.length) || "home";
-    }
-  }
+
+  // Pattern: home-<user>-repos-{gh,work,3rd}-<project>
+  const reposMatch = cleaned.match(
+    /^home-[^-]+-repos-(?:gh|work|3rd)-(.+)$/,
+  );
+  if (reposMatch) return reposMatch[1];
+
+  // Pattern: home-<user>-<project> (projects directly under ~/)
+  const homeMatch = cleaned.match(/^home-[^-]+-(.+)$/);
+  if (homeMatch) return homeMatch[1];
+
+  // Pattern: home-<user> (home dir itself)
+  if (/^home-[^-]+$/.test(cleaned)) return "home";
+
   return cleaned || "unknown";
 }
 
