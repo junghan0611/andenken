@@ -1,0 +1,8 @@
+node_modules/
+*.lance/
+*.lance
+.env
+.env.local
+dist/
+*.d.ts
+benchmark-log.jsonl
