@@ -77,7 +77,7 @@ In Heidegger, *Geworfenheit* (thrownness) and *Andenken* (recollective thinking)
 
 이기상 (Lee Ki-sang), the foremost Korean translator of Heidegger, rendered *Andenken* as 뜻새김 — "engraving meaning through recollection." Three worlds meet in one word: Heidegger's German, Lee's Korean philosophy, and the essence of this project.
 
-→ [Naming document](https://notes.junghanacs.com/20260319T110800.html) (Korean)
+→ [Naming document](https://notes.junghanacs.com/botlog/20260319T110800.html) (Korean)
 
 ## Development
 
