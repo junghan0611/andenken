@@ -75,9 +75,32 @@ function dictcliExpand(query: string): string[] {
 
 // --- Config ---
 
+/**
+ * Load API key from ~/.env.local directly.
+ * Cannot rely on env-loader extension — session_start race condition.
+ */
+function loadEnvKey(): string {
+  // Already in process.env (system env or env-loader already ran)
+  const fromEnv = process.env.GOOGLE_AI_API_KEY ?? process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY;
+  if (fromEnv) return fromEnv;
+
+  // Read ~/.env.local ourselves
+  try {
+    const envPath = path.join(process.env.HOME ?? "", ".env.local");
+    const content = fs.readFileSync(envPath, "utf-8");
+    for (const line of content.split("\n")) {
+      const stripped = line.trim().replace(/^export\s+/, "");
+      const match = stripped.match(/^(GOOGLE_AI_API_KEY|GEMINI_API_KEY|GOOGLE_API_KEY)=["']?([^"'\s]+)["']?/);
+      if (match) return match[2];
+    }
+  } catch {
+    // file not found
+  }
+  return "";
+}
+
 function getGeminiConfig(dimensions?: 768 | 3072): GeminiEmbeddingConfig | null {
-  const apiKey =
-    process.env.GOOGLE_AI_API_KEY ?? process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY ?? "";
+  const apiKey = loadEnvKey();
   if (!apiKey) return null;
   return {
     apiKey,
@@ -135,12 +158,7 @@ export default function (pi: ExtensionAPI) {
 
   // --- Initialize on session start ---
   pi.on("session_start", async (_event, ctx) => {
-    // env-loader may not have run yet — retry after short delay
-    let gemini = getGeminiConfig();
-    if (!gemini) {
-      await new Promise((r) => setTimeout(r, 500));
-      gemini = getGeminiConfig();
-    }
+    const gemini = getGeminiConfig();
     if (!gemini) {
       ctx.ui.setStatus(
         "semantic-memory",
