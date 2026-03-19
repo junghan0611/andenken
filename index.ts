@@ -37,6 +37,7 @@ interface SearchResult {
   lineNumber: number;
   timestamp: string;
   role: string;
+  source: string;
   metadata: Record<string, string>;
   score: number;
 }
@@ -216,6 +217,11 @@ export default function (pi: ExtensionAPI) {
           default: 10,
         }),
       ),
+      source: Type.Optional(
+        Type.String({
+          description: "Filter by source: 'pi' or 'claude' (default: all)",
+        }),
+      ),
     }),
 
     async execute(_toolCallId, params) {
@@ -253,6 +259,12 @@ export default function (pi: ExtensionAPI) {
         mergeStrategy: "rrf" as const,
         mmr: { enabled: false, lambda: 0.7 },
       });
+
+      // Source filter (pi | claude)
+      const sourceFilter = params.source;
+      if (sourceFilter) {
+        results = results.filter((r) => r.source === sourceFilter);
+      }
 
       // 자동 폴백: session 결과가 빈약하면 knowledge_search도 실행
       const topScore = results[0]?.score ?? 0;
@@ -501,8 +513,9 @@ function formatResults(query: string, results: SearchResult[]) {
 
   const formatted = results
     .map((r, i) => {
+      const srcTag = r.source ? ` [${r.source}]` : "";
       const lines = [
-        `## ${i + 1}. [${r.project}] ${r.role} (score: ${r.score.toFixed(3)})`,
+        `## ${i + 1}. [${r.project}]${srcTag} ${r.role} (score: ${r.score.toFixed(3)})`,
         `- File: ${r.sessionFile}:L${r.lineNumber}`,
         `- Time: ${r.timestamp}`,
         `- Text:\n${r.text.slice(0, 500)}${r.text.length > 500 ? "..." : ""}`,
@@ -525,6 +538,7 @@ function formatResults(query: string, results: SearchResult[]) {
         id: r.id,
         project: r.project,
         role: r.role,
+        source: r.source,
         score: r.score,
         sessionFile: r.sessionFile,
         lineNumber: r.lineNumber,

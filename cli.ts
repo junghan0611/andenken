@@ -81,7 +81,7 @@ const orgDbPath = getOrgDbPath();
 
 // --- Commands ---
 
-async function searchSessions(query: string, limit: number): Promise<void> {
+async function searchSessions(query: string, limit: number, source?: string): Promise<void> {
   const gemini = getGeminiConfig();
   if (!gemini) {
     console.error(JSON.stringify({ error: "GOOGLE_AI_API_KEY not set" }));
@@ -107,6 +107,11 @@ async function searchSessions(query: string, limit: number): Promise<void> {
     mergeStrategy: "rrf" as MergeStrategy,
     mmr: { enabled: false, lambda: 0.7 },
   });
+
+  // Source filter (pi | claude)
+  if (source) {
+    results = results.filter((r) => r.source === source);
+  }
 
   // Auto-fallback to knowledge if session results are thin
   let fallback = false;
@@ -310,6 +315,7 @@ function formatResult(r: SearchResult) {
   return {
     project: r.project,
     role: r.role,
+    source: r.source || undefined,
     score: Number(r.score.toFixed(4)),
     file: r.sessionFile,
     line: r.lineNumber,
@@ -353,7 +359,7 @@ async function main() {
         console.error(JSON.stringify({ error: "Usage: search-sessions <query> [--limit N]" }));
         process.exit(1);
       }
-      await searchSessions(query, limit);
+      await searchSessions(query, limit, flags.source);
       break;
     }
     case "search-knowledge":

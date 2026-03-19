@@ -30,6 +30,7 @@ export interface SearchResult {
   lineNumber: number;
   timestamp: string;
   role: string;
+  source: string; // "pi" | "claude" | "" (org)
   metadata: Record<string, string>;
   score: number;
 }
@@ -109,6 +110,7 @@ export class VectorStore {
           lineNumber: 0,
           timestamp: "",
           role: "",
+          source: "",
           metadata: "{}",
         },
       ],
@@ -143,6 +145,7 @@ export class VectorStore {
       lineNumber: number;
       timestamp: string;
       role: string;
+      source?: string;
       metadata: Record<string, string>;
     }>,
   ): Promise<void> {
@@ -168,6 +171,7 @@ export class VectorStore {
       lineNumber: c.lineNumber,
       timestamp: c.timestamp,
       role: c.role,
+      source: c.source ?? "",
       metadata: JSON.stringify(c.metadata),
     }));
 
@@ -200,6 +204,7 @@ export class VectorStore {
         lineNumber: r.lineNumber as number,
         timestamp: r.timestamp as string,
         role: r.role as string,
+        source: (r.source as string) ?? "",
         metadata: JSON.parse(r.metadata as string),
         score: r._distance != null ? 1 / (1 + (r._distance as number)) : 0,
       }))
@@ -229,6 +234,7 @@ export class VectorStore {
           "lineNumber",
           "timestamp",
           "role",
+          "source",
           "metadata",
         ])
         .limit(limit)
@@ -242,6 +248,7 @@ export class VectorStore {
         lineNumber: r.lineNumber as number,
         timestamp: r.timestamp as string,
         role: r.role as string,
+        source: (r.source as string) ?? "",
         metadata: JSON.parse(r.metadata as string),
         score: r._score != null ? (r._score as number) : 1 / (i + 1), // rank-based fallback
       }));
