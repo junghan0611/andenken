@@ -21,7 +21,7 @@ import {
   embedDocumentBatch,
   type GeminiEmbeddingConfig,
 } from "./gemini-embeddings.ts";
-import { VectorStore } from "./store.ts";
+import { VectorStore, getOrgDbPath } from "./store.ts";
 import {
   findSessionFiles,
   extractSessionChunks,
@@ -76,9 +76,9 @@ function getGeminiConfig(dimensions?: 768 | 3072): GeminiEmbeddingConfig | null 
 // --- Extension ---
 
 export default function (pi: ExtensionAPI) {
-  const { getOrgDbPath } = await import("./store.ts");
   const sessionStore = new VectorStore(undefined, 3072);
-  const orgStore = new VectorStore(getOrgDbPath(), 768);
+  const orgDbPath = getOrgDbPath();
+  const orgStore = new VectorStore(orgDbPath, 768);
 
   let sessionReady = false;
   let orgReady = false;
@@ -94,7 +94,6 @@ export default function (pi: ExtensionAPI) {
     } catch {
       return "unknown";
     }
-  })();
 
   pi.on("before_agent_start", async (event, ctx) => {
     if (sessionInfoInjected) return;
