@@ -33,6 +33,18 @@ index.ts                  # pi-extension entry point
 - **Cross-lingual:** dictcli expands Korean queries to English tags automatically
 - **Multi-runtime:** Same core serves pi (extension), Claude Code (skill), OpenCode (skill)
 
+## Issue Tracking
+
+This project uses **br** (beads_rust) for issue tracking.
+
+```bash
+br ready              # Find available work
+br show <id>          # View issue details
+br update <id> --status in_progress  # Claim work
+br close <id>         # Complete work
+br sync --flush-only  # Export JSONL (git commit separately)
+```
+
 ## Environment
 
 ```bash
@@ -40,5 +52,5 @@ GOOGLE_AI_API_KEY    # or GEMINI_API_KEY — required for embeddings
 ```
 
 Index locations:
-- `~/.pi/agent/memory/sessions.lance`
-- `~/.pi/agent/memory/org.lance`
+- `~/repos/gh/andenken/data/sessions.lance`
+- `~/repos/gh/andenken/data/org.lance`
