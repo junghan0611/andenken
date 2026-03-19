@@ -20,13 +20,13 @@ import {
   embedQuery,
   embedDocumentBatch,
   type GeminiEmbeddingConfig,
-} from "./gemini-embeddings.ts";
-import { VectorStore, getOrgDbPath } from "./store.ts";
+} from "./gemini-embeddings.js";
+import { VectorStore, getOrgDbPath } from "./store.js";
 import {
   findSessionFiles,
   extractSessionChunks,
-} from "./session-indexer.ts";
-import { retrieve } from "./retriever.ts";
+} from "./session-indexer.js";
+import { retrieve } from "./retriever.js";
 
 // Re-declare minimal SearchResult to avoid jiti-incompatible import() type syntax
 interface SearchResult {
@@ -107,6 +107,7 @@ export default function (pi: ExtensionAPI) {
     } catch {
       return "unknown";
     }
+  })();
 
   pi.on("before_agent_start", async (event, ctx) => {
     if (sessionInfoInjected) return;
@@ -396,21 +397,6 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // --- /whoami 커맨드 — 세션 이름 설정 (영속) ---
-  pi.registerCommand("whoami", {
-    description: "세션 이름 설정 — /resume에서 구분. 예: /whoami 에이전트1",
-    handler: async (args, ctx) => {
-      const name = (args ?? "").trim();
-      if (!name) {
-        const current = pi.getSessionName();
-        ctx.ui.notify(current ? `현재: ${current}` : "이름 없음. /name <이름>", "info");
-        return;
-      }
-      pi.setSessionName(name);
-      ctx.ui.notify(`✅ 세션 이름: ${name}`, "info");
-    },
-  });
-
   // --- /new 시 현재 세션 자동 인덱싱 ---
   // 현재 세션 JSONL은 계속 추가되므로 무조건 재인덱싱 (delete→insert)
   pi.on("session_before_switch", async (event, ctx) => {
@@ -482,7 +468,11 @@ function formatResults(query: string, results: SearchResult[]) {
   if (results.length === 0) {
     return {
       content: [{ type: "text" as const, text: `No results for: "${query}"` }],
-      details: { query, results: [] },
+      details: {
+        query,
+        resultCount: 0,
+        results: [] as Array<Record<string, unknown>>,
+      },
     };
   }
 
@@ -515,7 +505,7 @@ function formatResults(query: string, results: SearchResult[]) {
         score: r.score,
         sessionFile: r.sessionFile,
         lineNumber: r.lineNumber,
-      })),
+      })) as Array<Record<string, unknown>>,
     },
   };
 }
@@ -523,7 +513,7 @@ function formatResults(query: string, results: SearchResult[]) {
 async function indexSessions(
   store: VectorStore,
   gemini: GeminiEmbeddingConfig,
-  ctx: { ui: { notify: (msg: string, level: string) => void } },
+  ctx: { ui: { notify: (msg: string, level: "info" | "warning" | "error") => void } },
   force: boolean = false,
 ): Promise<void> {
   const files = findSessionFiles();

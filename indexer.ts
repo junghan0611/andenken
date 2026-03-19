@@ -17,10 +17,10 @@ import {
   runWithConcurrency,
   DEFAULT_CONCURRENCY,
   type GeminiEmbeddingConfig,
-} from "./gemini-embeddings.ts";
-import { VectorStore, getSessionsDbPath, getOrgDbPath, getDataDir } from "./store.ts";
-import { findSessionFiles, extractSessionChunks } from "./session-indexer.ts";
-import { findOrgFiles, chunkOrgFile } from "./org-chunker.ts";
+} from "./gemini-embeddings.js";
+import { VectorStore, getSessionsDbPath, getOrgDbPath, getDataDir } from "./store.js";
+import { findSessionFiles, extractSessionChunks } from "./session-indexer.js";
+import { findOrgFiles, chunkOrgFile } from "./org-chunker.js";
 
 // --- Config ---
 

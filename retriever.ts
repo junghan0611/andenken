@@ -11,7 +11,7 @@
  * (MRR 0.754 → 0.642). Disabled by default. MMR used instead for diversity.
  */
 
-import type { SearchResult } from "./store.ts";
+import type { SearchResult } from "./store.js";
 
 export interface RetrieverConfig {
   vectorWeight: number;

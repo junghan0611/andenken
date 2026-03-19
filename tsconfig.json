@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "outDir": "./dist",
+    "rootDir": ".",
+    "declaration": true,
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true
+  },
+  "include": [
+    "index.ts",
+    "cli.ts",
+    "gemini-embeddings.ts",
+    "store.ts",
+    "session-indexer.ts",
+    "retriever.ts",
+    "org-chunker.ts",
+    "indexer.ts"
+  ],
+  "exclude": ["test.ts", "benchmark.ts", "node_modules"]
+}

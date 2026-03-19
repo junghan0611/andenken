@@ -216,8 +216,8 @@ export async function extractSessionChunks(
 
     const chunk =
       source === "claude"
-        ? parseClaudeLine(parsed as ClaudeJsonlMessage, sessionFile, project, lineNumber)
-        : parsePiLine(parsed as PiJsonlMessage, sessionFile, project, lineNumber);
+        ? parseClaudeLine(parsed as unknown as ClaudeJsonlMessage, sessionFile, project, lineNumber)
+        : parsePiLine(parsed as unknown as PiJsonlMessage, sessionFile, project, lineNumber);
 
     if (chunk) chunks.push(chunk);
   }

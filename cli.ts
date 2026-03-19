@@ -19,10 +19,10 @@ import {
   embedQuery,
   embedDocumentBatch,
   type GeminiEmbeddingConfig,
-} from "./gemini-embeddings.ts";
-import { VectorStore, getSessionsDbPath, getOrgDbPath, type SearchResult } from "./store.ts";
-import { findSessionFiles, extractSessionChunks } from "./session-indexer.ts";
-import { retrieve, type MergeStrategy } from "./retriever.ts";
+} from "./gemini-embeddings.js";
+import { VectorStore, getSessionsDbPath, getOrgDbPath, type SearchResult } from "./store.js";
+import { findSessionFiles, extractSessionChunks } from "./session-indexer.js";
+import { retrieve, type MergeStrategy } from "./retriever.js";
 
 // --- Config ---
 
