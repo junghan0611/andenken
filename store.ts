@@ -39,13 +39,11 @@ const TABLE_NAME = "session_chunks";
 /**
  * Default data directory for LanceDB indexes.
  * ANDENKEN_DATA env var overrides (e.g. for tests or alternate installs).
+ * Falls back to ~/repos/gh/andenken/data/ (standard install location).
  */
 export function getDataDir(): string {
   if (process.env.ANDENKEN_DATA) return process.env.ANDENKEN_DATA;
-
-  // Resolve relative to this file's location (andenken/data/)
-  const thisDir = path.dirname(new URL(import.meta.url).pathname);
-  return path.join(thisDir, "data");
+  return path.join(process.env.HOME ?? "", "repos", "gh", "andenken", "data");
 }
 
 export function getSessionsDbPath(): string {
