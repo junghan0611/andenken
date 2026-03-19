@@ -20,7 +20,7 @@ import {
   embedDocumentBatch,
   type GeminiEmbeddingConfig,
 } from "./gemini-embeddings.ts";
-import { VectorStore, type SearchResult } from "./store.ts";
+import { VectorStore, getSessionsDbPath, getOrgDbPath, type SearchResult } from "./store.ts";
 import { findSessionFiles, extractSessionChunks } from "./session-indexer.ts";
 import { retrieve, type MergeStrategy } from "./retriever.ts";
 
@@ -76,9 +76,8 @@ function dictcliExpand(query: string): string[] {
 
 // --- Paths ---
 
-const home = process.env.HOME ?? "";
-const sessionDbPath = path.join(home, ".pi", "agent", "memory", "sessions.lance");
-const orgDbPath = path.join(home, ".pi", "agent", "memory", "org.lance");
+const sessionDbPath = getSessionsDbPath();
+const orgDbPath = getOrgDbPath();
 
 // --- Commands ---
 

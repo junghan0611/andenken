@@ -17,7 +17,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { VectorStore } from "./store.ts";
+import { VectorStore, getSessionsDbPath } from "./store.ts";
 import {
   findSessionFiles,
   findSessionFilesBySource,
@@ -375,13 +375,7 @@ async function testGeminiEmbeddings() {
 async function testLiveSearch() {
   section("Live Search (existing DB)");
 
-  const dbPath = path.join(
-    process.env.HOME ?? "",
-    ".pi",
-    "agent",
-    "memory",
-    "sessions.lance",
-  );
+  const dbPath = getSessionsDbPath();
   if (!fs.existsSync(dbPath)) {
     skip("No existing DB at " + dbPath);
     return;
@@ -462,13 +456,7 @@ async function testSearchQuery(query: string) {
     return;
   }
 
-  const dbPath = path.join(
-    process.env.HOME ?? "",
-    ".pi",
-    "agent",
-    "memory",
-    "sessions.lance",
-  );
+  const dbPath = getSessionsDbPath();
   if (!fs.existsSync(dbPath)) {
     skip("No existing DB");
     return;

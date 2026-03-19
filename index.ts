@@ -76,15 +76,9 @@ function getGeminiConfig(dimensions?: 768 | 3072): GeminiEmbeddingConfig | null 
 // --- Extension ---
 
 export default function (pi: ExtensionAPI) {
+  const { getOrgDbPath } = await import("./store.ts");
   const sessionStore = new VectorStore(undefined, 3072);
-  const orgDbPath = path.join(
-    process.env.HOME ?? "",
-    ".pi",
-    "agent",
-    "memory",
-    "org.lance",
-  );
-  const orgStore = new VectorStore(orgDbPath, 768);
+  const orgStore = new VectorStore(getOrgDbPath(), 768);
 
   let sessionReady = false;
   let orgReady = false;

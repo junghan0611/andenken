@@ -36,6 +36,26 @@ export interface SearchResult {
 
 const TABLE_NAME = "session_chunks";
 
+/**
+ * Default data directory for LanceDB indexes.
+ * ANDENKEN_DATA env var overrides (e.g. for tests or alternate installs).
+ */
+export function getDataDir(): string {
+  if (process.env.ANDENKEN_DATA) return process.env.ANDENKEN_DATA;
+
+  // Resolve relative to this file's location (andenken/data/)
+  const thisDir = path.dirname(new URL(import.meta.url).pathname);
+  return path.join(thisDir, "data");
+}
+
+export function getSessionsDbPath(): string {
+  return path.join(getDataDir(), "sessions.lance");
+}
+
+export function getOrgDbPath(): string {
+  return path.join(getDataDir(), "org.lance");
+}
+
 export class VectorStore {
   private db: LanceDB.Connection | null = null;
   private table: LanceDB.Table | null = null;
@@ -44,9 +64,7 @@ export class VectorStore {
   private vectorDim: number;
 
   constructor(dbPath?: string, vectorDim: number = 3072) {
-    const home = process.env.HOME ?? "";
-    this.dbPath =
-      dbPath ?? path.join(home, ".pi", "agent", "memory", "sessions.lance");
+    this.dbPath = dbPath ?? getSessionsDbPath();
     this.vectorDim = vectorDim;
   }
 

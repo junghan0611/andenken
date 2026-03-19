@@ -18,7 +18,7 @@ import {
   DEFAULT_CONCURRENCY,
   type GeminiEmbeddingConfig,
 } from "./gemini-embeddings.ts";
-import { VectorStore } from "./store.ts";
+import { VectorStore, getSessionsDbPath, getOrgDbPath, getDataDir } from "./store.ts";
 import { findSessionFiles, extractSessionChunks } from "./session-indexer.ts";
 import { findOrgFiles, chunkOrgFile } from "./org-chunker.ts";
 
@@ -184,14 +184,7 @@ async function indexSessions(force: boolean) {
 
 async function indexOrg(force: boolean) {
   const config = getGeminiConfig(768);
-  const dbPath = path.join(
-    process.env.HOME ?? "",
-    ".pi",
-    "agent",
-    "memory",
-    "org.lance",
-  );
-  const store = new VectorStore(dbPath, 768);
+  const store = new VectorStore(getOrgDbPath(), 768);
   await store.init();
   if (force) await store.reset();
   await store.ensureTable();
@@ -276,9 +269,7 @@ async function compact(target: string) {
 
   for (const t of targets) {
     const dbPath =
-      t === "sessions"
-        ? path.join(process.env.HOME ?? "", ".pi", "agent", "memory", "sessions.lance")
-        : path.join(process.env.HOME ?? "", ".pi", "agent", "memory", "org.lance");
+      t === "sessions" ? getSessionsDbPath() : getOrgDbPath();
 
     if (!fs.existsSync(dbPath)) {
       console.log(`${t}: not found`);
@@ -318,7 +309,7 @@ async function status() {
   const sCount = await sessionStore.getCount();
   const sIndexed = await sessionStore.getIndexedFiles();
   const sFiles = findSessionFiles();
-  const sDbPath = path.join(process.env.HOME ?? "", ".pi", "agent", "memory", "sessions.lance");
+  const sDbPath = getSessionsDbPath();
   const sSize = fs.existsSync(sDbPath)
     ? execSync(`du -sh ${sDbPath}`).toString().split("\t")[0]
     : "N/A";
@@ -331,7 +322,7 @@ async function status() {
   );
   await sessionStore.close();
 
-  const orgDbPath = path.join(process.env.HOME ?? "", ".pi", "agent", "memory", "org.lance");
+  const orgDbPath = getOrgDbPath();
   if (fs.existsSync(orgDbPath)) {
     const orgStore = new VectorStore(orgDbPath, 768);
     await orgStore.init();

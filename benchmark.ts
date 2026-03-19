@@ -346,7 +346,8 @@ async function fullBenchmark() {
   }
 
   const config = { apiKey, model: "gemini-embedding-2-preview", dimensions: 768 as const };
-  const dbPath = path.join(process.env.HOME ?? "", ".pi", "agent", "memory", "org.lance");
+  const { getOrgDbPath } = await import("./store.ts");
+  const dbPath = getOrgDbPath();
 
   if (!fs.existsSync(dbPath)) {
     console.log("⚠ Org index not found at", dbPath);
