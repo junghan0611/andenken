@@ -21,7 +21,7 @@ import {
   embedDocumentBatch,
   type GeminiEmbeddingConfig,
 } from "./gemini-embeddings.ts";
-import { VectorStore, getOrgDbPath } from "./store.ts";
+import { VectorStore, getOrgDbPath, type SearchResult } from "./store.ts";
 import {
   findSessionFiles,
   extractSessionChunks,
@@ -465,7 +465,7 @@ export default function (pi: ExtensionAPI) {
 
 // --- Helpers ---
 
-function formatResults(query: string, results: import("./store.ts").SearchResult[]) {
+function formatResults(query: string, results: SearchResult[]) {
   if (results.length === 0) {
     return {
       content: [{ type: "text" as const, text: `No results for: "${query}"` }],
