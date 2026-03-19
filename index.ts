@@ -26,7 +26,20 @@ import {
   findSessionFiles,
   extractSessionChunks,
 } from "./session-indexer.ts";
-import { retrieve, type RetrieverConfig } from "./retriever.ts";
+import { retrieve } from "./retriever.ts";
+
+// Re-declare minimal SearchResult to avoid jiti-incompatible import() type syntax
+interface SearchResult {
+  id: string;
+  text: string;
+  sessionFile: string;
+  project: string;
+  lineNumber: number;
+  timestamp: string;
+  role: string;
+  metadata: Record<string, string>;
+  score: number;
+}
 
 // --- dictcli expand (3층) ---
 
@@ -465,7 +478,7 @@ export default function (pi: ExtensionAPI) {
 
 // --- Helpers ---
 
-function formatResults(query: string, results: import("./store.ts").SearchResult[]) {
+function formatResults(query: string, results: SearchResult[]) {
   if (results.length === 0) {
     return {
       content: [{ type: "text" as const, text: `No results for: "${query}"` }],
