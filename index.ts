@@ -205,6 +205,8 @@ export default function (pi: ExtensionAPI) {
       "Use session_search when the user asks about past conversations, decisions, or context from other sessions.",
       "Use session_search when you need context that may have been discussed in a previous session.",
       "Prefer session_search over grep for finding past discussions — it understands meaning, not just keywords.",
+      "2-step search strategy: abstract queries ('what did I do last') miss concrete text. Read top-3 results, extract proper nouns/technical terms, then re-search with those specific keywords.",
+      "Anti-pattern: do NOT fall back to JSONL/grep when first search is sparse. Refine the query first using hints from initial results.",
     ],
     parameters: Type.Object({
       query: Type.String({
@@ -313,6 +315,7 @@ export default function (pi: ExtensionAPI) {
       "Use knowledge_search when the user asks about their notes, concepts, or knowledge base.",
       "Use knowledge_search for cross-lingual queries — Korean '보편' finds English-tagged 'universalism' notes.",
       "Prefer knowledge_search over denotecli for semantic/conceptual search. Use denotecli for exact title/tag matching.",
+      "If results are sparse, extract keywords from top results and re-search with more specific terms. Try dictcli expand for Korean→English term expansion.",
     ],
     parameters: Type.Object({
       query: Type.String({

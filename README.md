@@ -66,6 +66,7 @@ Each layer catches what the others miss. Together they never miss.
 - **Retrieval:** Weighted merge + RRF + temporal decay + MMR
 - **Chunking:** Org-aware 2-tier (heading + content)
 - **Query Expansion:** dictcli (personal vocabulary graph)
+- **Search Strategy:** 2-step refinement (abstract→concrete re-query)
 - **Runtime:** TypeScript (tsx)
 
 ## Why the Name
@@ -78,6 +79,14 @@ In Heidegger, *Geworfenheit* (thrownness) and *Andenken* (recollective thinking)
 이기상 (Lee Ki-sang), the foremost Korean translator of Heidegger, rendered *Andenken* as 뜻새김 — "engraving meaning through recollection." Three worlds meet in one word: Heidegger's German, Lee's Korean philosophy, and the essence of this project.
 
 → [Naming document](https://notes.junghanacs.com/botlog/20260319T110800.html) (Korean)
+
+## Changelog
+
+### 0.3.1 — 2-Step Search Strategy (2026-03-21)
+
+Abstract queries ("what did I do last") fail to match concrete text ("graph.edn outdated") in embedding space. The fix is not in code but in **agent behavior**: read top-3 results from the first search, extract proper nouns and technical terms, then re-search with those specific keywords. This pattern is now embedded in `promptGuidelines` for both `session_search` and `knowledge_search` tools.
+
+Reference: [[20260321T103138]] 시맨틱 서치 메타 쿼리 한계와 2단계 검색 전략
 
 ## Development
 
