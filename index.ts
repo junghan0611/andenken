@@ -311,14 +311,15 @@ export default function (pi: ExtensionAPI) {
     name: "knowledge_search",
     label: "Knowledge Search",
     description:
-      "Search the org-mode knowledge base (3000+ Denote notes) by meaning. Use for finding notes, concepts, references, meta-knowledge. Supports Korean and English queries.",
+      "Search the org-mode knowledge base (3000+ Denote notes) by meaning. Use for finding notes, concepts, references, meta-knowledge. Supports Korean and English queries. Korean morphological analysis (Kiwi) enriches BM25 indexing.",
     promptSnippet:
-      "Search org-mode knowledge base semantically — notes, concepts, references in Korean and English",
+      "Search org-mode knowledge base semantically — notes, concepts, references in Korean and English. Kiwi stems enrich BM25.",
     promptGuidelines: [
       "Use knowledge_search when the user asks about their notes, concepts, or knowledge base.",
       "Use knowledge_search for cross-lingual queries — Korean '보편' finds English-tagged 'universalism' notes.",
       "Prefer knowledge_search over denotecli for semantic/conceptual search. Use denotecli for exact title/tag matching.",
       "If results are sparse, extract keywords from top results and re-search with more specific terms. Try dictcli expand for Korean→English term expansion.",
+      "Korean verb stems are auto-indexed via dictcli stem (Kiwi). Searching '설계' matches notes containing '설계했다', '설계하는' etc. Compound nouns like '검색증강생성' are decomposed into '검색'+'증강'+'생성'.",
     ],
     parameters: Type.Object({
       query: Type.String({
