@@ -249,9 +249,10 @@ export default function (pi: ExtensionAPI) {
         ? `${params.query} ${expanded.join(" ")}`
         : params.query;
 
+      const candidates = Math.min(limit * 4, 200); // openclaw candidateMultiplier
       const queryVector = await embedQuery(enrichedQuery, gemini);
-      const vectorResults = await sessionStore.search(queryVector, limit * 2);
-      const ftsResults = await sessionStore.fullTextSearch(params.query, limit * 2);
+      const vectorResults = await sessionStore.search(queryVector, candidates);
+      const ftsResults = await sessionStore.fullTextSearch(params.query, candidates);
 
       let results = await retrieve(params.query, vectorResults, ftsResults, {
         vectorWeight: 0.7,
@@ -274,9 +275,10 @@ export default function (pi: ExtensionAPI) {
       if (orgReady && (results.length < 3 || topScore < 0.005)) {
         const orgGemini = getGeminiConfig(768);
         if (orgGemini) {
+          const orgCandidates = Math.min(limit * 4, 200);
           const orgQueryVector = await embedQuery(enrichedQuery, orgGemini);
-          const orgVec = await orgStore.search(orgQueryVector, limit, 0.05);
-          const orgFts = await orgStore.fullTextSearch(params.query, limit);
+          const orgVec = await orgStore.search(orgQueryVector, orgCandidates, 0.05);
+          const orgFts = await orgStore.fullTextSearch(params.query, orgCandidates);
           const orgResults = await retrieve(params.query, orgVec, orgFts, {
             vectorWeight: 0.7,
             bm25Weight: 0.3,
@@ -356,9 +358,10 @@ export default function (pi: ExtensionAPI) {
         ? `${params.query} ${expanded.join(" ")}`
         : params.query;
 
+      const candidates = Math.min(limit * 4, 200); // openclaw candidateMultiplier
       const queryVector = await embedQuery(enrichedQuery, gemini);
-      const vectorResults = await orgStore.search(queryVector, limit * 2, 0.05);
-      const ftsResults = await orgStore.fullTextSearch(params.query, limit * 2);
+      const vectorResults = await orgStore.search(queryVector, candidates, 0.05);
+      const ftsResults = await orgStore.fullTextSearch(params.query, candidates);
 
       const results = await retrieve(params.query, vectorResults, ftsResults, {
         vectorWeight: 0.7,

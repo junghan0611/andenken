@@ -27,6 +27,83 @@ import { findOrgFiles, chunkOrgFile } from "./org-chunker.js";
 const ORG_FOLDERS = new Set(["meta", "bib", "notes", "journal", "botlog"]);
 const CONCURRENCY = parseInt(process.env.INDEX_CONCURRENCY ?? "", 10) || DEFAULT_CONCURRENCY;
 const DB_WRITE_BATCH = 2000; // flush to DB every N chunks → fewer fragments
+const CANDIDATE_MULTIPLIER = 4; // openclaw pattern: fetch 4x candidates for better MMR
+
+// --- Org Manifest (mtime-based stale detection) ---
+
+interface OrgFileManifest {
+  files: Record<string, { mtimeMs: number; size: number; chunks: number }>;
+  lastUpdated: string;
+}
+
+function getManifestPath(): string {
+  return path.join(getDataDir(), "org-manifest.json");
+}
+
+function loadManifest(): OrgFileManifest {
+  const p = getManifestPath();
+  try {
+    return JSON.parse(fs.readFileSync(p, "utf-8"));
+  } catch {
+    return { files: {}, lastUpdated: "" };
+  }
+}
+
+function saveManifest(manifest: OrgFileManifest): void {
+  manifest.lastUpdated = new Date().toISOString();
+  fs.writeFileSync(getManifestPath(), JSON.stringify(manifest, null, 2));
+}
+
+function getStaleFiles(
+  files: string[],
+  indexed: Set<string>,
+  manifest: OrgFileManifest,
+): { newFiles: string[]; staleFiles: string[] } {
+  const newFiles: string[] = [];
+  const staleFiles: string[] = [];
+  const hasManifest = Object.keys(manifest.files).length > 0;
+
+  for (const f of files) {
+    if (!indexed.has(f)) {
+      newFiles.push(f);
+      continue;
+    }
+    // No manifest yet — skip stale check, just initialize manifest on this run
+    if (!hasManifest) continue;
+
+    // Check mtime against manifest
+    const entry = manifest.files[f];
+    if (!entry) {
+      // New to manifest but already indexed — just record, don't re-index
+      continue;
+    }
+    try {
+      const stat = fs.statSync(f);
+      if (stat.mtimeMs > entry.mtimeMs) {
+        staleFiles.push(f);
+      }
+    } catch {
+      // File may have been deleted
+    }
+  }
+
+  return { newFiles, staleFiles };
+}
+
+/**
+ * Initialize manifest from current files without re-indexing.
+ * Records mtime/size for all files so next run can detect changes.
+ */
+function initManifest(files: string[]): OrgFileManifest {
+  const manifest: OrgFileManifest = { files: {}, lastUpdated: "" };
+  for (const f of files) {
+    try {
+      const stat = fs.statSync(f);
+      manifest.files[f] = { mtimeMs: stat.mtimeMs, size: stat.size, chunks: 0 };
+    } catch { /* skip */ }
+  }
+  return manifest;
+}
 
 function getGeminiConfig(dimensions?: 768 | 3072): GeminiEmbeddingConfig {
   const apiKey = process.env.GOOGLE_AI_API_KEY ?? process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY ?? "";
@@ -192,13 +269,28 @@ async function indexOrg(force: boolean) {
   const allFiles = findOrgFiles();
   const files = allFiles.filter((f) => ORG_FOLDERS.has(getOrgFolder(f)));
   const indexed = force ? new Set<string>() : await store.getIndexedFiles();
-  const toIndex = files.filter((f) => !indexed.has(f));
+  let manifest = force ? { files: {}, lastUpdated: "" } as OrgFileManifest : loadManifest();
+  const hasManifest = Object.keys(manifest.files).length > 0;
+
+  // Stale detection: new files + mtime-changed files
+  const { newFiles, staleFiles } = force
+    ? { newFiles: files, staleFiles: [] as string[] }
+    : getStaleFiles(files, indexed, manifest);
+  const toIndex = [...newFiles, ...staleFiles];
+
+  // First run without manifest: initialize from all indexed files
+  if (!hasManifest && !force) {
+    console.log(`Manifest not found — initializing from ${files.length} files...`);
+    manifest = initManifest(files);
+    saveManifest(manifest);
+    console.log(`✅ Manifest initialized. Next run will detect stale files.`);
+  }
 
   console.log(
-    `Org: ${files.length} files (${allFiles.length} total) | indexed: ${indexed.size} | to index: ${toIndex.length} | concurrency: ${CONCURRENCY}`,
+    `Org: ${files.length} files (${allFiles.length} total) | indexed: ${indexed.size} | new: ${newFiles.length} | stale: ${staleFiles.length} | concurrency: ${CONCURRENCY}`,
   );
   if (toIndex.length === 0) {
-    console.log("✅ All org files indexed.");
+    console.log("✅ All org files indexed and up-to-date.");
     await store.close();
     return;
   }
@@ -209,6 +301,13 @@ async function indexOrg(force: boolean) {
   const tasks = toIndex.map((file) => async () => {
     const content = fs.readFileSync(file, "utf-8");
     const chunks = chunkOrgFile(content, file);
+
+    // Update manifest even for 0-chunk files (prevents re-checking)
+    try {
+      const stat = fs.statSync(file);
+      manifest.files[file] = { mtimeMs: stat.mtimeMs, size: stat.size, chunks: chunks.length };
+    } catch { /* file may have been deleted */ }
+
     if (chunks.length === 0) {
       progress.tick(0);
       return;
@@ -247,6 +346,9 @@ async function indexOrg(force: boolean) {
 
   await runWithConcurrency(tasks, CONCURRENCY);
   await wb.flush(); // final flush
+
+  // Save manifest for next incremental run
+  saveManifest(manifest);
 
   try {
     await store.createFtsIndex();
