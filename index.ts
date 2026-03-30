@@ -440,8 +440,9 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // --- /new 시 현재 세션 자동 인덱싱 ---
-  // 현재 세션 JSONL은 계속 추가되므로 무조건 재인덱싱 (delete→insert)
+  // --- /new 시 세션 자동 인덱싱 ---
+  // 전략: 미인덱싱 + 최근 1시간 수정 세션 재인덱싱
+  // 24시간 → 1시간으로 축소 (반복 재인덱싱 방지)
   pi.on("session_before_switch", async (event, ctx) => {
     if (event.reason !== "new") return;
 
@@ -449,48 +450,48 @@ export default function (pi: ExtensionAPI) {
     if (!gemini || !sessionReady) return;
 
     try {
-      // 현재 세션 파일 찾기 (가장 최근 수정된 것)
-      const sessionFile = ctx.sessionManager.getSessionFile?.() ?? "";
       const files = findSessionFiles();
-
-      // 현재 세션 + 미인덱싱 세션 모두 처리
       const indexed = await sessionStore.getIndexedFiles();
-      const toIndex = files.filter((f) => !indexed.has(f));
 
-      // 현재 세션은 이미 인덱싱됐더라도 재인덱싱 (내용이 늘어났으므로)
-      const currentSessionFiles = sessionFile
-        ? files.filter((f) => f.includes(sessionFile.split("/").pop()?.split(".")[0] ?? "___"))
-        : [];
-      const reindexFiles = [...new Set([...toIndex, ...currentSessionFiles])];
+      // 1. 미인덱싱 세션
+      const newFiles = files.filter((f) => !indexed.has(f));
 
-      // 최근 수정된 세션도 재인덱싱 (긴 세션이 업데이트됐을 수 있음)
+      // 2. 최근 1시간 내 수정된 세션 (현재 세션 포함)
       const now = Date.now();
-      const recentFiles = files.filter((f) => {
+      const ONE_HOUR = 60 * 60 * 1000;
+      const recentlyModified = files.filter((f) => {
+        if (!indexed.has(f)) return false; // 이미 newFiles에 포함
         try {
-          const stat = fs.statSync(f);
-          return now - stat.mtimeMs < 24 * 60 * 60 * 1000; // 24시간 내 수정
+          return now - fs.statSync(f).mtimeMs < ONE_HOUR;
         } catch { return false; }
       });
-      const allToIndex = [...new Set([...reindexFiles, ...recentFiles])];
 
-      if (allToIndex.length > 0) {
-        ctx.ui.notify(`🧠 ${allToIndex.length}개 세션 인덱싱 중...`, "info");
-        for (const file of allToIndex) {
-          const chunks = await extractSessionChunks(file);
-          if (chunks.length === 0) continue;
-          const vectors = await embedDocumentBatch(
-            chunks.map((c) => c.text),
-            gemini,
-          );
-          // addChunks는 delete-before-insert (중복 방지)
-          await sessionStore.addChunks(
-            chunks.map((c, j) => ({ ...c, vector: vectors[j] })),
-          );
-        }
-        try { await sessionStore.createFtsIndex(); } catch {}
-        const total = await sessionStore.getCount();
-        ctx.ui.notify(`✅ 인덱싱 완료. ${total} chunks.`, "info");
+      const allToIndex = [...new Set([...newFiles, ...recentlyModified])];
+      if (allToIndex.length === 0) return;
+
+      // 최대 20개로 제한 (/new가 느려지지 않도록)
+      const batch = allToIndex.slice(0, 20);
+      const skipped = allToIndex.length - batch.length;
+
+      ctx.ui.notify(
+        `🧠 ${batch.length}개 세션 인덱싱 중...${skipped > 0 ? ` (${skipped}개 다음으로)` : ""}`,
+        "info",
+      );
+
+      for (const file of batch) {
+        const chunks = await extractSessionChunks(file);
+        if (chunks.length === 0) continue;
+        const vectors = await embedDocumentBatch(
+          chunks.map((c) => c.text),
+          gemini,
+        );
+        await sessionStore.addChunks(
+          chunks.map((c, j) => ({ ...c, vector: vectors[j] })),
+        );
       }
+      try { await sessionStore.createFtsIndex(); } catch {}
+      const total = await sessionStore.getCount();
+      ctx.ui.notify(`✅ 인덱싱 완료. ${total} chunks.`, "info");
     } catch (err) {
       ctx.ui.notify(
         `⚠ 인덱싱 실패: ${err instanceof Error ? err.message : String(err)}`,
