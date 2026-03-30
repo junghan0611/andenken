@@ -28,10 +28,33 @@ index.ts                  # pi-extension entry point
 ## Key Design Decisions
 
 - **Hybrid retrieval:** Vector similarity (0.7) + BM25 full-text (0.3), not vector-only
+- **candidateMultiplier:** 4x initial candidate pool (openclaw pattern) for better MMR quality
 - **Temporal decay:** Exponential with configurable half-life (14 days sessions, 90 days org)
 - **MMR diversity:** Jaccard-based re-ranking to avoid redundant results
-- **Cross-lingual:** dictcli expands Korean queries to English tags automatically
+- **Incremental indexing:** mtime-based stale detection via JSON manifest for org files
+- **Korean BM25:** Particle stripping with dual-emit (original + stem). 25 particles from openclaw.
+- **Cross-lingual:** dictcli expands Korean queries to English tags automatically (Layer 3)
 - **Multi-runtime:** Same core serves pi (extension), Claude Code (skill), OpenCode (skill)
+
+## Three-Layer Principle
+
+andenken is Layer 1 of a 3-layer search architecture:
+
+```
+Layer 1 (andenken): Embedding + BM25 — maximize retrieval quality independently
+Layer 2 (denotecli dblock): Meta classification — structural graph traversal
+Layer 3 (dictcli): Personal vocabulary + morphological analysis
+```
+
+**Layer 1 does NOT mix Layer 2/3 concerns.**
+- Korean particle stripping (25 patterns) = Layer 1 (BM25 preprocessing)
+- Kiwi morphological analysis = Layer 3 (dictcli `stem` — planned)
+- dictcli `expand` = Layer 3 (personal word map)
+- andenken stays language-agnostic; Korean-specific heavy lifting goes to dictcli
+
+Future: dictcli `stem` (Kiwi-based) will decompose Korean verb conjugations
+("설계했다" → "설계") and compound nouns ("검색증강생성" → "검색"+"증강"+"생성").
+andenken Layer 1 consumes dictcli stem output without owning the Kiwi dependency.
 
 ## Issue Tracking
 
