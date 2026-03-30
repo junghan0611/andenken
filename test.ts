@@ -339,12 +339,12 @@ async function testGeminiEmbeddings() {
   try {
     // Single query embed
     const qVec = await embedQuery("NixOS 설정 방법", config);
-    assert(qVec.length === 3072, `embedQuery: ${qVec.length} dims`);
+    assert(qVec.length === 768, `embedQuery: ${qVec.length} dims`);
     assert(typeof qVec[0] === "number", "embedQuery: values are numbers");
 
     // Single document embed
     const dVec = await embedDocument("NixOS 설정 가이드 문서", config);
-    assert(dVec.length === 3072, `embedDocument: ${dVec.length} dims`);
+    assert(dVec.length === 768, `embedDocument: ${dVec.length} dims`);
 
     // Batch embed
     const batch = await embedDocumentBatch(
@@ -352,7 +352,7 @@ async function testGeminiEmbeddings() {
       config,
     );
     assert(batch.length === 3, `embedBatch: ${batch.length} vectors`);
-    assert(batch[0].length === 3072, `embedBatch[0]: ${batch[0].length} dims`);
+    assert(batch[0].length === 768, `embedBatch[0]: ${batch[0].length} dims`);
 
     // Empty batch
     const empty = await embedDocumentBatch([], config);
@@ -381,7 +381,7 @@ async function testLiveSearch() {
     return;
   }
 
-  const store = new VectorStore(dbPath, 3072);
+  const store = new VectorStore(dbPath, 768);
   await store.init();
 
   const count = await store.getCount();
@@ -464,7 +464,7 @@ async function testSearchQuery(query: string) {
 
   const { embedQuery } = await import("./gemini-embeddings.js");
   const config = { apiKey, model: "gemini-embedding-2-preview" };
-  const store = new VectorStore(dbPath, 3072);
+  const store = new VectorStore(dbPath, 768);
   await store.init();
 
   try {

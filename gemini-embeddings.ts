@@ -4,7 +4,7 @@
  * Ported from OpenClaw embeddings-gemini.ts pattern.
  * Uses native Google AI API (not openai-compatible) for:
  * - taskType: RETRIEVAL_QUERY vs RETRIEVAL_DOCUMENT
- * - outputDimensionality: Matryoshka 768/1536/3072
+ * - outputDimensionality: fixed 768d (cost control)
  * - batchEmbedContents: native batch API
  *
  * Concurrency & retry patterns from OpenClaw manager-embedding-ops.ts:
@@ -15,7 +15,7 @@
 
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 const DEFAULT_MODEL = "gemini-embedding-2-preview";
-const VALID_DIMENSIONS = [768, 1536, 3072] as const;
+const VALID_DIMENSIONS = [768] as const;
 const MAX_BATCH_SIZE = 100; // Gemini batch limit
 
 // Retry config (OpenClaw pattern, tuned for Tier 1 RPM limits)

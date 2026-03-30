@@ -1,5 +1,5 @@
 /**
- * Unified Indexer — Sessions (3072d) + Org (768d)
+ * Unified Indexer — Sessions (768d) + Org (768d)
  *
  * Parallel embedding + batched DB writes to minimize LanceDB fragments.
  *
@@ -164,7 +164,7 @@ function initManifest(files: string[]): OrgFileManifest {
   return manifest;
 }
 
-function getGeminiConfig(dimensions?: 768 | 3072): GeminiEmbeddingConfig {
+function getGeminiConfig(dimensions: 768 = 768): GeminiEmbeddingConfig {
   const apiKey = process.env.GOOGLE_AI_API_KEY ?? process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY ?? "";
   if (!apiKey) throw new Error("GEMINI_API_KEY (or GOOGLE_AI_API_KEY / GOOGLE_API_KEY) not set");
   return {
@@ -265,11 +265,11 @@ class Progress {
   }
 }
 
-// --- Session Indexing (3072d) ---
+// --- Session Indexing (768d) ---
 
 async function indexSessions(force: boolean) {
   const config = getGeminiConfig();
-  const store = new VectorStore(undefined, 3072);
+  const store = new VectorStore(undefined, 768);
   await store.init();
   if (force) await store.reset();
   await store.ensureTable();
@@ -487,7 +487,7 @@ async function compact(target: string) {
 async function status() {
   const { execSync } = await import("node:child_process");
 
-  const sessionStore = new VectorStore(undefined, 3072);
+  const sessionStore = new VectorStore(undefined, 768);
   await sessionStore.init();
   const sCount = await sessionStore.getCount();
   const sIndexed = await sessionStore.getIndexedFiles();
@@ -501,7 +501,7 @@ async function status() {
     ? fs.readdirSync(sFragDir).length
     : 0;
   console.log(
-    `🧠 Sessions (3072d): ${sCount} chunks | ${sIndexed.size}/${sFiles.length} files | ${sFrags} frags | ${sSize}`,
+    `🧠 Sessions (768d): ${sCount} chunks | ${sIndexed.size}/${sFiles.length} files | ${sFrags} frags | ${sSize}`,
   );
   await sessionStore.close();
 

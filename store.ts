@@ -62,7 +62,7 @@ export class VectorStore {
   private dbPath: string;
   private vectorDim: number;
 
-  constructor(dbPath?: string, vectorDim: number = 3072) {
+  constructor(dbPath?: string, vectorDim: number = 768) {
     this.dbPath = dbPath ?? getSessionsDbPath();
     this.vectorDim = vectorDim;
   }

@@ -69,7 +69,7 @@ Each layer catches what the others miss. Together they reconstruct a *bunshin*'s
 
 ## Stack
 
-- **Embeddings:** Gemini Embedding 2 (768d org, 3072d sessions)
+- **Embeddings:** Gemini Embedding 2 (768d unified — cost control)
 - **Vector Store:** LanceDB (serverless, file-based)
 - **Retrieval:** Weighted merge + RRF + temporal decay + MMR
 - **Chunking:** Org-aware 2-tier (heading + content)

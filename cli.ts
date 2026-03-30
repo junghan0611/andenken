@@ -27,7 +27,7 @@ import { retrieve, expandQueryForBM25, type MergeStrategy } from "./retriever.js
 // --- Config ---
 
 function getGeminiConfig(
-  dimensions?: 768 | 3072,
+  dimensions: 768 = 768,
 ): GeminiEmbeddingConfig | null {
   const apiKey =
     process.env.GOOGLE_AI_API_KEY ?? process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY ?? "";
@@ -88,7 +88,7 @@ async function searchSessions(query: string, limit: number, source?: string): Pr
     process.exit(1);
   }
 
-  const store = new VectorStore(sessionDbPath, 3072);
+  const store = new VectorStore(sessionDbPath, 768);
   await store.init();
 
   const expanded = dictcliExpand(query);
@@ -210,7 +210,7 @@ async function searchKnowledge(query: string, limit: number): Promise<void> {
 }
 
 async function status(): Promise<void> {
-  const sessionStore = new VectorStore(sessionDbPath, 3072);
+  const sessionStore = new VectorStore(sessionDbPath, 768);
   let sessionCount = 0;
   let sessionFiles = 0;
   try {
@@ -259,7 +259,7 @@ async function reindex(force: boolean): Promise<void> {
     process.exit(1);
   }
 
-  const store = new VectorStore(sessionDbPath, 3072);
+  const store = new VectorStore(sessionDbPath, 768);
   await store.init();
 
   if (force) await store.reset();

@@ -100,7 +100,7 @@ function loadEnvKey(): string {
   return "";
 }
 
-function getGeminiConfig(dimensions?: 768 | 3072): GeminiEmbeddingConfig | null {
+function getGeminiConfig(dimensions: 768 = 768): GeminiEmbeddingConfig | null {
   const apiKey = loadEnvKey();
   if (!apiKey) return null;
   return {
@@ -113,7 +113,7 @@ function getGeminiConfig(dimensions?: 768 | 3072): GeminiEmbeddingConfig | null 
 // --- Extension ---
 
 export default function (pi: ExtensionAPI) {
-  const sessionStore = new VectorStore(undefined, 3072);
+  const sessionStore = new VectorStore(undefined, 768);
   const orgDbPath = getOrgDbPath();
   const orgStore = new VectorStore(orgDbPath, 768);
 
