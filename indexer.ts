@@ -12,6 +12,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { execSync } from "node:child_process";
 import {
   embedDocumentBatch,
   runWithConcurrency,
@@ -25,6 +26,64 @@ import { findOrgFiles, chunkOrgFile } from "./org-chunker.js";
 // --- Config ---
 
 const ORG_FOLDERS = new Set(["meta", "bib", "notes", "journal", "botlog"]);
+
+// --- dictcli stem integration (Layer 3 → Layer 1 bridge) ---
+
+function getDictcliDir(): string {
+  return path.join(process.env.HOME ?? "", "repos", "gh", "dictcli");
+}
+
+/**
+ * Batch stem Korean text via dictcli stem --batch (Kiwi morphological analysis).
+ * Input: array of text strings. Output: array of stem arrays.
+ * JVM starts once (~2.7s), then processes at ~160 lines/sec.
+ * Falls back to empty arrays if dictcli unavailable.
+ */
+function batchStem(texts: string[]): string[][] {
+  if (texts.length === 0) return [];
+  const dictcliDir = getDictcliDir();
+  const runSh = path.join(dictcliDir, "run.sh");
+  if (!fs.existsSync(runSh)) {
+    console.log("⚠ dictcli not found — skipping stem enrichment");
+    return texts.map(() => []);
+  }
+
+  try {
+    const input = texts.join("\n");
+    const output = execSync(`./run.sh stem --batch`, {
+      input,
+      cwd: dictcliDir,
+      timeout: 300_000, // 5 min for large batches
+      maxBuffer: 50 * 1024 * 1024, // 50MB
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    // Parse JSON lines: each line is ["stem1", "stem2", ...]
+    const lines = output.trim().split("\n");
+    return lines.map((line: string) => {
+      try {
+        const parsed = JSON.parse(line);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [];
+      }
+    });
+  } catch (err) {
+    console.log(`⚠ dictcli stem failed: ${err instanceof Error ? err.message.slice(0, 80) : String(err)}`);
+    return texts.map(() => []);
+  }
+}
+
+/**
+ * Enrich chunk text with stems for BM25.
+ * Appends stems as searchable tokens without altering the original text.
+ * Vector embedding uses original text; FTS index gets stems too.
+ */
+function enrichTextWithStems(text: string, stems: string[]): string {
+  if (stems.length === 0) return text;
+  // Append stems as a searchable block at the end
+  return `${text}\n[stems: ${stems.join(" ")}]`;
+}
 const CONCURRENCY = parseInt(process.env.INDEX_CONCURRENCY ?? "", 10) || DEFAULT_CONCURRENCY;
 const DB_WRITE_BATCH = 2000; // flush to DB every N chunks → fewer fragments
 const CANDIDATE_MULTIPLIER = 4; // openclaw pattern: fetch 4x candidates for better MMR
@@ -295,37 +354,59 @@ async function indexOrg(force: boolean) {
     return;
   }
 
-  const progress = new Progress(toIndex.length, "Org");
-  const wb = new WriteBuffer(store, DB_WRITE_BATCH);
-
-  const tasks = toIndex.map((file) => async () => {
+  // --- Batch stem: collect all chunks first, then stem in one JVM call ---
+  console.log("Collecting chunks for stem enrichment...");
+  const fileChunks: Array<{ file: string; chunks: ReturnType<typeof chunkOrgFile> }> = [];
+  for (const file of toIndex) {
     const content = fs.readFileSync(file, "utf-8");
     const chunks = chunkOrgFile(content, file);
-
-    // Update manifest even for 0-chunk files (prevents re-checking)
+    // Update manifest even for 0-chunk files
     try {
       const stat = fs.statSync(file);
       manifest.files[file] = { mtimeMs: stat.mtimeMs, size: stat.size, chunks: chunks.length };
     } catch { /* file may have been deleted */ }
+    fileChunks.push({ file, chunks });
+  }
 
+  const allChunkTexts = fileChunks.flatMap(fc => fc.chunks.map(c => c.text));
+  console.log(`Stemming ${allChunkTexts.length} chunks via dictcli...`);
+  const allStems = batchStem(allChunkTexts);
+  console.log(`Stemming done.`);
+
+  // Map stems back to chunks
+  let stemIdx = 0;
+  const enrichedFileChunks = fileChunks.map(fc => ({
+    ...fc,
+    chunks: fc.chunks.map(c => {
+      const stems = allStems[stemIdx] ?? [];
+      stemIdx++;
+      return { ...c, enrichedText: enrichTextWithStems(c.text, stems) };
+    }),
+  }));
+
+  const totalChunks = enrichedFileChunks.reduce((sum, fc) => sum + fc.chunks.length, 0);
+  const progress = new Progress(enrichedFileChunks.length, "Org");
+  const wb = new WriteBuffer(store, DB_WRITE_BATCH);
+
+  const tasks = enrichedFileChunks.map(({ chunks }) => async () => {
     if (chunks.length === 0) {
       progress.tick(0);
       return;
     }
 
-    // Embed in batches of 100 (API limit)
+    // Embed in batches of 100 (API limit) — use ORIGINAL text for embeddings
     for (let b = 0; b < chunks.length; b += 100) {
       const batch = chunks.slice(b, b + 100);
       const vectors = await embedDocumentBatch(
-        batch.map((c) => c.text),
+        batch.map((c) => c.text), // original text for vector embedding
         config,
       );
 
       await wb.add(
         batch.map((c, j) => ({
           id: c.id,
-          text: c.text,
-          vector: vectors[j],
+          text: c.enrichedText, // stems-enriched text for FTS
+          vector: vectors[j],   // vector from original text
           sessionFile: c.filePath,
           project: c.folder,
           lineNumber: c.lineNumber,
