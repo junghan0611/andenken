@@ -77,6 +77,29 @@ Each layer catches what the others miss. Together they reconstruct a *bunshin*'s
 - **Search Strategy:** 2-step refinement (abstract→concrete re-query)
 - **Runtime:** TypeScript (tsx)
 
+## Multi-Harness Architecture
+
+Same core serves three agent harnesses:
+
+| | pi (extension) | Claude Code (CLI) | OpenCode (CLI) |
+|---|---|---|---|
+| **Interface** | `index.ts` registerTool | `cli.ts` search/knowledge | `cli.ts` search/knowledge |
+| **session_search** | ✅ tool | ✅ `search <query>` | ✅ `search <query>` |
+| **knowledge_search** | ✅ tool | ✅ `knowledge <query>` | ✅ `knowledge <query>` |
+| **dictcli expand** | ✅ auto | ✅ auto | ✅ auto |
+| **BM25 조사 제거** | ✅ | ✅ | ✅ |
+| **candidateMultiplier 4x** | ✅ | ✅ | ✅ |
+| **source filter (pi\|claude)** | ✅ | ✅ `--source` | ✅ `--source` |
+| **session→knowledge fallback** | ✅ auto | ✅ auto | ✅ auto |
+| **Kiwi stems (indexing)** | ✅ indexer | ✅ indexer | ✅ indexer |
+| **/new auto-indexing** | ✅ pi-only | — | — |
+| **status/reindex** | ✅ `/memory` | ✅ `status`/`reindex` | ✅ `status`/`reindex` |
+| **promptGuidelines** | ✅ Kiwi aware | — (no prompt) | — (no prompt) |
+
+Search pipeline is identical across all harnesses — same retriever, store, and embeddings.
+pi-only features (`/new` indexing, `session_start` init, promptGuidelines) are extension
+lifecycle hooks that CLI doesn't need.
+
 ## Why the Name
 
 `geworfen` — the human is thrown into the world.
