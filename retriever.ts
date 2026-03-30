@@ -225,6 +225,61 @@ export async function jinaRerank(
   }));
 }
 
+// --- Korean BM25 Query Preprocessing (Layer 1 optimization) ---
+// Ported from OpenClaw query-expansion.ts
+// Strips Korean trailing particles for better BM25 token matching.
+// Uses dual-emit: original token + stripped stem both included.
+// This is Layer 1 (embedding/BM25 preprocessing), NOT Layer 3 (dictcli).
+
+// Sorted by descending length for longest-match-first
+const KO_TRAILING_PARTICLES = [
+  // 2-syllable (longer first)
+  "에서", "으로", "에게", "한테", "처럼", "같이", "보다", "까지", "부터", "마다", "밖에", "대로",
+  // 1-syllable
+  "은", "는", "이", "가", "을", "를", "의", "에", "로", "와", "과", "도", "만",
+];
+
+function stripKoreanParticle(token: string): string | null {
+  for (const p of KO_TRAILING_PARTICLES) {
+    if (token.length > p.length && token.endsWith(p)) {
+      return token.slice(0, -p.length);
+    }
+  }
+  return null;
+}
+
+function isUsefulKoreanStem(stem: string): boolean {
+  // Prevent bogus 1-syllable stems: "논의" → "논" (bad)
+  if (/[\uac00-\ud7af]/.test(stem)) return stem.length >= 2;
+  // Keep ASCII stems: "API를" → "API" (good)
+  return /^[a-z0-9_]+$/i.test(stem);
+}
+
+/**
+ * Expand query for BM25: emit original tokens + Korean particle-stripped stems.
+ * Does NOT modify the vector query (Gemini handles Korean natively).
+ */
+export function expandQueryForBM25(query: string): string {
+  const tokens = query.split(/\s+/).filter(Boolean);
+  const expanded: string[] = [];
+  const seen = new Set<string>();
+
+  for (const token of tokens) {
+    if (!seen.has(token)) {
+      expanded.push(token);
+      seen.add(token);
+    }
+    // Dual emit: add stripped stem if different
+    const stem = stripKoreanParticle(token);
+    if (stem && isUsefulKoreanStem(stem) && !seen.has(stem)) {
+      expanded.push(stem);
+      seen.add(stem);
+    }
+  }
+
+  return expanded.join(" ");
+}
+
 // --- Full Pipeline ---
 
 export type MergeStrategy = "weighted" | "rrf";

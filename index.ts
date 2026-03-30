@@ -26,7 +26,7 @@ import {
   findSessionFiles,
   extractSessionChunks,
 } from "./session-indexer.js";
-import { retrieve } from "./retriever.js";
+import { retrieve, expandQueryForBM25 } from "./retriever.js";
 
 // Re-declare minimal SearchResult to avoid jiti-incompatible import() type syntax
 interface SearchResult {
@@ -252,7 +252,8 @@ export default function (pi: ExtensionAPI) {
       const candidates = Math.min(limit * 4, 200); // openclaw candidateMultiplier
       const queryVector = await embedQuery(enrichedQuery, gemini);
       const vectorResults = await sessionStore.search(queryVector, candidates);
-      const ftsResults = await sessionStore.fullTextSearch(params.query, candidates);
+      const bm25Query = expandQueryForBM25(params.query);
+      const ftsResults = await sessionStore.fullTextSearch(bm25Query, candidates);
 
       let results = await retrieve(params.query, vectorResults, ftsResults, {
         vectorWeight: 0.7,
@@ -278,7 +279,7 @@ export default function (pi: ExtensionAPI) {
           const orgCandidates = Math.min(limit * 4, 200);
           const orgQueryVector = await embedQuery(enrichedQuery, orgGemini);
           const orgVec = await orgStore.search(orgQueryVector, orgCandidates, 0.05);
-          const orgFts = await orgStore.fullTextSearch(params.query, orgCandidates);
+          const orgFts = await orgStore.fullTextSearch(expandQueryForBM25(params.query), orgCandidates);
           const orgResults = await retrieve(params.query, orgVec, orgFts, {
             vectorWeight: 0.7,
             bm25Weight: 0.3,
@@ -361,7 +362,8 @@ export default function (pi: ExtensionAPI) {
       const candidates = Math.min(limit * 4, 200); // openclaw candidateMultiplier
       const queryVector = await embedQuery(enrichedQuery, gemini);
       const vectorResults = await orgStore.search(queryVector, candidates, 0.05);
-      const ftsResults = await orgStore.fullTextSearch(params.query, candidates);
+      const bm25Query = expandQueryForBM25(params.query);
+      const ftsResults = await orgStore.fullTextSearch(bm25Query, candidates);
 
       const results = await retrieve(params.query, vectorResults, ftsResults, {
         vectorWeight: 0.7,
