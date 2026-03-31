@@ -232,7 +232,7 @@ export default function (pi: ExtensionAPI) {
       // Lazy init
       if (!sessionReady) {
         const gemini = getGeminiConfig();
-        if (!gemini) throw new Error("GOOGLE_AI_API_KEY / GEMINI_API_KEY not set.");
+        if (!gemini) throw new Error("GEMINI_API_KEY not set");
         try {
           await sessionStore.init();
           sessionReady = true;
@@ -241,7 +241,7 @@ export default function (pi: ExtensionAPI) {
         }
       }
       const gemini = getGeminiConfig();
-      if (!gemini) throw new Error("GOOGLE_AI_API_KEY not set.");
+      if (!gemini) throw new Error("GEMINI_API_KEY not set");
 
       const limit = params.limit ?? 10;
 
@@ -343,7 +343,7 @@ export default function (pi: ExtensionAPI) {
           throw new Error("Org knowledge base not indexed. Run: ./run.sh index:org");
         }
         const gemini = getGeminiConfig(768);
-        if (!gemini) throw new Error("GOOGLE_AI_API_KEY / GEMINI_API_KEY not set.");
+        if (!gemini) throw new Error("GEMINI_API_KEY not set");
         try {
           await orgStore.init();
           orgReady = true;
@@ -352,7 +352,7 @@ export default function (pi: ExtensionAPI) {
         }
       }
       const gemini = getGeminiConfig(768);
-      if (!gemini) throw new Error("GOOGLE_AI_API_KEY not set.");
+      if (!gemini) throw new Error("GEMINI_API_KEY not set");
 
       const limit = params.limit ?? 10;
 
@@ -416,7 +416,7 @@ export default function (pi: ExtensionAPI) {
         const force = parts.includes("--force");
         const gemini = getGeminiConfig();
         if (!gemini) {
-          ctx.ui.notify("GOOGLE_AI_API_KEY not set.", "error");
+          ctx.ui.notify("GEMINI_API_KEY not set", "error");
           return;
         }
 

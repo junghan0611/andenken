@@ -84,7 +84,7 @@ const orgDbPath = getOrgDbPath();
 async function searchSessions(query: string, limit: number, source?: string): Promise<void> {
   const gemini = getGeminiConfig();
   if (!gemini) {
-    console.error(JSON.stringify({ error: "GOOGLE_AI_API_KEY not set" }));
+    console.error(JSON.stringify({ error: "GEMINI_API_KEY not set" }));
     process.exit(1);
   }
 
@@ -170,7 +170,7 @@ async function searchKnowledge(query: string, limit: number): Promise<void> {
 
   const gemini = getGeminiConfig(768);
   if (!gemini) {
-    console.error(JSON.stringify({ error: "GOOGLE_AI_API_KEY not set" }));
+    console.error(JSON.stringify({ error: "GEMINI_API_KEY not set" }));
     process.exit(1);
   }
 
@@ -255,7 +255,7 @@ async function status(): Promise<void> {
 async function reindex(force: boolean): Promise<void> {
   const gemini = getGeminiConfig();
   if (!gemini) {
-    console.error(JSON.stringify({ error: "GOOGLE_AI_API_KEY not set" }));
+    console.error(JSON.stringify({ error: "GEMINI_API_KEY not set" }));
     process.exit(1);
   }
 
