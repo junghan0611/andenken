@@ -30,7 +30,7 @@ export const DEFAULT_CONCURRENCY = 2;
 // Free tier: 1,500 RPM. Paid tier: 3,000 RPM.
 // With batch size 100, each batch = 1 request.
 // MIN_REQUEST_INTERVAL_MS ensures we never exceed RPM.
-const MIN_REQUEST_INTERVAL_MS = 200; // 300 RPM max (conservative)
+const MIN_REQUEST_INTERVAL_MS = 3000; // 20 RPM max — safe for Free tier TPM limits
 let _lastRequestTime = 0;
 
 async function rateLimit(): Promise<void> {
