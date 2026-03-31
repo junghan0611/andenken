@@ -131,9 +131,24 @@ export class VectorStore {
   }
 
   /**
+   * Delete all chunks for a specific file.
+   * Used by WriteBuffer to pre-clean before batched inserts.
+   */
+  async deleteByFile(filePath: string): Promise<void> {
+    await this.ensureTable();
+    if (!this.table) return;
+    try {
+      await this.table.delete(`sessionFile = "${filePath.replace(/"/g, '\\"')}"`);
+    } catch {
+      // Table might be empty or filter syntax issue — safe to ignore
+    }
+  }
+
+  /**
    * Add chunks with their embeddings.
    * Safe: deletes existing chunks for the same file before inserting,
    * preventing duplicates on re-indexing.
+   * Used by index.ts (pi extension) where single-file batches are common.
    */
   async addChunks(
     chunks: Array<{
@@ -155,12 +170,32 @@ export class VectorStore {
     // Delete existing chunks for this file (prevent duplicates)
     const file = chunks[0].sessionFile;
     if (file) {
-      try {
-        await this.table!.delete(`sessionFile = "${file.replace(/"/g, '\\"')}"`);
-      } catch {
-        // Table might be empty or filter syntax issue — safe to ignore
-      }
+      await this.deleteByFile(file);
     }
+
+    await this.addChunksRaw(chunks);
+  }
+
+  /**
+   * Add chunks without deleting existing ones.
+   * Used by WriteBuffer after explicit pre-deletion.
+   */
+  async addChunksRaw(
+    chunks: Array<{
+      id: string;
+      text: string;
+      vector: number[];
+      sessionFile: string;
+      project: string;
+      lineNumber: number;
+      timestamp: string;
+      role: string;
+      source?: string;
+      metadata: Record<string, string>;
+    }>,
+  ): Promise<void> {
+    await this.ensureTable();
+    if (chunks.length === 0) return;
 
     const rows = chunks.map((c) => ({
       id: c.id,

@@ -17,6 +17,8 @@ import {
   embedDocumentBatch,
   runWithConcurrency,
   DEFAULT_CONCURRENCY,
+  getApiStats,
+  resetApiStats,
   type GeminiEmbeddingConfig,
 } from "./gemini-embeddings.js";
 import { VectorStore, getSessionsDbPath, getOrgDbPath, getDataDir } from "./store.js";
@@ -197,6 +199,7 @@ interface PendingRecord {
 class WriteBuffer {
   private buffer: PendingRecord[] = [];
   private flushed = 0;
+  private deletedFiles = new Set<string>(); // track files already cleaned
 
   constructor(
     private store: VectorStore,
@@ -204,6 +207,14 @@ class WriteBuffer {
   ) {}
 
   async add(records: PendingRecord[]) {
+    // Pre-delete old chunks for each new file before buffering
+    // This ensures no duplicates even when flush batches span multiple files
+    for (const r of records) {
+      if (r.sessionFile && !this.deletedFiles.has(r.sessionFile)) {
+        await this.store.deleteByFile(r.sessionFile);
+        this.deletedFiles.add(r.sessionFile);
+      }
+    }
     this.buffer.push(...records);
     if (this.buffer.length >= this.batchSize) {
       await this.flush();
@@ -212,7 +223,7 @@ class WriteBuffer {
 
   async flush() {
     if (this.buffer.length === 0) return;
-    await this.store.addChunks(this.buffer);
+    await this.store.addChunksRaw(this.buffer); // skip per-file delete (already done)
     this.flushed += this.buffer.length;
     this.buffer = [];
   }
@@ -311,7 +322,9 @@ async function indexSessions(force: boolean) {
     await store.createFtsIndex();
   } catch {}
   const total = await store.getCount();
+  const stats = getApiStats();
   console.log(progress.summary());
+  console.log(`💰 API: ${stats.calls} calls, ~${(stats.estimatedTokens / 1000).toFixed(0)}K tokens, ~$${stats.estimatedCostUSD.toFixed(3)}`);
   console.log(`Total in DB: ${total}`);
   await store.close();
 }
@@ -385,6 +398,19 @@ async function indexOrg(force: boolean) {
   }));
 
   const totalChunks = enrichedFileChunks.reduce((sum, fc) => sum + fc.chunks.length, 0);
+
+  // Pre-flight cost estimate
+  const totalChars = allChunkTexts.reduce((sum, t) => sum + t.length, 0);
+  const estTokens = Math.ceil(totalChars / 2.5);
+  const estCost = (estTokens / 1_000_000) * 0.20;
+  const estBatches = Math.ceil(totalChunks / 100);
+  console.log(`💰 Pre-flight: ${totalChunks} chunks, ${estBatches} API calls, ~${(estTokens / 1000).toFixed(0)}K tokens, ~$${estCost.toFixed(3)}`);
+  if (estCost > 1.0) {
+    console.log(`⚠️  Estimated cost > $1. Use Ctrl+C to abort.`);
+    await new Promise(r => setTimeout(r, 5000)); // 5s grace period
+  }
+  resetApiStats();
+
   const progress = new Progress(enrichedFileChunks.length, "Org");
   const wb = new WriteBuffer(store, DB_WRITE_BATCH);
 
@@ -435,7 +461,9 @@ async function indexOrg(force: boolean) {
     await store.createFtsIndex();
   } catch {}
   const total = await store.getCount();
+  const orgStats = getApiStats();
   console.log(progress.summary());
+  console.log(`💰 API: ${orgStats.calls} calls, ~${(orgStats.estimatedTokens / 1000).toFixed(0)}K tokens, ~$${orgStats.estimatedCostUSD.toFixed(3)}`);
   console.log(`Total in DB: ${total}`);
   await store.close();
 }

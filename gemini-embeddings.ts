@@ -23,8 +23,48 @@ const RETRY_MAX_ATTEMPTS = 5;
 const RETRY_BASE_DELAY_MS = 2000;
 const RETRY_MAX_DELAY_MS = 30000;
 
-// Concurrency config — Tier 1 safe (preview model RPM ~20-30)
+// Concurrency config — Tier 1 safe
 export const DEFAULT_CONCURRENCY = 2;
+
+// Rate limiting — respect Gemini API RPM limits
+// Free tier: 1,500 RPM. Paid tier: 3,000 RPM.
+// With batch size 100, each batch = 1 request.
+// MIN_REQUEST_INTERVAL_MS ensures we never exceed RPM.
+const MIN_REQUEST_INTERVAL_MS = 200; // 300 RPM max (conservative)
+let _lastRequestTime = 0;
+
+async function rateLimit(): Promise<void> {
+  const now = Date.now();
+  const elapsed = now - _lastRequestTime;
+  if (elapsed < MIN_REQUEST_INTERVAL_MS) {
+    await sleep(MIN_REQUEST_INTERVAL_MS - elapsed);
+  }
+  _lastRequestTime = Date.now();
+}
+
+// --- API call tracking (cost transparency) ---
+let _apiCallCount = 0;
+let _apiTokenEstimate = 0;
+const CHARS_PER_TOKEN_ESTIMATE = 2.5; // conservative for Korean-heavy content
+
+export function getApiStats() {
+  return {
+    calls: _apiCallCount,
+    estimatedTokens: _apiTokenEstimate,
+    estimatedCostUSD: (_apiTokenEstimate / 1_000_000) * 0.20,
+  };
+}
+
+export function resetApiStats() {
+  _apiCallCount = 0;
+  _apiTokenEstimate = 0;
+}
+
+function trackApiCall(texts: string[]) {
+  _apiCallCount++;
+  const chars = texts.reduce((sum, t) => sum + t.length, 0);
+  _apiTokenEstimate += Math.ceil(chars / CHARS_PER_TOKEN_ESTIMATE);
+}
 
 export type TaskType = "RETRIEVAL_QUERY" | "RETRIEVAL_DOCUMENT";
 
@@ -167,6 +207,8 @@ export async function embedDocumentBatch(
       }),
     };
 
+    await rateLimit();
+    trackApiCall(batch);
     const res = await fetchWithRetry(
       url,
       {
@@ -194,6 +236,8 @@ async function embedSingle(
   taskType: TaskType,
   config: GeminiEmbeddingConfig,
 ): Promise<number[]> {
+  await rateLimit();
+  trackApiCall([text]);
   const model = config.model ?? DEFAULT_MODEL;
   const url = `${GEMINI_BASE_URL}/models/${model}:embedContent`;
 

@@ -19,6 +19,8 @@ import { execSync } from "node:child_process";
 import {
   embedQuery,
   embedDocumentBatch,
+  getApiStats,
+  resetApiStats,
   type GeminiEmbeddingConfig,
 } from "./gemini-embeddings.js";
 import { VectorStore, getOrgDbPath } from "./store.js";
@@ -410,94 +412,78 @@ export default function (pi: ExtensionAPI) {
           { deliverAs: "followUp" },
         );
       } else if (sub === "reindex") {
-        if (!sessionReady) {
-          ctx.ui.notify("Session memory not initialized.", "warning");
-          return;
-        }
+        const target = parts[1] || "sessions";
+        const force = parts.includes("--force");
         const gemini = getGeminiConfig();
         if (!gemini) {
           ctx.ui.notify("GOOGLE_AI_API_KEY not set.", "error");
           return;
         }
-        const force = parts.includes("--force");
-        ctx.ui.notify("🧠 Starting session index...", "info");
-        try {
-          await indexSessions(sessionStore, gemini, ctx, force);
-          const count = await sessionStore.getCount();
-          ctx.ui.setStatus("semantic-memory", `🧠 ${count} chunks indexed`);
-          ctx.ui.notify(`✅ Done. ${count} chunks.`, "info");
-        } catch (err) {
+
+        if (target === "sessions" || target === "all") {
+          if (!sessionReady) {
+            ctx.ui.notify("Session memory not initialized.", "warning");
+            return;
+          }
+          resetApiStats();
+          ctx.ui.notify("🧠 Starting session index...", "info");
+          try {
+            await indexSessions(sessionStore, gemini, ctx, force);
+            const count = await sessionStore.getCount();
+            const stats = getApiStats();
+            ctx.ui.setStatus("semantic-memory", `🧠 ${count} chunks indexed`);
+            ctx.ui.notify(
+              `✅ Sessions done. ${count} chunks. 💰 ${stats.calls} API calls, ~$${stats.estimatedCostUSD.toFixed(3)}`,
+              "info",
+            );
+          } catch (err) {
+            ctx.ui.notify(
+              `❌ Failed: ${err instanceof Error ? err.message : String(err)}`,
+              "error",
+            );
+          }
+        }
+
+        if (target === "org" || target === "all") {
+          ctx.ui.notify("📚 Org 인덱싱은 CLI로 실행하세요: cd ~/repos/gh/andenken && npx tsx indexer.ts org", "info");
+          ctx.ui.notify("📚 Kiwi stem 에리치먼트 때문에 pi 내부에서 실행 불가 (JVM 필요)", "info");
+        }
+
+        if (target !== "sessions" && target !== "org" && target !== "all") {
           ctx.ui.notify(
-            `❌ Failed: ${err instanceof Error ? err.message : String(err)}`,
-            "error",
+            "Usage: /memory reindex [sessions|org|all] [--force]",
+            "warning",
           );
         }
       } else {
         ctx.ui.notify(
-          "Usage: /memory [status | search <query> | reindex [--force]]",
+          "Usage: /memory [status | search <query> | reindex [sessions|org|all] [--force]]",
           "warning",
         );
       }
     },
   });
 
-  // --- /new 시 세션 자동 인덱싱 ---
-  // 전략: 미인덱싱 + 최근 1시간 수정 세션 재인덱싱
-  // 24시간 → 1시간으로 축소 (반복 재인덱싱 방지)
+  // --- /new 시 자동 인덱싱 비활성화 ---
+  // 비용 투명성을 위해 명시적 /memory reindex만 사용.
+  // 이전: session_before_switch에서 최대 20세션 자동 임베딩 (숨은 API 콜)
+  // 변경: /new 시 미인덱싱 세션 수만 알려주고, 인덱싱은 사용자 명시 실행
   pi.on("session_before_switch", async (event, ctx) => {
     if (event.reason !== "new") return;
-
-    const gemini = getGeminiConfig();
-    if (!gemini || !sessionReady) return;
+    if (!sessionReady) return;
 
     try {
       const files = findSessionFiles();
       const indexed = await sessionStore.getIndexedFiles();
-
-      // 1. 미인덱싱 세션
-      const newFiles = files.filter((f) => !indexed.has(f));
-
-      // 2. 최근 1시간 내 수정된 세션 (현재 세션 포함)
-      const now = Date.now();
-      const ONE_HOUR = 60 * 60 * 1000;
-      const recentlyModified = files.filter((f) => {
-        if (!indexed.has(f)) return false; // 이미 newFiles에 포함
-        try {
-          return now - fs.statSync(f).mtimeMs < ONE_HOUR;
-        } catch { return false; }
-      });
-
-      const allToIndex = [...new Set([...newFiles, ...recentlyModified])];
-      if (allToIndex.length === 0) return;
-
-      // 최대 20개로 제한 (/new가 느려지지 않도록)
-      const batch = allToIndex.slice(0, 20);
-      const skipped = allToIndex.length - batch.length;
-
-      ctx.ui.notify(
-        `🧠 ${batch.length}개 세션 인덱싱 중...${skipped > 0 ? ` (${skipped}개 다음으로)` : ""}`,
-        "info",
-      );
-
-      for (const file of batch) {
-        const chunks = await extractSessionChunks(file);
-        if (chunks.length === 0) continue;
-        const vectors = await embedDocumentBatch(
-          chunks.map((c) => c.text),
-          gemini,
-        );
-        await sessionStore.addChunks(
-          chunks.map((c, j) => ({ ...c, vector: vectors[j] })),
+      const newCount = files.filter((f) => !indexed.has(f)).length;
+      if (newCount > 0) {
+        ctx.ui.notify(
+          `🧠 ${newCount}개 미인덱싱 세션. /memory reindex 로 인덱싱하세요.`,
+          "info",
         );
       }
-      try { await sessionStore.createFtsIndex(); } catch {}
-      const total = await sessionStore.getCount();
-      ctx.ui.notify(`✅ 인덱싱 완료. ${total} chunks.`, "info");
-    } catch (err) {
-      ctx.ui.notify(
-        `⚠ 인덱싱 실패: ${err instanceof Error ? err.message : String(err)}`,
-        "warning",
-      );
+    } catch {
+      // silent
     }
   });
 
