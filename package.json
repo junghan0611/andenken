@@ -11,7 +11,11 @@
     "test:integration": "tsx test.ts integration",
     "test:search": "tsx test.ts search",
     "bench": "tsx benchmark.ts",
-    "bench:dry": "tsx benchmark.ts dry"
+    "bench:dry": "tsx benchmark.ts dry",
+    "doctor": "tsx doctor.ts",
+    "golden": "tsx golden-queries.ts",
+    "golden:compare": "tsx golden-queries.ts --compare",
+    "golden:json": "tsx golden-queries.ts --json"
   },
   "pi": {
     "extensions": ["./dist/index.js"]
