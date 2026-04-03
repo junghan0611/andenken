@@ -26,10 +26,11 @@ Usage: ./run.sh <command> [args]
   setup                       npm install
 
 === Indexing ===
-  index:sessions [--force]    Index pi + Claude Code sessions (3072d)
+  index:sessions [--force]    Index pi + Claude Code sessions (768d)
   index:org [--force]         Index org-mode knowledge base (768d)
   compact [sessions|org]      Defragment LanceDB
   status                      Show index statistics
+  estimate [sessions|org|all] Dry-run cost estimate before indexing
 
 === Search ===
   search <query> [--limit N]  Search sessions
@@ -105,6 +106,8 @@ case "${1:-help}" in
     echo ""
     cd "$SCRIPT_DIR" && npx tsx indexer.ts status 2>/dev/null || echo "  (indexer not available)"
     ;;
+  estimate)
+    shift; load_env; cd "$SCRIPT_DIR" && npx tsx estimate.ts "${1:-all}" ;;
 
   *)
     echo "Unknown: $1"; help; exit 1 ;;

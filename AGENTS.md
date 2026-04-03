@@ -56,24 +56,77 @@ Future: dictcli `stem` (Kiwi-based) will decompose Korean verb conjugations
 ("설계했다" → "설계") and compound nouns ("검색증강생성" → "검색"+"증강"+"생성").
 andenken Layer 1 consumes dictcli stem output without owning the Kiwi dependency.
 
-## Issue Tracking
-
-This project uses **br** (beads_rust) for issue tracking.
-
-```bash
-br ready              # Find available work
-br show <id>          # View issue details
-br update <id> --status in_progress  # Claim work
-br close <id>         # Complete work
-br sync --flush-only  # Export JSONL (git commit separately)
-```
-
 ## Environment
 
 ```bash
-GOOGLE_AI_API_KEY    # or GEMINI_API_KEY — required for embeddings
+GEMINI_API_KEY    # preferred
+GOOGLE_AI_API_KEY # also accepted
+GOOGLE_API_KEY    # also accepted
 ```
 
 Index locations:
 - `~/repos/gh/andenken/data/sessions.lance`
 - `~/repos/gh/andenken/data/org.lance`
+
+## Safe Incremental Sync Policy
+
+For day-to-day operation, treat semantic memory indexing as a **throttled incremental sync**, not as an occasional brute-force rebuild.
+
+### Mandatory operator checks
+
+Before cross-host memory work, explicitly verify:
+
+```bash
+cat ~/.current-device
+TZ='Asia/Seoul' date '+%Y%m%dT%H%M%S'
+```
+
+Assume the normal direction is:
+- **build on thinkpad**
+- **rsync org index to oracle**
+- **run oracle sessions incrementally on oracle**
+
+### Local-first / Oracle-second rule
+
+- `org` should be indexed on **thinkpad first** and then copied to oracle with `rsync`
+- `oracle` should usually embed **sessions only**
+- avoid rebuilding the same `org` corpus on both machines
+
+### Cost-safety rules
+
+- prefer **incremental** indexing; avoid `--force` unless explicitly approved
+- always inspect **pre-flight** cost before `org` indexing
+- if estimated cost is **>$1**, stop and reconfirm with the user
+- keep `INDEX_CONCURRENCY=1`
+- rely on the built-in request throttling; do not optimize for peak throughput
+
+### Practical finding from production use
+
+The dangerous failure mode was **not** vector dimensionality alone. The real risks were:
+- repeated force rebuilds
+- duplicate rebuilds across local + oracle
+- project-level spending cap sharing
+- large stale sets after interrupted `org` runs
+
+### Important caveat: interrupted org runs
+
+`org` incremental indexing uses manifest + mtime tracking.
+If an `org` run is interrupted before manifest save completes, the next run may see a **large stale set** again.
+Therefore:
+- do not assume a small `new` count means a cheap run
+- trust the actual pre-flight chunk/call/cost estimate
+
+### Recommended workflow
+
+1. run cost/status inspection first
+2. sync local sessions incrementally
+3. sync local org incrementally
+4. rsync `org.lance` + `org-manifest.json` to oracle
+5. sync oracle sessions incrementally
+6. report actual cost/time from the `💰 API:` lines
+
+### Tooling
+
+- human/project CLI: `./run.sh`
+- agent workflow: `memory-sync` skill
+- cost dry-run: `./run.sh estimate all`
