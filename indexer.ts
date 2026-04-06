@@ -545,9 +545,23 @@ async function status() {
     const oFrags = fs.existsSync(oFragDir)
       ? fs.readdirSync(oFragDir).length
       : 0;
+
+    // Manifest-based stale detection for accurate status
+    const manifest = loadManifest();
+    const { newFiles, staleFiles } = getStaleFiles(oFiles, oIndexed, manifest);
+    const manifestEntries = Object.keys(manifest.files).length;
+    const oFileSet = new Set(oFiles);
+    const deletedCount = Object.keys(manifest.files).filter((f) => !oFileSet.has(f)).length;
+
     console.log(
       `📚 Org (768d): ${oCount} chunks | ${oIndexed.size}/${oFiles.length} files | ${oFrags} frags | ${oSize}`,
     );
+    console.log(
+      `   ↳ manifest: ${manifestEntries} entries | new: ${newFiles.length} | stale: ${staleFiles.length} | deleted: ${deletedCount} | to-index: ${newFiles.length + staleFiles.length}`,
+    );
+    if (manifest.lastUpdated) {
+      console.log(`   ↳ last indexed: ${manifest.lastUpdated}`);
+    }
     await orgStore.close();
   } else {
     console.log("📚 Org: not indexed yet");
