@@ -68,6 +68,29 @@ Index locations:
 - `~/repos/gh/andenken/data/sessions.lance`
 - `~/repos/gh/andenken/data/org.lance`
 
+## Cross-Repo Responsibility
+
+andenken is the **logic and verification provider**. It does not own execution or cost.
+
+| Role | Owner |
+|------|-------|
+| Logic, analysis, verification | andenken (this repo) |
+| Embedding execution, cost bearing | agent-config |
+| Final approval for code changes | agent-config (or Hih) |
+
+### Commit discipline
+
+- **Verify before commit.** Run the changed code, confirm output, then commit.
+- Analysis and fix proposals are welcome. But code changes require agent-config approval before committing.
+- Incident: `de5fbe0` was committed before verification (2026-04-07). The fix was correct, but the process was wrong.
+
+### Scope verification
+
+Even when numbers are precise, the *scope* can be wrong. Always cross-check:
+- What does "indexed" mean here — manifest entries or LanceDB rows?
+- What does "new" mean — not in manifest, or not in LanceDB?
+- Are stale files included in the count?
+
 ## Safe Incremental Sync Policy
 
 For day-to-day operation, treat semantic memory indexing as a **throttled incremental sync**, not as an occasional brute-force rebuild.
@@ -115,6 +138,15 @@ If an `org` run is interrupted before manifest save completes, the next run may 
 Therefore:
 - do not assume a small `new` count means a cheap run
 - trust the actual pre-flight chunk/call/cost estimate
+
+**Manifest checkpoint (TODO):** Currently the manifest is saved only at the end of a full run.
+If a run is interrupted at 380/542 files, all 542 are retried on next run.
+LanceDB pre-delete prevents duplicate chunks, but wasted API cost remains.
+A periodic checkpoint (e.g., every 50 files) would reduce re-work after interruption.
+
+**Production observation (2026-04-07):** bash timeout (1200s) caused interruption at
+380/542 → manifest not saved → full 542 retry on re-run. Actual cost was $0.702
+(pre-flight estimate matched exactly). Checkpoint would have saved ~30% of retry cost.
 
 ### Recommended workflow
 
