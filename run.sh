@@ -46,6 +46,7 @@ Usage: ./run.sh <command> [args]
   test:search "query"         Live search test
 
 === Benchmark ===
+  golden [--db session|org]   Golden queries search quality test
   bench                       Full benchmark (needs API)
   bench:dry                   Dry run
 
@@ -95,6 +96,10 @@ case "${1:-help}" in
     load_env; cd "$SCRIPT_DIR" && npx tsx test.ts integration ;;
   test:search)
     shift; load_env; cd "$SCRIPT_DIR" && npx tsx test.ts search "$@" ;;
+
+  # === Golden Queries ===
+  golden)
+    shift; load_env; cd "$SCRIPT_DIR" && npx tsx golden-queries.ts "$@" ;;
 
   # === Bench ===
   bench)
