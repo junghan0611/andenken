@@ -178,12 +178,78 @@ A periodic checkpoint (e.g., every 50 files) would reduce re-work after interrup
 ./run.sh verify all              # confirm clean
 ```
 
-**Relationship to golden queries**: `verify` checks structural integrity (duplicates, orphans, counts). Golden queries (`npm run golden`) check *search quality* (does query X return expected file Y in top-N?). Both are needed; they test different layers.
+### Search Quality Verification (Mandatory)
+
+Structural integrity (`verify`) is necessary but not sufficient.
+Embeddings exist to be *found*. After every indexing or cleanup operation,
+andenken **must** run search quality checks to confirm retrieval works.
+
+This is not optional code quality — it is the core obligation of a semantic memory system.
+
+#### 5-Point Search Quality Spec
+
+Delegate to a **different agent** (e.g., Sonnet via `delegate`) to avoid self-confirmation bias.
+The delegate runs these tests and reports pass/fail per item.
+
+**T1: Stale file re-indexing reflected**
+
+Sample 5 recently re-indexed files (stale in last run). Search by a unique snippet from each.
+Expect: file appears in top-10 results.
+
+```bash
+./run.sh knowledge "<unique phrase from file>" --limit 10
+# Check: expected file basename in results
+```
+
+**T2: Deleted/orphan files NOT in results**
+
+Pick 3 files removed by cleanup (orphans). Search by their distinctive keywords.
+Expect: the *exact file path* does NOT appear in results. (Renamed successors may appear — that's OK.)
+
+**T3: Dedup quality (MMR diversity)**
+
+Search for a file that previously had heavy duplicates.
+Expect: same file appears ≤2 times in top-10. If ≥3, MMR diversity is broken.
+
+**T4: Golden queries baseline**
+
+```bash
+npx tsx golden-queries.ts --db org
+```
+
+Expect: all queries PASS. Any regression from previous run = fail.
+
+**T5: Cross-lingual retrieval**
+
+Test the 3-layer pipeline (andenken → denotecli → dictcli):
+- Korean query → English-tagged note found (e.g., `보편 학문` → universalism/paideia)
+- Conjugated verb → stem match (e.g., `설계했다` → `설계`)
+- Compound concept → decomposed match (e.g., `존재사건` → Ereignis)
+
+#### Execution Protocol
+
+1. Collect test data: recent stale files, orphan paths, golden query list
+2. Write concrete queries + expected results table
+3. `delegate` to Sonnet with CWD=andenken, `source ~/.env.local`
+4. Sonnet reports per-test pass/fail table
+5. andenken interprets results: pass/fail judgment + root cause for failures
+6. Report to agent-config (or Hih)
+
+#### Relationship to structural verify
+
+| Layer | Tool | What it checks |
+|-------|------|----------------|
+| Structural | `./run.sh verify all` | Duplicates, orphans, manifest, fragments |
+| Search quality | This spec (5 tests) | Retrieval actually works after changes |
+| Golden baseline | `npx tsx golden-queries.ts` | Regression detection across runs |
+
+All three layers are required. Structural verify alone is not enough.
 
 **Who runs what**:
 - `verify`: andenken (after any indexing) or agent-config (post-sync check)
 - `cleanup`: agent-config only (modifies DB)
-- golden queries: andenken (search quality validation)
+- Search quality spec: andenken (delegated to Sonnet, mandatory after cleanup/major indexing)
+- Golden queries: andenken (search quality baseline)
 
 ### Tooling
 
