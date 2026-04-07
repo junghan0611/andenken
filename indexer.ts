@@ -411,11 +411,15 @@ async function indexOrg(force: boolean) {
   }
   resetApiStats();
 
+  const CHECKPOINT_INTERVAL = 50;
+  let filesProcessed = 0;
+
   const progress = new Progress(enrichedFileChunks.length, "Org");
   const wb = new WriteBuffer(store, DB_WRITE_BATCH);
 
   const tasks = enrichedFileChunks.map(({ chunks }) => async () => {
     if (chunks.length === 0) {
+      filesProcessed++;
       progress.tick(0);
       return;
     }
@@ -448,13 +452,20 @@ async function indexOrg(force: boolean) {
         })),
       );
     }
+    filesProcessed++;
     progress.tick(chunks.length);
+
+    // Periodic manifest checkpoint to reduce re-work after interruption
+    if (filesProcessed % CHECKPOINT_INTERVAL === 0) {
+      saveManifest(manifest);
+      console.log(`  📌 Manifest checkpoint at ${filesProcessed}/${enrichedFileChunks.length} files`);
+    }
   });
 
   await runWithConcurrency(tasks, CONCURRENCY);
   await wb.flush(); // final flush
 
-  // Save manifest for next incremental run
+  // Final manifest save
   saveManifest(manifest);
 
   try {
