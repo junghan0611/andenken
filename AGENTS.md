@@ -153,12 +153,42 @@ A periodic checkpoint (e.g., every 50 files) would reduce re-work after interrup
 1. run cost/status inspection first
 2. sync local sessions incrementally
 3. sync local org incrementally
-4. rsync `org.lance` + `org-manifest.json` to oracle
-5. sync oracle sessions incrementally
-6. report actual cost/time from the `💰 API:` lines
+4. **run `./run.sh verify all`** — confirm zero duplicates, orphans, ghost zone
+5. rsync `org.lance` + `org-manifest.json` to oracle
+6. sync oracle sessions incrementally
+7. report actual cost/time from the `💰 API:` lines
+
+### Post-indexing Verification
+
+"Indexing done" is not done. Verification must confirm:
+
+1. **No duplicates** — same chunk ID appearing multiple times
+2. **No orphans** — DB rows pointing to deleted/renamed files
+3. **No ghost zone** — files indexed in LanceDB but missing from manifest
+4. **Manifest clean** — no entries for files that don't exist on disk
+5. **Fragment health** — fragment count and total size reported
+
+```bash
+# Run after every indexing operation
+./run.sh verify all
+
+# Cleanup when verify reports issues
+./run.sh cleanup org --dry-run   # inspect first
+./run.sh cleanup org             # dedup + orphan + manifest repair + compact
+./run.sh verify all              # confirm clean
+```
+
+**Relationship to golden queries**: `verify` checks structural integrity (duplicates, orphans, counts). Golden queries (`npm run golden`) check *search quality* (does query X return expected file Y in top-N?). Both are needed; they test different layers.
+
+**Who runs what**:
+- `verify`: andenken (after any indexing) or agent-config (post-sync check)
+- `cleanup`: agent-config only (modifies DB)
+- golden queries: andenken (search quality validation)
 
 ### Tooling
 
 - human/project CLI: `./run.sh`
 - agent workflow: `memory-sync` skill
 - cost dry-run: `./run.sh estimate all`
+- integrity check: `./run.sh verify all`
+- cleanup: `./run.sh cleanup org [--dry-run]`

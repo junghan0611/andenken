@@ -138,7 +138,7 @@ export class VectorStore {
     await this.ensureTable();
     if (!this.table) return;
     try {
-      await this.table.delete(`sessionFile = "${filePath.replace(/"/g, '\\"')}"`);
+      await this.table.delete(`\`sessionFile\` = '${filePath.replace(/'/g, "''")}'`);
     } catch {
       // Table might be empty or filter syntax issue — safe to ignore
     }

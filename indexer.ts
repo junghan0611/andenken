@@ -579,6 +579,219 @@ async function status() {
   }
 }
 
+// --- Cleanup: dedup + orphan removal + manifest repair ---
+
+async function cleanup(target: string) {
+  const { execSync } = await import("node:child_process");
+  const dryRun = process.argv.includes("--dry-run");
+  const lancedb = await import("@lancedb/lancedb");
+
+  const targets = target === "all" ? ["sessions", "org"] : [target];
+
+  for (const t of targets) {
+    const dbPath = t === "sessions" ? getSessionsDbPath() : getOrgDbPath();
+    if (!fs.existsSync(dbPath)) { console.log(`${t}: not found`); continue; }
+
+    const sizeBefore = execSync(`du -sh ${dbPath}`).toString().split("\t")[0];
+    const db = await lancedb.connect(dbPath);
+    const table = await db.openTable("session_chunks");
+    const totalBefore = await table.countRows();
+
+    console.log(`\n=== ${t} Cleanup ${dryRun ? "(DRY-RUN)" : ""} ===`);
+    console.log(`Before: ${totalBefore.toLocaleString()} rows, ${sizeBefore}`);
+
+    // 1. Detect duplicates
+    const allRows = await table.query().select(["id", "sessionFile"]).limit(totalBefore + 1000).toArray();
+    const idCounts = new Map<string, number>();
+    for (const r of allRows) idCounts.set(r.id as string, (idCounts.get(r.id as string) ?? 0) + 1);
+    const dupIds = [...idCounts.entries()].filter(([, c]) => c > 1);
+    const extraRows = dupIds.reduce((sum, [, c]) => sum + (c - 1), 0);
+    console.log(`Duplicate IDs: ${dupIds.length.toLocaleString()} (${extraRows.toLocaleString()} extra rows)`);
+
+    // 2. Detect orphans (file not on disk)
+    const orphanFiles = new Set<string>();
+    for (const r of allRows) {
+      const sf = r.sessionFile as string;
+      if (!orphanFiles.has(sf) && !fs.existsSync(sf)) orphanFiles.add(sf);
+    }
+    const orphanRowCount = allRows.filter(r => orphanFiles.has(r.sessionFile as string)).length;
+    console.log(`Orphan files: ${orphanFiles.size} (${orphanRowCount.toLocaleString()} rows)`);
+
+    if (dryRun) {
+      console.log(`\n→ Dry-run complete. Use without --dry-run to execute.`);
+      continue;
+    }
+
+    // 3. Remove orphans
+    if (orphanFiles.size > 0) {
+      console.log(`Removing ${orphanFiles.size} orphan files from DB...`);
+      for (const f of orphanFiles) {
+        await table.delete(`\`sessionFile\` = '${f.replace(/'/g, "''")}'`);
+      }
+    }
+
+    // 4. Dedup: for each file with duplicates, delete all + re-read from allRows keeping first occurrence
+    if (dupIds.length > 0) {
+      // Group duplicate IDs by file
+      const dupFileSet = new Set<string>();
+      for (const r of allRows) {
+        const id = r.id as string;
+        if ((idCounts.get(id) ?? 0) > 1) dupFileSet.add(r.sessionFile as string);
+      }
+      console.log(`Dedup: re-inserting ${dupFileSet.size} files with duplicates...`);
+
+      for (const file of dupFileSet) {
+        if (orphanFiles.has(file)) continue; // already removed
+        // Get all rows for this file (with full data)
+        const fileRows = await table.query()
+          .where(`\`sessionFile\` = '${file.replace(/'/g, "''")}'`)
+          .limit(10000)
+          .toArray();
+
+        // Keep only unique IDs (first occurrence)
+        const seen = new Set<string>();
+        const unique = fileRows.filter(r => {
+          const id = r.id as string;
+          if (seen.has(id)) return false;
+          seen.add(id);
+          return true;
+        });
+
+        if (unique.length < fileRows.length) {
+          await table.delete(`\`sessionFile\` = '${file.replace(/'/g, "''")}'`);
+          if (unique.length > 0) {
+            await table.add(unique);
+          }
+        }
+      }
+    }
+
+    // 5. Manifest repair (org only)
+    if (t === "org") {
+      const manifest = loadManifest();
+      const oFiles = findOrgFiles().filter(f => ORG_FOLDERS.has(getOrgFolder(f)));
+      const oFileSet = new Set(oFiles);
+      let repaired = 0;
+
+      // Remove deleted files from manifest
+      for (const f of Object.keys(manifest.files)) {
+        if (!oFileSet.has(f)) {
+          delete manifest.files[f];
+          repaired++;
+        }
+      }
+
+      // Add ghost zone files (indexed but not in manifest)
+      const store = new VectorStore(dbPath, 768);
+      await store.init();
+      const indexed = await store.getIndexedFiles();
+      for (const f of oFiles) {
+        if (indexed.has(f) && !manifest.files[f]) {
+          try {
+            const stat = fs.statSync(f);
+            manifest.files[f] = { mtimeMs: stat.mtimeMs, size: stat.size, chunks: 0 };
+            repaired++;
+          } catch {}
+        }
+      }
+      await store.close();
+
+      if (repaired > 0) {
+        saveManifest(manifest);
+        console.log(`Manifest repaired: ${repaired} entries fixed`);
+      }
+    }
+
+    // 6. Compact
+    console.log(`Compacting...`);
+    await table.optimize({ cleanupOlderThan: new Date() });
+
+    const totalAfter = await table.countRows();
+    const sizeAfter = execSync(`du -sh ${dbPath}`).toString().split("\t")[0];
+    const fragDir = path.join(dbPath, "session_chunks.lance", "data");
+    const fragsAfter = fs.existsSync(fragDir) ? fs.readdirSync(fragDir).length : 0;
+    console.log(`After: ${totalAfter.toLocaleString()} rows, ${fragsAfter} frags, ${sizeAfter}`);
+    console.log(`Removed: ${(totalBefore - totalAfter).toLocaleString()} rows`);
+  }
+}
+
+// --- Verify: post-indexing integrity check ---
+
+async function verify(target: string) {
+  const { execSync } = await import("node:child_process");
+  let allPassed = true;
+  const fail = (msg: string) => { console.log(`  ❌ ${msg}`); allPassed = false; };
+  const pass = (msg: string) => { console.log(`  ✅ ${msg}`); };
+
+  const targets = target === "all" ? ["sessions", "org"] : [target];
+
+  for (const t of targets) {
+    const dbPath = t === "sessions" ? getSessionsDbPath() : getOrgDbPath();
+    if (!fs.existsSync(dbPath)) { console.log(`${t}: not found`); continue; }
+
+    console.log(`\n=== ${t} Verification ===`);
+    const store = new VectorStore(dbPath, 768);
+    await store.init();
+    const table = (store as any).table;
+    const count = await store.getCount();
+    const indexed = await store.getIndexedFiles();
+
+    // 1. Duplicate check
+    const allRows = await table.query().select(["id", "sessionFile"]).limit(count + 1000).toArray();
+    const idCounts = new Map<string, number>();
+    for (const r of allRows) idCounts.set(r.id as string, (idCounts.get(r.id as string) ?? 0) + 1);
+    const dupCount = [...idCounts.values()].filter(c => c > 1).length;
+    if (dupCount === 0) pass(`No duplicate IDs (${idCounts.size.toLocaleString()} unique)`);
+    else fail(`${dupCount} duplicate IDs found`);
+
+    // 2. Orphan check
+    const fileSet = new Set<string>();
+    for (const r of allRows) fileSet.add(r.sessionFile as string);
+    const orphans = [...fileSet].filter(f => !fs.existsSync(f));
+    if (orphans.length === 0) pass(`No orphan files (${fileSet.size} files all exist)`);
+    else fail(`${orphans.length} orphan files in DB`);
+
+    // 3. Row count sanity
+    if (allRows.length === count) pass(`Row count consistent: ${count.toLocaleString()}`);
+    else fail(`Row count mismatch: query=${allRows.length} vs count=${count}`);
+
+    // 4. Fragment report
+    const fragDir = path.join(dbPath, "session_chunks.lance", "data");
+    const frags = fs.existsSync(fragDir) ? fs.readdirSync(fragDir).length : 0;
+    const dbSize = execSync(`du -sh ${dbPath}`).toString().split("\t")[0];
+    pass(`${frags} fragments, ${dbSize}`);
+
+    // 5. Org-specific: manifest consistency
+    if (t === "org") {
+      const manifest = loadManifest();
+      const mEntries = Object.keys(manifest.files).length;
+      const oFiles = findOrgFiles().filter(f => ORG_FOLDERS.has(getOrgFolder(f)));
+      const oFileSet = new Set(oFiles);
+
+      // Deleted in manifest
+      const mDeleted = Object.keys(manifest.files).filter(f => !oFileSet.has(f));
+      if (mDeleted.length === 0) pass(`Manifest clean: no deleted entries`);
+      else fail(`${mDeleted.length} deleted files in manifest`);
+
+      // Ghost zone: indexed but not in manifest
+      const ghosts = oFiles.filter(f => indexed.has(f) && !manifest.files[f]);
+      if (ghosts.length === 0) pass(`No ghost zone (all indexed files in manifest)`);
+      else fail(`${ghosts.length} ghost zone files (indexed, not in manifest)`);
+
+      // 0-chunk noise: manifest has file, LanceDB doesn't
+      const zeroChunkNoise = oFiles.filter(f => !indexed.has(f) && manifest.files[f]?.chunks === 0);
+      pass(`0-chunk files: ${zeroChunkNoise.length} (not in DB, expected)`);
+
+      console.log(`  📊 manifest: ${mEntries} | indexed: ${indexed.size} | disk: ${oFiles.length}`);
+    }
+
+    await store.close();
+  }
+
+  console.log(allPassed ? "\n✅ All checks passed" : "\n⚠️  Some checks failed");
+  process.exitCode = allPassed ? 0 : 1;
+}
+
 // --- Main ---
 
 const args = process.argv.slice(2);
@@ -595,11 +808,20 @@ switch (cmd) {
   case "compact":
     await compact(args[1] ?? "all");
     break;
+  case "cleanup":
+    await cleanup(args[1] ?? "org");
+    break;
+  case "verify":
+    await verify(args[1] ?? "all");
+    break;
   case "status":
     await status();
     break;
   default:
-    console.log("Usage: npx tsx indexer.ts <sessions|org|compact|status> [--force]");
+    console.log("Usage: npx tsx indexer.ts <sessions|org|compact|cleanup|verify|status> [--force]");
     console.log("  INDEX_CONCURRENCY=2 npx tsx indexer.ts org --force");
     console.log("  npx tsx indexer.ts compact org    # defragment DB");
+    console.log("  npx tsx indexer.ts cleanup org    # dedup + orphan + manifest repair + compact");
+    console.log("  npx tsx indexer.ts cleanup org --dry-run");
+    console.log("  npx tsx indexer.ts verify all     # post-indexing integrity check");
 }

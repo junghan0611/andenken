@@ -29,6 +29,9 @@ Usage: ./run.sh <command> [args]
   index:sessions [--force]    Index pi + Claude Code sessions (768d)
   index:org [--force]         Index org-mode knowledge base (768d)
   compact [sessions|org]      Defragment LanceDB
+  cleanup [sessions|org]      Dedup + orphan removal + manifest repair + compact
+  cleanup [target] --dry-run  Dry-run (report only)
+  verify [sessions|org|all]   Post-indexing integrity check
   status                      Show index statistics
   estimate [sessions|org|all] Dry-run cost estimate before indexing
 
@@ -70,6 +73,10 @@ case "${1:-help}" in
     shift; load_env; cd "$SCRIPT_DIR" && npx tsx indexer.ts org "$@" ;;
   compact)
     shift; cd "$SCRIPT_DIR" && npx tsx indexer.ts compact "${1:-all}" ;;
+  cleanup)
+    shift; load_env; cd "$SCRIPT_DIR" && npx tsx indexer.ts cleanup "${1:-org}" "${@:2}" ;;
+  verify)
+    shift; load_env; cd "$SCRIPT_DIR" && npx tsx indexer.ts verify "${1:-all}" ;;
   status)
     cd "$SCRIPT_DIR" && npx tsx indexer.ts status ;;
 
