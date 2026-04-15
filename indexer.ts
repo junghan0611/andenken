@@ -49,17 +49,21 @@ function batchStem(texts: string[]): string[][] {
   }
 
   try {
-    const input = texts.join("\n");
+    // Flatten multiline chunks to single lines — batch protocol is line-delimited
+    const input = texts.map(t => t.replace(/\n/g, " ")).join("\n");
     const output = execSync(`./run.sh stem --batch`, {
       input,
       cwd: dictcliDir,
-      timeout: 300_000, // 5 min for large batches
+      timeout: 900_000, // 15 min for large batches (97K+ chunks @ ~160 lines/sec)
       maxBuffer: 50 * 1024 * 1024, // 50MB
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"],
     });
     // Parse JSON lines: each line is ["stem1", "stem2", ...]
     const lines = output.trim().split("\n");
+    if (lines.length !== texts.length) {
+      console.log(`⚠ stem line count mismatch: expected ${texts.length}, got ${lines.length}`);
+    }
     return lines.map((line: string) => {
       try {
         const parsed = JSON.parse(line);
@@ -418,9 +422,10 @@ async function indexOrg(force: boolean) {
       return;
     }
 
-    // Embed in batches of 100 (API limit) — use ORIGINAL text for embeddings
-    for (let b = 0; b < chunks.length; b += 100) {
-      const batch = chunks.slice(b, b + 100);
+    // Embed in batches — size from provider config (Gemini: 100 API limit, vLLM: larger)
+    const embedBatch = parseInt(process.env.ANDENKEN_EMBED_BATCH ?? "", 10) || 100;
+    for (let b = 0; b < chunks.length; b += embedBatch) {
+      const batch = chunks.slice(b, b + embedBatch);
       const vectors = await provider.embedDocumentBatch(
         batch.map((c) => c.text), // original text for vector embedding
       );
