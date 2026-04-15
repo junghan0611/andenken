@@ -99,7 +99,9 @@ export class GeminiProvider implements EmbeddingProvider {
 export interface VLLMProviderConfig {
   endpoint: string;    // e.g. "http://gpu2i:8000"
   model: string;       // e.g. "Qwen/Qwen3-Embedding-8B"
-  dimensions?: number; // override if model supports truncation
+  dimensions?: number; // expected native dimensions (for VectorStore init). NOT sent to API unless truncateDimensions is true.
+  /** If true, send dimensions param to API (for MRL/Matryoshka truncation). Default: false. */
+  truncateDimensions?: boolean;
   /** Instruction prefix for query embeddings (model-dependent) */
   queryInstruction?: string;
   /** Instruction prefix for document embeddings (model-dependent) */
@@ -124,7 +126,8 @@ export class VLLMProvider implements EmbeddingProvider {
   constructor(config: VLLMProviderConfig) {
     this.config = config;
     this._dimensions = config.dimensions ?? 0;
-    this._requestDimensions = config.dimensions !== undefined && config.dimensions > 0;
+    // Only send dimensions to API when explicitly requesting truncation (MRL)
+    this._requestDimensions = config.truncateDimensions === true && (config.dimensions ?? 0) > 0;
   }
 
   get dimensions(): number {
