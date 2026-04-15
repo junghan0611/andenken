@@ -89,6 +89,12 @@ ANDENKEN_VLLM_PRESET=ollama/qwen3-embedding:4b
 | **vLLM single** | localhost:18000 (tunnel) | 인덱싱/실험 |
 | **vLLM dual** | localhost:18000,18001 | 대량 인덱싱 |
 
+**양자화 차이 주의:**
+- vLLM (GPU): SafeTensors fp16 — 인덱싱용 풀 정밀도
+- ollama (thinkpad): GGUF Q4_K_M — 쿼리용 양자화
+- 동일 모델 + 동일 2560d. 실용적 차이 미미 (golden-queries로 검증 예정)
+- thinkpad: AMD Radeon 780M iGPU + Vulkan 가속
+
 ### SSH Tunnel (thinkpad → GPU 서버)
 
 thinkpad(192.168.10.x) ↔ gpu서버(192.168.2.x) 다른 서브넷 → SSH 터널 필수.
@@ -140,11 +146,47 @@ curl -s http://localhost:18001/v1/models | python3 -m json.tool | head -5
 - max-num-batched-tokens=16384에서 4B 모델 OOM → 8192가 안정
 - GeminiProvider stats는 글로벌 싱글턴 — bake-off에서 동시 비교 시 수정 필요
 
-### Bake-off 재인덱싱 상태
+### Bake-off 인덱싱 상태
 
-- `data/bakeoff-qwen4b/` — manifest checkpoint 보존
-- dual-GPU 준비 후 재시작 예정
-- 인덱싱 완료 후 golden-queries bake-off 실행
+- `data/bakeoff-qwen4b/org.lance` — **94,931 chunks, 2560d, err:0** (완료)
+- cleanup 진행 중 (tmux `cleanup` 세션) — 25K duplicate 제거
+- concurrency race condition이 원인 → cleanup으로 해결 가능
+
+### 다음 세션 첫 작업 (운영 전환 30분)
+
+```bash
+# 1. cleanup 완료 확인
+ANDENKEN_DATA=./data/bakeoff-qwen4b npx tsx indexer.ts verify org
+# → duplicate 0, orphan 0 확인
+
+# 2. golden-queries bake-off (Qwen3-4B vs Gemini 비교)
+ANDENKEN_PROVIDER=vllm \
+  ANDENKEN_VLLM_ENDPOINT=http://localhost:11434 \
+  ANDENKEN_VLLM_MODEL=qwen3-embedding:4b \
+  ANDENKEN_VLLM_PRESET="ollama/qwen3-embedding:4b" \
+  ANDENKEN_DATA=./data/bakeoff-qwen4b \
+  npx tsx golden-queries.ts --db org
+
+# 3. 품질 확인 후 운영 교체
+mv data/org.lance data/org.lance.gemini-768d-backup
+mv data/bakeoff-qwen4b/org.lance data/org.lance
+cp data/bakeoff-qwen4b/org-manifest.json data/org-manifest.json
+
+# 4. agent-config 환경변수 설정
+# ~/.env.local에 추가:
+#   ANDENKEN_PROVIDER=vllm
+#   ANDENKEN_VLLM_ENDPOINT=http://localhost:11434
+#   ANDENKEN_VLLM_MODEL=qwen3-embedding:4b
+#   ANDENKEN_VLLM_PRESET=ollama/qwen3-embedding:4b
+
+# 5. pi 재시작 → 완전한 로컬 시맨틱 검색
+```
+
+### 운영 전환 전 확인사항
+
+- golden-queries 8/8 PASS 필수 (Gemini 대비 품질 하락 없어야)
+- sessions 인덱스도 재구축 필요 (현재 768d → 2560d)
+- 양자화 차이 (ollama Q4 query vs vLLM fp16 index) 품질 영향 확인
 
 ### Bake-off Models
 
