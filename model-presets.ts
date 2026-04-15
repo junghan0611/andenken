@@ -68,6 +68,16 @@ export const MODEL_PRESETS: Record<string, ModelPreset> = {
     notes: "Same model, andenken-specific instruction. Compare with default in bake-off.",
   },
 
+  // --- Qwen3-Embedding via ollama (local notebook query) ---
+  "ollama/qwen3-embedding:4b": {
+    model: "qwen3-embedding:4b",
+    dimensions: 2560,
+    queryInstruction: "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery: ",
+    documentInstruction: "",
+    maxBatchSize: 32, // ollama: conservative for CPU/iGPU
+    notes: "Same model as Qwen/Qwen3-Embedding-4B but via ollama. For local query-time use.",
+  },
+
   // --- BAAI/bge-m3 ---
   "BAAI/bge-m3": {
     model: "BAAI/bge-m3",

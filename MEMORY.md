@@ -73,7 +73,21 @@ ANDENKEN_DATA=./data/bakeoff-qwen4b
 
 # Gemini (existing, fallback)
 GOOGLE_AI_API_KEY=xxx
+
+# ollama (thinkpad 로컬 쿼리용 — GPU 서버 없이도 검색 가능)
+ANDENKEN_PROVIDER=vllm
+ANDENKEN_VLLM_ENDPOINT=http://localhost:11434
+ANDENKEN_VLLM_MODEL=qwen3-embedding:4b
+ANDENKEN_VLLM_PRESET=ollama/qwen3-embedding:4b
 ```
+
+### 운영 모드 3가지
+
+| 모드 | endpoint | 용도 |
+|------|----------|------|
+| **ollama (로컬)** | localhost:11434 | 일상 쿼리 — 터널 불필요, 즉시 응답 |
+| **vLLM single** | localhost:18000 (tunnel) | 인덱싱/실험 |
+| **vLLM dual** | localhost:18000,18001 | 대량 인덱싱 |
 
 ### SSH Tunnel (thinkpad → GPU 서버)
 
