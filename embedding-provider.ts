@@ -97,7 +97,7 @@ export class GeminiProvider implements EmbeddingProvider {
  */
 
 export interface VLLMProviderConfig {
-  endpoint: string;    // e.g. "http://gpu2i:8000"
+  endpoint: string;    // e.g. "http://gpu2i:8000" — comma-separated for multi-GPU: "http://gpu1:8000,http://gpu2:8000"
   model: string;       // e.g. "Qwen/Qwen3-Embedding-8B"
   dimensions?: number; // expected native dimensions (for VectorStore init). NOT sent to API unless truncateDimensions is true.
   /** If true, send dimensions param to API (for MRL/Matryoshka truncation). Default: false. */
@@ -123,11 +123,24 @@ export class VLLMProvider implements EmbeddingProvider {
   private _tokenEstimate = 0;
   private _healthy: boolean | null = null; // null = unknown
 
+  private _endpoints: string[];
+  private _endpointIdx = 0;
+
   constructor(config: VLLMProviderConfig) {
     this.config = config;
     this._dimensions = config.dimensions ?? 0;
-    // Only send dimensions to API when explicitly requesting truncation (MRL)
     this._requestDimensions = config.truncateDimensions === true && (config.dimensions ?? 0) > 0;
+    // Multi-GPU: comma-separated endpoints → round-robin
+    this._endpoints = config.endpoint.split(",").map((e) => e.trim()).filter(Boolean);
+    if (this._endpoints.length > 1) {
+      process.stderr.write(`🔀 Multi-GPU: ${this._endpoints.length} endpoints\n`);
+    }
+  }
+
+  private nextEndpoint(): string {
+    const ep = this._endpoints[this._endpointIdx % this._endpoints.length];
+    this._endpointIdx++;
+    return ep;
   }
 
   get dimensions(): number {
@@ -226,7 +239,8 @@ export class VLLMProvider implements EmbeddingProvider {
     const chars = inputs.reduce((sum, t) => sum + t.length, 0);
     this._tokenEstimate += Math.ceil(chars / 2.5);
 
-    const url = `${this.config.endpoint}/v1/embeddings`;
+    const ep = this.nextEndpoint();
+    const url = `${ep}/v1/embeddings`;
     const body: Record<string, unknown> = {
       model: this.config.model,
       input: inputs,
@@ -287,13 +301,13 @@ export class VLLMProvider implements EmbeddingProvider {
 
         // Non-retryable errors
         if (fullMsg.includes("ECONNREFUSED") || (msg === "fetch failed" && causeMsg.includes("ECONNREFUSED"))) {
-          throw new Error(`vLLM endpoint unreachable: ${this.config.endpoint} — is the service running?`);
+          throw new Error(`vLLM endpoint unreachable: ${ep} — is the service running?`);
         }
         if (fullMsg.includes("ENOTFOUND") || (msg === "fetch failed" && causeMsg.includes("ENOTFOUND"))) {
-          throw new Error(`vLLM host not found: ${this.config.endpoint}`);
+          throw new Error(`vLLM host not found: ${ep}`);
         }
         if (fullMsg.includes("abort") || fullMsg.includes("AbortError")) {
-          throw new Error(`vLLM request timeout (30s): ${this.config.endpoint}`);
+          throw new Error(`vLLM request timeout (30s): ${ep}`);
         }
         // Non-retryable marked errors (4xx)
         if ((err as { nonRetryable?: boolean })?.nonRetryable) {
@@ -302,7 +316,7 @@ export class VLLMProvider implements EmbeddingProvider {
 
         // Generic fetch failure (e.g., connection reset, DNS timeout)
         if (msg === "fetch failed" && attempt >= VLLM_RETRY_ATTEMPTS) {
-          throw new Error(`vLLM endpoint unreachable: ${this.config.endpoint} — ${causeMsg || 'network error'}`);
+          throw new Error(`vLLM endpoint unreachable: ${ep} — ${causeMsg || 'network error'}`);
         }
 
         if (attempt >= VLLM_RETRY_ATTEMPTS) throw err;

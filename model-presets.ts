@@ -27,12 +27,15 @@ export interface ModelPreset {
  */
 export const MODEL_PRESETS: Record<string, ModelPreset> = {
   // --- Qwen3-Embedding family ---
+  // maxBatchSize: vLLM batch throughput scales with batch size.
+  // RTX 5080 benchmark: batch=1 → 0.5 emb/s, batch=50 → 10.3 emb/s.
+  // Larger batches = fewer API calls = dramatically higher throughput.
   "Qwen/Qwen3-Embedding-0.6B": {
     model: "Qwen/Qwen3-Embedding-0.6B",
     dimensions: 1024,
     queryInstruction: "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery: ",
     documentInstruction: "",
-    maxBatchSize: 64,
+    maxBatchSize: 256,
     notes: "1024d, 32K context. Pipeline verification model.",
   },
   "Qwen/Qwen3-Embedding-4B": {
@@ -40,7 +43,7 @@ export const MODEL_PRESETS: Record<string, ModelPreset> = {
     dimensions: 2560,
     queryInstruction: "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery: ",
     documentInstruction: "",
-    maxBatchSize: 32, // larger model, smaller batches for VRAM
+    maxBatchSize: 200, // RTX 5080: batch=50→10 emb/s, batch=200→higher. VRAM-safe.
     notes: "2560d (MRL → can truncate to 1024/768), 32K context. Primary bake-off candidate.",
   },
   "Qwen/Qwen3-Embedding-8B": {
@@ -48,7 +51,7 @@ export const MODEL_PRESETS: Record<string, ModelPreset> = {
     dimensions: 4096,
     queryInstruction: "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery: ",
     documentInstruction: "",
-    maxBatchSize: 16, // 8B on 16GB = tight
+    maxBatchSize: 100, // 8B on 16GB — conservative but still batched
     notes: "4096d (MRL → can truncate), 32K context. Gemini-class quality.",
   },
 
@@ -61,7 +64,7 @@ export const MODEL_PRESETS: Record<string, ModelPreset> = {
     dimensions: 2560,
     queryInstruction: "Instruct: Given a memory retrieval query, retrieve past notes, sessions, and journal entries that help reconstruct work and decisions\nQuery: ",
     documentInstruction: "",
-    maxBatchSize: 32,
+    maxBatchSize: 200,
     notes: "Same model, andenken-specific instruction. Compare with default in bake-off.",
   },
 
