@@ -14,13 +14,11 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { execSync } from "node:child_process";
 import {
-  embedDocumentBatch,
+  createProviderFromEnv,
   runWithConcurrency,
   DEFAULT_CONCURRENCY,
-  getApiStats,
-  resetApiStats,
-  type GeminiEmbeddingConfig,
-} from "./gemini-embeddings.js";
+  type EmbeddingProvider,
+} from "./embedding-provider.js";
 import { VectorStore, getSessionsDbPath, getOrgDbPath, getDataDir } from "./store.js";
 import { findSessionFiles, extractSessionChunks } from "./session-indexer.js";
 import { findOrgFiles, chunkOrgFile } from "./org-chunker.js";
@@ -166,14 +164,11 @@ function initManifest(files: string[]): OrgFileManifest {
   return manifest;
 }
 
-function getGeminiConfig(dimensions: 768 = 768): GeminiEmbeddingConfig {
-  const apiKey = process.env.GOOGLE_AI_API_KEY ?? process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY ?? "";
-  if (!apiKey) throw new Error("GEMINI_API_KEY (or GOOGLE_AI_API_KEY / GOOGLE_API_KEY) not set");
-  return {
-    apiKey,
-    model: "gemini-embedding-2-preview",
-    ...(dimensions ? { dimensions } : {}),
-  };
+function getProvider(): EmbeddingProvider {
+  const p = createProviderFromEnv();
+  if (!p) throw new Error("No embedding provider available (set GEMINI_API_KEY or ANDENKEN_PROVIDER=vllm)");
+  console.log(`📡 Provider: ${p.name} (${p.dimensions}d)`);
+  return p;
 }
 
 function getOrgFolder(filePath: string): string {
@@ -279,8 +274,8 @@ class Progress {
 // --- Session Indexing (768d) ---
 
 async function indexSessions(force: boolean) {
-  const config = getGeminiConfig();
-  const store = new VectorStore(undefined, 768);
+  const provider = getProvider();
+  const store = new VectorStore(undefined, provider.dimensions || 768);
   await store.init();
   if (force) await store.reset();
   await store.ensureTable();
@@ -307,9 +302,8 @@ async function indexSessions(force: boolean) {
       progress.tick(0);
       return;
     }
-    const vectors = await embedDocumentBatch(
+    const vectors = await provider.embedDocumentBatch(
       chunks.map((c) => c.text),
-      config,
     );
     await wb.add(chunks.map((c, j) => ({ ...c, vector: vectors[j] })));
     progress.tick(chunks.length);
@@ -322,7 +316,7 @@ async function indexSessions(force: boolean) {
     await store.createFtsIndex();
   } catch {}
   const total = await store.getCount();
-  const stats = getApiStats();
+  const stats = provider.getStats();
   console.log(progress.summary());
   console.log(`💰 API: ${stats.calls} calls, ~${(stats.estimatedTokens / 1000).toFixed(0)}K tokens, ~$${stats.estimatedCostUSD.toFixed(3)}`);
   console.log(`Total in DB: ${total}`);
@@ -332,8 +326,8 @@ async function indexSessions(force: boolean) {
 // --- Org Indexing (768d) ---
 
 async function indexOrg(force: boolean) {
-  const config = getGeminiConfig(768);
-  const store = new VectorStore(getOrgDbPath(), 768);
+  const provider = getProvider();
+  const store = new VectorStore(getOrgDbPath(), provider.dimensions || 768);
   await store.init();
   if (force) await store.reset();
   await store.ensureTable();
@@ -405,11 +399,11 @@ async function indexOrg(force: boolean) {
   const estCost = (estTokens / 1_000_000) * 0.20;
   const estBatches = Math.ceil(totalChunks / 100);
   console.log(`💰 Pre-flight: ${totalChunks} chunks, ${estBatches} API calls, ~${(estTokens / 1000).toFixed(0)}K tokens, ~$${estCost.toFixed(3)}`);
-  if (estCost > 1.0) {
+  if (estCost > 1.0 && provider.name !== "vllm") {
     console.log(`⚠️  Estimated cost > $1. Use Ctrl+C to abort.`);
     await new Promise(r => setTimeout(r, 5000)); // 5s grace period
   }
-  resetApiStats();
+  provider.resetStats();
 
   const CHECKPOINT_INTERVAL = 50;
   let filesProcessed = 0;
@@ -427,9 +421,8 @@ async function indexOrg(force: boolean) {
     // Embed in batches of 100 (API limit) — use ORIGINAL text for embeddings
     for (let b = 0; b < chunks.length; b += 100) {
       const batch = chunks.slice(b, b + 100);
-      const vectors = await embedDocumentBatch(
+      const vectors = await provider.embedDocumentBatch(
         batch.map((c) => c.text), // original text for vector embedding
-        config,
       );
 
       await wb.add(
@@ -472,7 +465,7 @@ async function indexOrg(force: boolean) {
     await store.createFtsIndex();
   } catch {}
   const total = await store.getCount();
-  const orgStats = getApiStats();
+  const orgStats = provider.getStats();
   console.log(progress.summary());
   console.log(`💰 API: ${orgStats.calls} calls, ~${(orgStats.estimatedTokens / 1000).toFixed(0)}K tokens, ~$${orgStats.estimatedCostUSD.toFixed(3)}`);
   console.log(`Total in DB: ${total}`);

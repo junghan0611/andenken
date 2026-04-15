@@ -19,9 +19,9 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { execSync } from "node:child_process";
 import {
-  embedQuery,
-  type GeminiEmbeddingConfig,
-} from "./gemini-embeddings.js";
+  createProviderFromEnv,
+  type EmbeddingProvider,
+} from "./embedding-provider.js";
 import { VectorStore, getSessionsDbPath, getOrgDbPath } from "./store.js";
 import { retrieve, expandQueryForBM25, type MergeStrategy } from "./retriever.js";
 
@@ -110,12 +110,6 @@ const GOLDEN_QUERIES: GoldenQuery[] = [
 
 // --- Config ---
 
-function getGeminiConfig(): GeminiEmbeddingConfig | null {
-  const apiKey = process.env.GOOGLE_AI_API_KEY ?? process.env.GEMINI_API_KEY ?? "";
-  if (!apiKey) return null;
-  return { apiKey, model: "gemini-embedding-2-preview", dimensions: 768 };
-}
-
 function dictcliExpand(query: string): string[] {
   const koreanWords = query.match(/[\uAC00-\uD7AF]+/g) ?? [];
   if (koreanWords.length === 0) return [];
@@ -152,7 +146,7 @@ interface QueryResult {
 
 async function runQuery(
   gq: GoldenQuery,
-  gemini: GeminiEmbeddingConfig,
+  provider: EmbeddingProvider,
   useExpand: boolean,
   dbFilter?: "session" | "org",
 ): Promise<QueryResult> {
@@ -163,13 +157,15 @@ async function runQuery(
 
   const allResults: { score: number; text: string; project: string }[] = [];
 
+  const dim = provider.dimensions || 768;
+
   // Session DB
   if (targetDb === "session" || targetDb === "both") {
     const dbPath = getSessionsDbPath();
     if (fs.existsSync(dbPath)) {
-      const store = new VectorStore(dbPath, 768);
+      const store = new VectorStore(dbPath, dim);
       await store.init();
-      const qv = await embedQuery(enrichedQuery, gemini);
+      const qv = await provider.embedQuery(enrichedQuery);
       const vec = await store.search(qv, 20);
       const fts = await store.fullTextSearch(bm25Query, 20);
       const results = await retrieve(gq.query, vec, fts, {
@@ -189,9 +185,9 @@ async function runQuery(
   if (targetDb === "org" || targetDb === "both") {
     const dbPath = getOrgDbPath();
     if (fs.existsSync(dbPath)) {
-      const store = new VectorStore(dbPath, 768);
+      const store = new VectorStore(dbPath, dim);
       await store.init();
-      const qv = await embedQuery(enrichedQuery, gemini);
+      const qv = await provider.embedQuery(enrichedQuery);
       const vec = await store.search(qv, 20, 0.05);
       const fts = await store.fullTextSearch(bm25Query, 20);
       const results = await retrieve(gq.query, vec, fts, {
@@ -243,15 +239,16 @@ async function main() {
   const dbIdx = args.indexOf("--db");
   const dbFilter = dbIdx >= 0 ? (args[dbIdx + 1] as "session" | "org") : undefined;
 
-  const gemini = getGeminiConfig();
-  if (!gemini) {
-    console.error("❌ GEMINI_API_KEY not set");
+  const provider = createProviderFromEnv();
+  if (!provider) {
+    console.error("❌ No embedding provider available (set GEMINI_API_KEY or ANDENKEN_PROVIDER=vllm)");
     process.exit(1);
   }
+  console.log(`📡 Provider: ${provider.name} (${provider.dimensions}d)\n`);
 
   if (compareMode) {
     // Run each query twice: with/without expand
-    console.log("\n🔍 golden-queries — dictcli expand 비교\n");
+    console.log("🔍 golden-queries — dictcli expand 비교\n");
     console.log("─".repeat(80));
 
     let improved = 0;
@@ -261,8 +258,8 @@ async function main() {
     for (const gq of GOLDEN_QUERIES) {
       if (dbFilter && gq.db !== dbFilter && gq.db !== "both") continue;
 
-      const without = await runQuery(gq, gemini, false, dbFilter);
-      const withExp = await runQuery(gq, gemini, true, dbFilter);
+      const without = await runQuery(gq, provider, false, dbFilter);
+      const withExp = await runQuery(gq, provider, true, dbFilter);
 
       const scoreDiff = withExp.topScore - without.topScore;
       const icon = scoreDiff > 0.01 ? "📈" : scoreDiff < -0.01 ? "📉" : "➡️";
@@ -285,7 +282,7 @@ async function main() {
 
   for (const gq of GOLDEN_QUERIES) {
     if (dbFilter && gq.db !== dbFilter && gq.db !== "both") continue;
-    results.push(await runQuery(gq, gemini, !noExpand, dbFilter));
+    results.push(await runQuery(gq, provider, !noExpand, dbFilter));
   }
 
   if (jsonMode) {

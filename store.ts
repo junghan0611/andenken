@@ -225,10 +225,23 @@ export class VectorStore {
     await this.ensureInitialized();
     if (!this.table) return [];
 
-    const results = await this.table
-      .vectorSearch(queryVector)
-      .limit(limit)
-      .toArray();
+    let results;
+    try {
+      results = await this.table
+        .vectorSearch(queryVector)
+        .limit(limit)
+        .toArray();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // Dimension mismatch: index built with different provider
+      if (msg.includes("vector column") || msg.includes("dimension")) {
+        process.stderr.write(
+          `⚠ Vector dimension mismatch (query=${queryVector.length}d vs index=${this.vectorDim}d). Falling back to FTS only.\n`,
+        );
+        return [];
+      }
+      throw err;
+    }
 
     return results
       .map((r) => ({

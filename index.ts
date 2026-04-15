@@ -17,12 +17,9 @@ import * as path from "node:path";
 import * as fs from "node:fs";
 import { execSync } from "node:child_process";
 import {
-  embedQuery,
-  embedDocumentBatch,
-  getApiStats,
-  resetApiStats,
-  type GeminiEmbeddingConfig,
-} from "./gemini-embeddings.js";
+  createProviderFromEnv,
+  type EmbeddingProvider,
+} from "./embedding-provider.js";
 import { VectorStore, getOrgDbPath } from "./store.js";
 import {
   findSessionFiles,
@@ -79,42 +76,46 @@ function dictcliExpand(query: string): string[] {
 // --- Config ---
 
 /**
- * Load API key from ~/.env.local directly.
+ * Load ~/.env.local for provider env vars.
  * Cannot rely on env-loader extension — session_start race condition.
  */
-function loadEnvKey(): string {
-  // Already in process.env (system env or env-loader already ran)
-  const fromEnv = process.env.GOOGLE_AI_API_KEY ?? process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY;
-  if (fromEnv) return fromEnv;
+function loadEnvLocal(): void {
+  // Skip if key env vars already set
+  if (process.env.GOOGLE_AI_API_KEY || process.env.GEMINI_API_KEY || process.env.ANDENKEN_PROVIDER) return;
 
-  // Read ~/.env.local ourselves
   try {
     const envPath = path.join(process.env.HOME ?? "", ".env.local");
     const content = fs.readFileSync(envPath, "utf-8");
     for (const line of content.split("\n")) {
       const stripped = line.trim().replace(/^export\s+/, "");
-      const match = stripped.match(/^(GOOGLE_AI_API_KEY|GEMINI_API_KEY|GOOGLE_API_KEY)=["']?([^"'\s]+)["']?/);
-      if (match) return match[2];
+      const match = stripped.match(/^([A-Z_]+)=["']?([^"'\s]+)["']?/);
+      if (match && !process.env[match[1]]) {
+        process.env[match[1]] = match[2];
+      }
     }
   } catch {
     // file not found
   }
-  return "";
 }
 
-function getGeminiConfig(dimensions: 768 = 768): GeminiEmbeddingConfig | null {
-  const apiKey = loadEnvKey();
-  if (!apiKey) return null;
-  return {
-    apiKey,
-    model: "gemini-embedding-2-preview",
-    ...(dimensions ? { dimensions } : {}),
-  };
+function getProvider(): EmbeddingProvider | null {
+  loadEnvLocal();
+  return createProviderFromEnv();
 }
 
 // --- Extension ---
 
 export default function (pi: ExtensionAPI) {
+  // Provider initialized lazily — dimensions determine store compat
+  let provider: EmbeddingProvider | null = null;
+  function ensureProvider(): EmbeddingProvider {
+    if (!provider) {
+      provider = getProvider();
+      if (!provider) throw new Error("No embedding provider available (set GEMINI_API_KEY or ANDENKEN_PROVIDER=vllm)");
+    }
+    return provider;
+  }
+
   const sessionStore = new VectorStore(undefined, 768);
   const orgDbPath = getOrgDbPath();
   const orgStore = new VectorStore(orgDbPath, 768);
@@ -161,14 +162,15 @@ export default function (pi: ExtensionAPI) {
 
   // --- Initialize on session start ---
   pi.on("session_start", async (_event, ctx) => {
-    const gemini = getGeminiConfig();
-    if (!gemini) {
+    provider = getProvider();
+    if (!provider) {
       ctx.ui.setStatus(
         "semantic-memory",
-        "⚠ GEMINI_API_KEY not set — semantic memory disabled",
+        "⚠ No embedding provider — semantic memory disabled",
       );
       return;
     }
+    ctx.ui.setStatus("semantic-memory", `📡 ${provider.name} (${provider.dimensions}d) loading...`);
 
     try {
       await sessionStore.init();
@@ -229,10 +231,10 @@ export default function (pi: ExtensionAPI) {
     }),
 
     async execute(_toolCallId, params) {
+      const p = ensureProvider();
+
       // Lazy init
       if (!sessionReady) {
-        const gemini = getGeminiConfig();
-        if (!gemini) throw new Error("GEMINI_API_KEY not set");
         try {
           await sessionStore.init();
           sessionReady = true;
@@ -240,8 +242,6 @@ export default function (pi: ExtensionAPI) {
           throw new Error(`Session memory init failed: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
-      const gemini = getGeminiConfig();
-      if (!gemini) throw new Error("GEMINI_API_KEY not set");
 
       const limit = params.limit ?? 10;
 
@@ -252,7 +252,7 @@ export default function (pi: ExtensionAPI) {
         : params.query;
 
       const candidates = Math.min(limit * 4, 200); // openclaw candidateMultiplier
-      const queryVector = await embedQuery(enrichedQuery, gemini);
+      const queryVector = await p.embedQuery(enrichedQuery);
       const vectorResults = await sessionStore.search(queryVector, candidates);
       const bm25Query = expandQueryForBM25(params.query);
       const ftsResults = await sessionStore.fullTextSearch(bm25Query, candidates);
@@ -276,12 +276,10 @@ export default function (pi: ExtensionAPI) {
       const topScore = results[0]?.score ?? 0;
       let fallbackUsed = false;
       if (orgReady && (results.length < 3 || topScore < 0.005)) {
-        const orgGemini = getGeminiConfig(768);
-        if (orgGemini) {
-          const orgCandidates = Math.min(limit * 4, 200);
-          const orgQueryVector = await embedQuery(enrichedQuery, orgGemini);
-          const orgVec = await orgStore.search(orgQueryVector, orgCandidates, 0.05);
-          const orgFts = await orgStore.fullTextSearch(expandQueryForBM25(params.query), orgCandidates);
+        const orgCandidates = Math.min(limit * 4, 200);
+        const orgQueryVector = await p.embedQuery(enrichedQuery);
+        const orgVec = await orgStore.search(orgQueryVector, orgCandidates, 0.05);
+        const orgFts = await orgStore.fullTextSearch(expandQueryForBM25(params.query), orgCandidates);
           const orgResults = await retrieve(params.query, orgVec, orgFts, {
             vectorWeight: 0.7,
             bm25Weight: 0.3,
@@ -294,7 +292,6 @@ export default function (pi: ExtensionAPI) {
             results = [...results.slice(0, limit - 3), ...orgResults.slice(0, 3)];
             fallbackUsed = true;
           }
-        }
       }
 
       const output = formatResults(
@@ -337,13 +334,13 @@ export default function (pi: ExtensionAPI) {
     }),
 
     async execute(_toolCallId, params) {
+      const p = ensureProvider();
+
       // Lazy init — org DB may exist but session_start lost the race with env-loader
       if (!orgReady) {
         if (!fs.existsSync(orgDbPath)) {
           throw new Error("Org knowledge base not indexed. Run: ./run.sh index:org");
         }
-        const gemini = getGeminiConfig(768);
-        if (!gemini) throw new Error("GEMINI_API_KEY not set");
         try {
           await orgStore.init();
           orgReady = true;
@@ -351,8 +348,6 @@ export default function (pi: ExtensionAPI) {
           throw new Error(`Org memory init failed: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
-      const gemini = getGeminiConfig(768);
-      if (!gemini) throw new Error("GEMINI_API_KEY not set");
 
       const limit = params.limit ?? 10;
 
@@ -363,7 +358,7 @@ export default function (pi: ExtensionAPI) {
         : params.query;
 
       const candidates = Math.min(limit * 4, 200); // openclaw candidateMultiplier
-      const queryVector = await embedQuery(enrichedQuery, gemini);
+      const queryVector = await p.embedQuery(enrichedQuery);
       const vectorResults = await orgStore.search(queryVector, candidates, 0.05);
       const bm25Query = expandQueryForBM25(params.query);
       const ftsResults = await orgStore.fullTextSearch(bm25Query, candidates);
@@ -414,9 +409,11 @@ export default function (pi: ExtensionAPI) {
       } else if (sub === "reindex") {
         const target = parts[1] || "sessions";
         const force = parts.includes("--force");
-        const gemini = getGeminiConfig();
-        if (!gemini) {
-          ctx.ui.notify("GEMINI_API_KEY not set", "error");
+        let p: EmbeddingProvider;
+        try {
+          p = ensureProvider();
+        } catch {
+          ctx.ui.notify("No embedding provider available", "error");
           return;
         }
 
@@ -425,15 +422,15 @@ export default function (pi: ExtensionAPI) {
             ctx.ui.notify("Session memory not initialized.", "warning");
             return;
           }
-          resetApiStats();
-          ctx.ui.notify("🧠 Starting session index...", "info");
+          p.resetStats();
+          ctx.ui.notify(`🧠 Starting session index (${p.name})...`, "info");
           try {
-            await indexSessions(sessionStore, gemini, ctx, force);
+            await indexSessions(sessionStore, p, ctx, force);
             const count = await sessionStore.getCount();
-            const stats = getApiStats();
+            const stats = p.getStats();
             ctx.ui.setStatus("semantic-memory", `🧠 ${count} chunks indexed`);
             ctx.ui.notify(
-              `✅ Sessions done. ${count} chunks. 💰 ${stats.calls} API calls, ~$${stats.estimatedCostUSD.toFixed(3)}`,
+              `✅ Sessions done. ${count} chunks. 💰 ${stats.calls} calls, ~$${stats.estimatedCostUSD.toFixed(3)}`,
               "info",
             );
           } catch (err) {
@@ -545,7 +542,7 @@ function formatResults(query: string, results: SearchResult[]) {
 
 async function indexSessions(
   store: VectorStore,
-  gemini: GeminiEmbeddingConfig,
+  provider: EmbeddingProvider,
   ctx: { ui: { notify: (msg: string, level: "info" | "warning" | "error") => void } },
   force: boolean = false,
 ): Promise<void> {
@@ -561,14 +558,14 @@ async function indexSessions(
     return;
   }
 
-  ctx.ui.notify(`Indexing ${toIndex.length} sessions...`, "info");
+  ctx.ui.notify(`Indexing ${toIndex.length} sessions (${provider.name})...`, "info");
   let totalChunks = 0;
 
   for (let i = 0; i < toIndex.length; i++) {
     const chunks = await extractSessionChunks(toIndex[i]);
     if (chunks.length === 0) continue;
 
-    const vectors = await embedDocumentBatch(chunks.map((c) => c.text), gemini);
+    const vectors = await provider.embedDocumentBatch(chunks.map((c) => c.text));
     await store.addChunks(chunks.map((c, j) => ({ ...c, vector: vectors[j] })));
     totalChunks += chunks.length;
 

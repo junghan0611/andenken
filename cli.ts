@@ -16,27 +16,22 @@ import * as path from "node:path";
 import * as fs from "node:fs";
 import { execSync } from "node:child_process";
 import {
-  embedQuery,
-  embedDocumentBatch,
-  type GeminiEmbeddingConfig,
-} from "./gemini-embeddings.js";
+  createProviderFromEnv,
+  type EmbeddingProvider,
+} from "./embedding-provider.js";
 import { VectorStore, getSessionsDbPath, getOrgDbPath, type SearchResult } from "./store.js";
 import { findSessionFiles, extractSessionChunks } from "./session-indexer.js";
 import { retrieve, expandQueryForBM25, type MergeStrategy } from "./retriever.js";
 
 // --- Config ---
 
-function getGeminiConfig(
-  dimensions: 768 = 768,
-): GeminiEmbeddingConfig | null {
-  const apiKey =
-    process.env.GOOGLE_AI_API_KEY ?? process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY ?? "";
-  if (!apiKey) return null;
-  return {
-    apiKey,
-    model: "gemini-embedding-2-preview",
-    ...(dimensions ? { dimensions } : {}),
-  };
+function getProvider(): EmbeddingProvider {
+  const p = createProviderFromEnv();
+  if (!p) {
+    console.error(JSON.stringify({ error: "No embedding provider available (set GEMINI_API_KEY or ANDENKEN_PROVIDER=vllm)" }));
+    process.exit(1);
+  }
+  return p;
 }
 
 // --- dictcli expand ---
@@ -82,13 +77,10 @@ const orgDbPath = getOrgDbPath();
 // --- Commands ---
 
 async function searchSessions(query: string, limit: number, source?: string): Promise<void> {
-  const gemini = getGeminiConfig();
-  if (!gemini) {
-    console.error(JSON.stringify({ error: "GEMINI_API_KEY not set" }));
-    process.exit(1);
-  }
+  const provider = getProvider();
+  const dim = provider.dimensions || 768;
 
-  const store = new VectorStore(sessionDbPath, 768);
+  const store = new VectorStore(sessionDbPath, dim);
   await store.init();
 
   const expanded = dictcliExpand(query);
@@ -96,7 +88,7 @@ async function searchSessions(query: string, limit: number, source?: string): Pr
     expanded.length > 0 ? `${query} ${expanded.join(" ")}` : query;
 
   const candidates = Math.min(limit * 4, 200); // openclaw candidateMultiplier pattern
-  const queryVector = await embedQuery(enrichedQuery, gemini);
+  const queryVector = await provider.embedQuery(enrichedQuery);
   const bm25Query = expandQueryForBM25(query);
   const vectorResults = await store.search(queryVector, candidates);
   const ftsResults = await store.fullTextSearch(bm25Query, candidates);
@@ -119,31 +111,28 @@ async function searchSessions(query: string, limit: number, source?: string): Pr
   let fallback = false;
   const topScore = results[0]?.score ?? 0;
   if (fs.existsSync(orgDbPath) && (results.length < 3 || topScore < 0.005)) {
-    const orgGemini = getGeminiConfig(768);
-    if (orgGemini) {
-      const orgStore = new VectorStore(orgDbPath, 768);
-      await orgStore.init();
-      const orgCandidates = Math.min(limit * 4, 200);
-      const orgQueryVector = await embedQuery(enrichedQuery, orgGemini);
-      const orgVec = await orgStore.search(orgQueryVector, orgCandidates, 0.05);
-      const orgFts = await orgStore.fullTextSearch(bm25Query, orgCandidates);
-      const orgResults = await retrieve(query, orgVec, orgFts, {
-        vectorWeight: 0.7,
-        bm25Weight: 0.3,
-        recencyHalfLifeDays: 90,
-        minScore: 0.05,
-        mmr: { enabled: true, lambda: 0.7 },
-        mergeStrategy: "weighted" as MergeStrategy,
-      });
-      if (orgResults.length > 0) {
-        results = [
-          ...results.slice(0, limit - 3),
-          ...orgResults.slice(0, 3),
-        ];
-        fallback = true;
-      }
-      await orgStore.close();
+    const orgStore = new VectorStore(orgDbPath, dim);
+    await orgStore.init();
+    const orgCandidates = Math.min(limit * 4, 200);
+    const orgQueryVector = await provider.embedQuery(enrichedQuery);
+    const orgVec = await orgStore.search(orgQueryVector, orgCandidates, 0.05);
+    const orgFts = await orgStore.fullTextSearch(bm25Query, orgCandidates);
+    const orgResults = await retrieve(query, orgVec, orgFts, {
+      vectorWeight: 0.7,
+      bm25Weight: 0.3,
+      recencyHalfLifeDays: 90,
+      minScore: 0.05,
+      mmr: { enabled: true, lambda: 0.7 },
+      mergeStrategy: "weighted" as MergeStrategy,
+    });
+    if (orgResults.length > 0) {
+      results = [
+        ...results.slice(0, limit - 3),
+        ...orgResults.slice(0, 3),
+      ];
+      fallback = true;
     }
+    await orgStore.close();
   }
 
   const finalResults = results.slice(0, limit);
@@ -168,13 +157,10 @@ async function searchKnowledge(query: string, limit: number): Promise<void> {
     process.exit(1);
   }
 
-  const gemini = getGeminiConfig(768);
-  if (!gemini) {
-    console.error(JSON.stringify({ error: "GEMINI_API_KEY not set" }));
-    process.exit(1);
-  }
+  const provider = getProvider();
+  const dim = provider.dimensions || 768;
 
-  const store = new VectorStore(orgDbPath, 768);
+  const store = new VectorStore(orgDbPath, dim);
   await store.init();
 
   const expanded = dictcliExpand(query);
@@ -182,7 +168,7 @@ async function searchKnowledge(query: string, limit: number): Promise<void> {
     expanded.length > 0 ? `${query} ${expanded.join(" ")}` : query;
 
   const candidates = Math.min(limit * 4, 200); // openclaw candidateMultiplier pattern
-  const queryVector = await embedQuery(enrichedQuery, gemini);
+  const queryVector = await provider.embedQuery(enrichedQuery);
   const bm25Query = expandQueryForBM25(query);
   const vectorResults = await store.search(queryVector, candidates, 0.05);
   const ftsResults = await store.fullTextSearch(bm25Query, candidates);
@@ -210,7 +196,7 @@ async function searchKnowledge(query: string, limit: number): Promise<void> {
 }
 
 async function status(): Promise<void> {
-  const sessionStore = new VectorStore(sessionDbPath, 768);
+  const sessionStore = new VectorStore(sessionDbPath);
   let sessionCount = 0;
   let sessionFiles = 0;
   try {
@@ -253,13 +239,10 @@ async function status(): Promise<void> {
 }
 
 async function reindex(force: boolean): Promise<void> {
-  const gemini = getGeminiConfig();
-  if (!gemini) {
-    console.error(JSON.stringify({ error: "GEMINI_API_KEY not set" }));
-    process.exit(1);
-  }
+  const provider = getProvider();
+  const dim = provider.dimensions || 768;
 
-  const store = new VectorStore(sessionDbPath, 768);
+  const store = new VectorStore(sessionDbPath, dim);
   await store.init();
 
   if (force) await store.reset();
@@ -282,9 +265,8 @@ async function reindex(force: boolean): Promise<void> {
     const chunks = await extractSessionChunks(toIndex[i]);
     if (chunks.length === 0) continue;
 
-    const vectors = await embedDocumentBatch(
+    const vectors = await provider.embedDocumentBatch(
       chunks.map((c) => c.text),
-      gemini,
     );
     await store.addChunks(
       chunks.map((c, j) => ({ ...c, vector: vectors[j] })),
