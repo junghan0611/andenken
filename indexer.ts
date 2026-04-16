@@ -22,6 +22,7 @@ import {
 import { VectorStore, getSessionsDbPath, getOrgDbPath, getDataDir } from "./store.js";
 import { findSessionFiles, extractSessionChunks } from "./session-indexer.js";
 import { findOrgFiles, chunkOrgFile } from "./org-chunker.js";
+import { WriteBuffer } from "./write-buffer.js";
 
 // --- Config ---
 
@@ -170,7 +171,7 @@ function initManifest(files: string[]): OrgFileManifest {
 
 function getProvider(): EmbeddingProvider {
   const p = createProviderFromEnv();
-  if (!p) throw new Error("No embedding provider available (set GEMINI_API_KEY or ANDENKEN_PROVIDER=vllm)");
+  if (!p) throw new Error("No embedding provider available (set ANDENKEN_PROVIDER=vllm)");
   console.log(`📡 Provider: ${p.name} (${p.dimensions}d)`);
   return p;
 }
@@ -179,57 +180,6 @@ function getOrgFolder(filePath: string): string {
   const parts = filePath.split("/");
   const orgIdx = parts.findIndex((p) => p === "org");
   return orgIdx >= 0 && orgIdx + 1 < parts.length ? parts[orgIdx + 1] : "";
-}
-
-// --- Write Buffer ---
-
-interface PendingRecord {
-  id: string;
-  text: string;
-  vector: number[];
-  sessionFile: string;
-  project: string;
-  lineNumber: number;
-  timestamp: string;
-  role: string;
-  metadata: Record<string, string>;
-}
-
-class WriteBuffer {
-  private buffer: PendingRecord[] = [];
-  private flushed = 0;
-  private deletedFiles = new Set<string>(); // track files already cleaned
-
-  constructor(
-    private store: VectorStore,
-    private batchSize: number,
-  ) {}
-
-  async add(records: PendingRecord[]) {
-    // Pre-delete old chunks for each new file before buffering
-    // This ensures no duplicates even when flush batches span multiple files
-    for (const r of records) {
-      if (r.sessionFile && !this.deletedFiles.has(r.sessionFile)) {
-        await this.store.deleteByFile(r.sessionFile);
-        this.deletedFiles.add(r.sessionFile);
-      }
-    }
-    this.buffer.push(...records);
-    if (this.buffer.length >= this.batchSize) {
-      await this.flush();
-    }
-  }
-
-  async flush() {
-    if (this.buffer.length === 0) return;
-    await this.store.addChunksRaw(this.buffer); // skip per-file delete (already done)
-    this.flushed += this.buffer.length;
-    this.buffer = [];
-  }
-
-  get totalFlushed() {
-    return this.flushed + this.buffer.length;
-  }
 }
 
 // --- Progress ---
@@ -279,7 +229,7 @@ class Progress {
 
 async function indexSessions(force: boolean) {
   const provider = getProvider();
-  const store = new VectorStore(undefined, provider.dimensions || 768);
+  const store = new VectorStore(undefined, provider.dimensions || 2560);
   await store.init();
   if (force) await store.reset();
   await store.ensureTable();
@@ -301,20 +251,28 @@ async function indexSessions(force: boolean) {
   const wb = new WriteBuffer(store, DB_WRITE_BATCH);
 
   const tasks = toIndex.map((file) => async () => {
-    const chunks = await extractSessionChunks(file);
-    if (chunks.length === 0) {
-      progress.tick(0);
-      return;
+    try {
+      const chunks = await extractSessionChunks(file);
+      if (chunks.length === 0) {
+        progress.tick(0);
+        return;
+      }
+      const vectors = await provider.embedDocumentBatch(
+        chunks.map((c) => c.text),
+      );
+      await wb.add(chunks.map((c, j) => ({ ...c, vector: vectors[j] })));
+      progress.tick(chunks.length);
+    } catch (err) {
+      progress.error();
+      throw err;
     }
-    const vectors = await provider.embedDocumentBatch(
-      chunks.map((c) => c.text),
-    );
-    await wb.add(chunks.map((c, j) => ({ ...c, vector: vectors[j] })));
-    progress.tick(chunks.length);
   });
 
-  await runWithConcurrency(tasks, CONCURRENCY);
+  const { errors: sessionErrors } = await runWithConcurrency(tasks, CONCURRENCY);
   await wb.flush(); // final flush
+  if (sessionErrors > 0) {
+    throw new Error(`Session indexing failed for ${sessionErrors} files`);
+  }
 
   try {
     await store.createFtsIndex();
@@ -331,7 +289,7 @@ async function indexSessions(force: boolean) {
 
 async function indexOrg(force: boolean) {
   const provider = getProvider();
-  const store = new VectorStore(getOrgDbPath(), provider.dimensions || 768);
+  const store = new VectorStore(getOrgDbPath(), provider.dimensions || 2560);
   await store.init();
   if (force) await store.reset();
   await store.ensureTable();
@@ -416,52 +374,60 @@ async function indexOrg(force: boolean) {
   const wb = new WriteBuffer(store, DB_WRITE_BATCH);
 
   const tasks = enrichedFileChunks.map(({ chunks }) => async () => {
-    if (chunks.length === 0) {
+    try {
+      if (chunks.length === 0) {
+        filesProcessed++;
+        progress.tick(0);
+        return;
+      }
+
+      // Embed in batches — size from provider config (Gemini: 100 API limit, vLLM: larger)
+      const embedBatch = parseInt(process.env.ANDENKEN_EMBED_BATCH ?? "", 10) || 100;
+      for (let b = 0; b < chunks.length; b += embedBatch) {
+        const batch = chunks.slice(b, b + embedBatch);
+        const vectors = await provider.embedDocumentBatch(
+          batch.map((c) => c.text), // original text for vector embedding
+        );
+
+        await wb.add(
+          batch.map((c, j) => ({
+            id: c.id,
+            text: c.enrichedText, // stems-enriched text for FTS
+            vector: vectors[j],   // vector from original text
+            sessionFile: c.filePath,
+            project: c.folder,
+            lineNumber: c.lineNumber,
+            timestamp: c.metadata.date || c.metadata.identifier || "",
+            role: c.chunkType,
+            metadata: {
+              title: c.metadata.title,
+              tags: c.metadata.filetags.join(","),
+              hierarchy: c.hierarchy,
+              prefix: c.metadata.titlePrefix,
+              identifier: c.metadata.identifier,
+            },
+          })),
+        );
+      }
       filesProcessed++;
-      progress.tick(0);
-      return;
-    }
+      progress.tick(chunks.length);
 
-    // Embed in batches — size from provider config (Gemini: 100 API limit, vLLM: larger)
-    const embedBatch = parseInt(process.env.ANDENKEN_EMBED_BATCH ?? "", 10) || 100;
-    for (let b = 0; b < chunks.length; b += embedBatch) {
-      const batch = chunks.slice(b, b + embedBatch);
-      const vectors = await provider.embedDocumentBatch(
-        batch.map((c) => c.text), // original text for vector embedding
-      );
-
-      await wb.add(
-        batch.map((c, j) => ({
-          id: c.id,
-          text: c.enrichedText, // stems-enriched text for FTS
-          vector: vectors[j],   // vector from original text
-          sessionFile: c.filePath,
-          project: c.folder,
-          lineNumber: c.lineNumber,
-          timestamp: c.metadata.date || c.metadata.identifier || "",
-          role: c.chunkType,
-          metadata: {
-            title: c.metadata.title,
-            tags: c.metadata.filetags.join(","),
-            hierarchy: c.hierarchy,
-            prefix: c.metadata.titlePrefix,
-            identifier: c.metadata.identifier,
-          },
-        })),
-      );
-    }
-    filesProcessed++;
-    progress.tick(chunks.length);
-
-    // Periodic manifest checkpoint to reduce re-work after interruption
-    if (filesProcessed % CHECKPOINT_INTERVAL === 0) {
-      saveManifest(manifest);
-      console.log(`  📌 Manifest checkpoint at ${filesProcessed}/${enrichedFileChunks.length} files`);
+      // Periodic manifest checkpoint to reduce re-work after interruption
+      if (filesProcessed % CHECKPOINT_INTERVAL === 0) {
+        saveManifest(manifest);
+        console.log(`  📌 Manifest checkpoint at ${filesProcessed}/${enrichedFileChunks.length} files`);
+      }
+    } catch (err) {
+      progress.error();
+      throw err;
     }
   });
 
-  await runWithConcurrency(tasks, CONCURRENCY);
+  const { errors: orgErrors } = await runWithConcurrency(tasks, CONCURRENCY);
   await wb.flush(); // final flush
+  if (orgErrors > 0) {
+    throw new Error(`Org indexing failed for ${orgErrors} files`);
+  }
 
   // Final manifest save
   saveManifest(manifest);
@@ -523,8 +489,10 @@ async function compact(target: string) {
 
 async function status() {
   const { execSync } = await import("node:child_process");
+  const provider = createProviderFromEnv();
+  const dim = provider?.dimensions ?? 2560;
 
-  const sessionStore = new VectorStore(undefined, 768);
+  const sessionStore = new VectorStore(undefined, dim);
   await sessionStore.init();
   const sCount = await sessionStore.getCount();
   const sIndexed = await sessionStore.getIndexedFiles();
@@ -538,13 +506,13 @@ async function status() {
     ? fs.readdirSync(sFragDir).length
     : 0;
   console.log(
-    `🧠 Sessions (768d): ${sCount} chunks | ${sIndexed.size}/${sFiles.length} files | ${sFrags} frags | ${sSize}`,
+    `🧠 Sessions (${dim}d): ${sCount} chunks | ${sIndexed.size}/${sFiles.length} files | ${sFrags} frags | ${sSize}`,
   );
   await sessionStore.close();
 
   const orgDbPath = getOrgDbPath();
   if (fs.existsSync(orgDbPath)) {
-    const orgStore = new VectorStore(orgDbPath, 768);
+    const orgStore = new VectorStore(orgDbPath, dim);
     await orgStore.init();
     const oCount = await orgStore.getCount();
     const oIndexed = await orgStore.getIndexedFiles();
@@ -563,7 +531,7 @@ async function status() {
     const deletedCount = Object.keys(manifest.files).filter((f) => !oFileSet.has(f)).length;
 
     console.log(
-      `📚 Org (768d): ${oCount} chunks | ${oIndexed.size}/${oFiles.length} files | ${oFrags} frags | ${oSize}`,
+      `📚 Org (${dim}d): ${oCount} chunks | ${oIndexed.size}/${oFiles.length} files | ${oFrags} frags | ${oSize}`,
     );
     console.log(
       `   ↳ manifest: ${manifestEntries} entries | new: ${newFiles.length} | stale: ${staleFiles.length} | deleted: ${deletedCount} | to-index: ${newFiles.length + staleFiles.length}`,
@@ -680,7 +648,7 @@ async function cleanup(target: string) {
       }
 
       // Add ghost zone files (indexed but not in manifest)
-      const store = new VectorStore(dbPath, 768);
+      const store = new VectorStore(dbPath, 2560);
       await store.init();
       const indexed = await store.getIndexedFiles();
       for (const f of oFiles) {
@@ -728,7 +696,7 @@ async function verify(target: string) {
     if (!fs.existsSync(dbPath)) { console.log(`${t}: not found`); continue; }
 
     console.log(`\n=== ${t} Verification ===`);
-    const store = new VectorStore(dbPath, 768);
+    const store = new VectorStore(dbPath, 2560);
     await store.init();
     const table = (store as any).table;
     const count = await store.getCount();

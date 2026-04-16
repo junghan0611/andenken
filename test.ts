@@ -25,6 +25,7 @@ import {
   extractProjectName,
   detectSource,
 } from "./session-indexer.ts";
+import { WriteBuffer, type BufferedRecord } from "./write-buffer.ts";
 import {
   rrfFusion,
   applyRecencyDecay,
@@ -244,6 +245,85 @@ async function testRetriever() {
   assert(
     retrieved[0].score >= retrieved[retrieved.length - 1].score,
     "Retrieve: sorted descending by score",
+  );
+}
+
+async function testWriteBuffer() {
+  section("WriteBuffer");
+
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  class FakeStore {
+    deletedFiles: string[] = [];
+    insertedIds: string[] = [];
+    batches: string[][] = [];
+
+    async deleteByFile(filePath: string): Promise<void> {
+      this.deletedFiles.push(filePath);
+    }
+
+    async addChunksRaw(chunks: BufferedRecord[]): Promise<void> {
+      // Delay snapshot on purpose: the old non-serialized WriteBuffer mutated
+      // the same in-flight array, which produced duplicate inserts.
+      await sleep(20);
+      const ids = chunks.map((c) => c.id);
+      this.batches.push(ids);
+      this.insertedIds.push(...ids);
+    }
+  }
+
+  const makeRecord = (id: string, sessionFile: string): BufferedRecord => ({
+    id,
+    text: `text:${id}`,
+    vector: [0.1, 0.2, 0.3, 0.4],
+    sessionFile,
+    project: "test",
+    lineNumber: 1,
+    timestamp: new Date().toISOString(),
+    role: "user",
+    metadata: {},
+  });
+
+  const store = new FakeStore();
+  const wb = new WriteBuffer(store, 2);
+
+  await Promise.all([
+    wb.add([
+      makeRecord("a1", "/tmp/a.jsonl"),
+      makeRecord("a2", "/tmp/a.jsonl"),
+    ]),
+    wb.add([
+      makeRecord("b1", "/tmp/b.jsonl"),
+      makeRecord("b2", "/tmp/b.jsonl"),
+    ]),
+  ]);
+  await wb.flush();
+
+  const idCounts = new Map<string, number>();
+  for (const id of store.insertedIds) {
+    idCounts.set(id, (idCounts.get(id) ?? 0) + 1);
+  }
+
+  assert(store.insertedIds.length === 4, `concurrent add: inserted 4 rows (got ${store.insertedIds.length})`);
+  assert(
+    [...idCounts.values()].every((count) => count === 1),
+    "concurrent add: no duplicate IDs after delayed flush",
+  );
+  assert(
+    store.deletedFiles.filter((f) => f === "/tmp/a.jsonl").length === 1 &&
+      store.deletedFiles.filter((f) => f === "/tmp/b.jsonl").length === 1,
+    "deleteByFile runs once per file",
+  );
+
+  const store2 = new FakeStore();
+  const wb2 = new WriteBuffer(store2, 10);
+  await wb2.add([makeRecord("c1", "/tmp/c.jsonl")]);
+  await wb2.add([makeRecord("c2", "/tmp/c.jsonl")]);
+  await wb2.flush();
+
+  assert(
+    store2.deletedFiles.filter((f) => f === "/tmp/c.jsonl").length === 1,
+    "same file across multiple add calls: pre-delete still once",
   );
 }
 
@@ -508,6 +588,7 @@ console.log("🧠 andenken Test Suite\n");
 if (mode === "unit" || mode === "all") {
   await testSessionIndexer();
   await testRetriever();
+  await testWriteBuffer();
   await testVectorStore();
 }
 

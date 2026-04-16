@@ -27,7 +27,7 @@ llmlog: `20260413T213051` — 전략 문서
 | 2e | test-provider.ts vllm 11/11 | ✅ |
 | 2f | gpu2i max-num-batched-tokens 튜닝 | ✅ 8192 (안정), 16384는 OOM |
 | 2g | gpu1i 준비 → dual-GPU | ⏳ 가용 |
-| 2h | org 재인덱싱 (Qwen3-4B 2560d) | ⏳ 재인덱싱 필요 (chunking 변경) |
+| 2h | org 재인덱싱 (Qwen3-4B 2560d) | ✅ 106,674 chunks, hybrid 검증 완료 |
 | 2i | vllm.nix 수정 (--task embed) + nixos-rebuild | ⏳ |
 
 ### Phase 3: Bake-off
@@ -152,15 +152,32 @@ curl -s http://localhost:18001/v1/models | python3 -m json.tool | head -5
 - cleanup 완료 — 25K duplicate 제거됨
 - 운영 org.lance로 승격 완료
 
-### 운영 상태 (2026-04-16 chunking 개선 완료, 재인덱싱 대기)
+### 운영 상태 (2026-04-16 write-path incident 확인)
 
-- org-aware break point scoring + 마이크로헤딩 병합 구현 완료
-- 블록 분할: 5,310→467 (-91%), 총 청크: 97K→80K (-17%)
+- org-aware break point scoring + 마이크로헤딩 병합 구현 자체는 완료
+- 블록 분할: 5,310→467 (-91%), 총 청크: 106,674 (2560d, Qwen3-4B)
 - heading 청크: 54K→41K (-24%), content 청크: 43K→40K (-9%)
-- 31/31 테스트 PASS, 8/8 golden-queries PASS
+- 31/31 테스트 PASS, 8/8 golden-queries PASS (org-only)
+- **Hybrid retrieval 로직 검증 완료**: 5/5 쿼리 vector+FTS 양쪽 반환, cross-signal 확인
+- **Block integrity**: src 블록 begin/end 100% paired (21/21, 11/11, 27/27)
+- **중요**: 2026-04-16에 shared `WriteBuffer` 동시성 버그 확인. dual-GPU / 병렬 임베딩 중 `sessions.lance`, `org.lance` 모두 duplicate rows가 생길 수 있었음.
+- **현재 운영 판단**: retrieval/chunking 로직은 유효하지만, **write-buffer fix 이전에 생성된 DB 내용은 신뢰하지 않는다. 해당 DB는 삭제 후 재인덱싱이 원칙.**
+- **Dimension mismatch 원인**: session DB 768d(Gemini) vs org 2560d(Qwen3-4B). 두 DB는 별도 파일이며 독립적으로 다룬다.
 - llmlog 설계문서: `20260416T135457` (org 청킹 설계)
 - llmlog 통합문서: `20260416T115700` (QMD+GBrain 패턴 흡수 현황)
-- **다음 작업**: GPU 재인덱싱 → verify + spot check → doctor 확장
+- **다음 작업**: write-buffer fix 반영본 검수 → session/org DB 삭제 후 재인덱싱 → verify/search quality 재검증
+
+### DB 운영 원칙 (2026-04-16 명문화)
+
+- `sessions.lance` 와 `org.lance` 는 **서로 다른 DB 파일**이다. 하나의 인덱스로 취급하지 않는다.
+- 무결성 이슈(duplicate IDs, orphan rows, manifest mismatch)가 보이면 **영향받은 DB만 삭제 후 재인덱싱**한다.
+- **`compact`는 운영 절차에서 사용하지 않는다.** 복구 수단도 아니고 일상 maintenance도 아니다.
+- 이번 incident 이후 기본 원칙은 `cleanup/compact`보다 **drop + rebuild** 이다.
+- dual-GPU / 병렬 임베딩은 유지 가능하지만, 로컬 DB writer는 반드시 single-writer 보장을 해야 한다.
+- 재인덱싱 후 필수 확인:
+  - `./run.sh verify sessions`
+  - `./run.sh verify org`
+  - golden/search quality spot check
 
 ### Bake-off Models
 
