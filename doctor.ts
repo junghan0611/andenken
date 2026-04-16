@@ -104,7 +104,7 @@ async function checkLocalDB(label: string, dbPath: string): Promise<CheckResult>
   }
 
   try {
-    const store = new VectorStore(dbPath, 768);
+    const store = new VectorStore(dbPath, 2560);
     await store.init();
     const count = await store.getCount();
     const files = await store.getIndexedFiles();
@@ -163,7 +163,7 @@ async function checkStaleFiles(): Promise<CheckResult> {
 
   if (fs.existsSync(sessionDbPath)) {
     try {
-      const store = new VectorStore(sessionDbPath, 768);
+      const store = new VectorStore(sessionDbPath, 2560);
       await store.init();
       indexedSessions = (await store.getIndexedFiles()).size;
       await store.close();
@@ -183,7 +183,7 @@ async function checkStaleFiles(): Promise<CheckResult> {
 
   if (fs.existsSync(orgDbPath)) {
     try {
-      const store = new VectorStore(orgDbPath, 768);
+      const store = new VectorStore(orgDbPath, 2560);
       await store.init();
       indexedOrg = (await store.getIndexedFiles()).size;
       await store.close();

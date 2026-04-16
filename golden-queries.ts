@@ -157,7 +157,7 @@ async function runQuery(
 
   const allResults: { score: number; text: string; project: string }[] = [];
 
-  const dim = provider.dimensions || 768;
+  const dim = provider.dimensions || 2560;
 
   // Session DB
   if (targetDb === "session" || targetDb === "both") {

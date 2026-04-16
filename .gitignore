@@ -8,3 +8,4 @@ dist/
 benchmark-log.jsonl
 data/org-manifest.json
 data/bakeoff-qwen4b/
+data

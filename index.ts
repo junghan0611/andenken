@@ -143,14 +143,30 @@ export default function (pi: ExtensionAPI) {
   function ensureProvider(): EmbeddingProvider {
     if (!provider) {
       provider = getProvider();
-      if (!provider) throw new Error("No embedding provider available (set GEMINI_API_KEY or ANDENKEN_PROVIDER=vllm)");
+      if (!provider) throw new Error("No embedding provider available (set ANDENKEN_PROVIDER=vllm)");
     }
     return provider;
   }
 
-  const sessionStore = new VectorStore(undefined, 768);
+  // Dimension determined lazily from provider — stores init on first use
+  let sessionStore: VectorStore | null = null;
+  let orgStore: VectorStore | null = null;
   const orgDbPath = getOrgDbPath();
-  const orgStore = new VectorStore(orgDbPath, 768);
+
+  function getSessionStore(): VectorStore {
+    if (!sessionStore) {
+      const dim = provider?.dimensions ?? 2560;
+      sessionStore = new VectorStore(undefined, dim);
+    }
+    return sessionStore;
+  }
+  function getOrgStore(): VectorStore {
+    if (!orgStore) {
+      const dim = provider?.dimensions ?? 2560;
+      orgStore = new VectorStore(orgDbPath, dim);
+    }
+    return orgStore;
+  }
 
   let sessionReady = false;
   let orgReady = false;
@@ -205,15 +221,15 @@ export default function (pi: ExtensionAPI) {
     ctx.ui.setStatus("semantic-memory", `📡 ${provider.name} (${provider.dimensions}d) loading...`);
 
     try {
-      await sessionStore.init();
+      await getSessionStore().init();
       sessionReady = true;
-      const sCount = await sessionStore.getCount();
+      const sCount = await getSessionStore().getCount();
 
       // Org store (if indexed)
       if (fs.existsSync(orgDbPath)) {
-        await orgStore.init();
+        await getOrgStore().init();
         orgReady = true;
-        const oCount = await orgStore.getCount();
+        const oCount = await getOrgStore().getCount();
         ctx.ui.setStatus(
           "semantic-memory",
           `🧠 ${sCount} sessions + 📚 ${oCount} org chunks`,
@@ -268,7 +284,7 @@ export default function (pi: ExtensionAPI) {
       // Lazy init
       if (!sessionReady) {
         try {
-          await sessionStore.init();
+          await getSessionStore().init();
           sessionReady = true;
         } catch (err) {
           throw new Error(`Session memory init failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -285,9 +301,9 @@ export default function (pi: ExtensionAPI) {
 
       const candidates = Math.min(limit * 4, 200); // openclaw candidateMultiplier
       const queryVector = await p.embedQuery(enrichedQuery);
-      const vectorResults = await sessionStore.search(queryVector, candidates);
+      const vectorResults = await getSessionStore().search(queryVector, candidates);
       const bm25Query = expandQueryForBM25(enrichedQuery); // include dictcli expand terms in FTS
-      const ftsResults = await sessionStore.fullTextSearch(bm25Query, candidates);
+      const ftsResults = await getSessionStore().fullTextSearch(bm25Query, candidates);
 
       let results = await retrieve(params.query, vectorResults, ftsResults, {
         vectorWeight: 0.7,
@@ -310,8 +326,8 @@ export default function (pi: ExtensionAPI) {
       if (orgReady && (results.length < 3 || topScore < 0.005)) {
         const orgCandidates = Math.min(limit * 4, 200);
         const orgQueryVector = await p.embedQuery(enrichedQuery);
-        const orgVec = await orgStore.search(orgQueryVector, orgCandidates, 0.05);
-        const orgFts = await orgStore.fullTextSearch(expandQueryForBM25(enrichedQuery), orgCandidates);
+        const orgVec = await getOrgStore().search(orgQueryVector, orgCandidates, 0.05);
+        const orgFts = await getOrgStore().fullTextSearch(expandQueryForBM25(enrichedQuery), orgCandidates);
           const orgResults = await retrieve(params.query, orgVec, orgFts, {
             vectorWeight: 0.7,
             bm25Weight: 0.3,
@@ -376,7 +392,7 @@ export default function (pi: ExtensionAPI) {
           throw new Error("Org knowledge base not indexed. Run: ./run.sh index:org");
         }
         try {
-          await orgStore.init();
+          await getOrgStore().init();
           orgReady = true;
         } catch (err) {
           throw new Error(`Org memory init failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -393,9 +409,9 @@ export default function (pi: ExtensionAPI) {
 
       const candidates = Math.min(limit * 4, 200); // openclaw candidateMultiplier
       const queryVector = await p.embedQuery(enrichedQuery);
-      const vectorResults = await orgStore.search(queryVector, candidates, 0.05);
+      const vectorResults = await getOrgStore().search(queryVector, candidates, 0.05);
       const bm25Query = expandQueryForBM25(enrichedQuery); // include dictcli expand terms in FTS
-      const ftsResults = await orgStore.fullTextSearch(bm25Query, candidates);
+      const ftsResults = await getOrgStore().fullTextSearch(bm25Query, candidates);
 
       const results = await retrieve(params.query, vectorResults, ftsResults, {
         vectorWeight: 0.7,
@@ -423,10 +439,10 @@ export default function (pi: ExtensionAPI) {
       const sub = parts[0] || "status";
 
       if (sub === "status") {
-        const sCount = sessionReady ? await sessionStore.getCount() : 0;
-        const oCount = orgReady ? await orgStore.getCount() : 0;
+        const sCount = sessionReady ? await getSessionStore().getCount() : 0;
+        const oCount = orgReady ? await getOrgStore().getCount() : 0;
         const sFiles = findSessionFiles();
-        const sIndexed = sessionReady ? await sessionStore.getIndexedFiles() : new Set();
+        const sIndexed = sessionReady ? await getSessionStore().getIndexedFiles() : new Set();
         ctx.ui.notify(
           `🧠 Sessions: ${sCount} chunks (${sIndexed.size}/${sFiles.length} files)\n` +
             `📚 Org: ${oCount} chunks${orgReady ? "" : " (not indexed)"}`,
@@ -461,8 +477,8 @@ export default function (pi: ExtensionAPI) {
           p.resetStats();
           ctx.ui.notify(`🧠 Starting session index (${p.name})...`, "info");
           try {
-            await indexSessions(sessionStore, p, ctx, force);
-            const count = await sessionStore.getCount();
+            await indexSessions(getSessionStore(), p, ctx, force);
+            const count = await getSessionStore().getCount();
             const stats = p.getStats();
             ctx.ui.setStatus("semantic-memory", `🧠 ${count} chunks indexed`);
             ctx.ui.notify(
@@ -507,7 +523,7 @@ export default function (pi: ExtensionAPI) {
 
     try {
       const files = findSessionFiles();
-      const indexed = await sessionStore.getIndexedFiles();
+      const indexed = await getSessionStore().getIndexedFiles();
       const newCount = files.filter((f) => !indexed.has(f)).length;
       if (newCount > 0) {
         ctx.ui.notify(
@@ -521,8 +537,8 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async () => {
-    await sessionStore.close();
-    await orgStore.close();
+    if (sessionStore) await sessionStore.close();
+    if (orgStore) await orgStore.close();
   });
 }
 

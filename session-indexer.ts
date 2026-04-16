@@ -34,6 +34,22 @@ export interface SessionChunk {
   metadata: Record<string, string>;
 }
 
+// --- Quality Filters ---
+// Minimum session file size to index (skip trivial 1-2 message sessions)
+const MIN_SESSION_SIZE_BYTES = 2048;
+
+// Patterns that indicate noise (tool errors, delegate failures, smoke tests)
+const NOISE_PATTERNS = [
+  /^error: .{0,50}connection refused/i,
+  /^error: .{0,50}ECONNREFUSED/i,
+  /^error: .{0,50}timeout/i,
+  /^\s*\{?\s*"type"\s*:\s*"tool_/,  // raw tool JSON leaked into text
+  /^Running .{0,30} tests?\.\.\./i,  // smoke test output
+  /^Tests? passed/i,
+  /^✅ \d+ tests? passed/,
+  /^PASS |^FAIL /,  // test runner output
+];
+
 // --- Pi format ---
 
 interface PiJsonlMessage {
@@ -70,23 +86,26 @@ function getClaudeProjectsDir(): string {
 }
 
 /**
- * Find all JSONL session files from both runtimes
+ * Find all JSONL session files from both runtimes.
+ * Filters out trivial sessions below MIN_SESSION_SIZE_BYTES.
  */
 export function findSessionFiles(baseDir?: string): string[] {
-  if (baseDir) return scanDir(baseDir);
-
-  return [
-    ...scanDir(getPiSessionsDir()),
-    ...scanClaudeDir(getClaudeProjectsDir()),
-  ].sort();
+  const raw = baseDir
+    ? scanDir(baseDir)
+    : [...scanDir(getPiSessionsDir()), ...scanClaudeDir(getClaudeProjectsDir())];
+  return raw.filter(f => {
+    try { return fs.statSync(f).size >= MIN_SESSION_SIZE_BYTES; } catch { return false; }
+  }).sort();
 }
 
 /**
  * Find session files from a specific source only
  */
 export function findSessionFilesBySource(source: SessionSource): string[] {
-  if (source === "pi") return scanDir(getPiSessionsDir());
-  return scanClaudeDir(getClaudeProjectsDir());
+  const raw = source === "pi" ? scanDir(getPiSessionsDir()) : scanClaudeDir(getClaudeProjectsDir());
+  return raw.filter(f => {
+    try { return fs.statSync(f).size >= MIN_SESSION_SIZE_BYTES; } catch { return false; }
+  });
 }
 
 function scanDir(dir: string): string[] {
@@ -290,6 +309,10 @@ function parseClaudeLine(
   );
 }
 
+function isNoise(text: string): boolean {
+  return NOISE_PATTERNS.some(p => p.test(text));
+}
+
 function parseMessageContent(
   role: string,
   content: Array<{ type: string; text?: string }> | string | undefined,
@@ -303,6 +326,7 @@ function parseMessageContent(
   const text = extractTextContent(content);
 
   if (role === "user" && text && text.length > 20) {
+    if (isNoise(text)) return null;
     return {
       id: `${sessionFile}:${lineNumber}`,
       text: truncateText(text, 2000),
@@ -317,6 +341,7 @@ function parseMessageContent(
   }
 
   if (role === "assistant" && text && text.length > 100) {
+    if (isNoise(text)) return null;
     return {
       id: `${sessionFile}:${lineNumber}`,
       text: truncateText(text, 2000),

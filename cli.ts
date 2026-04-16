@@ -96,7 +96,7 @@ const orgDbPath = getOrgDbPath();
 
 async function searchSessions(query: string, limit: number, source?: string): Promise<void> {
   const provider = getProvider();
-  const dim = provider.dimensions || 768;
+  const dim = provider.dimensions || 2560;
 
   const store = new VectorStore(sessionDbPath, dim);
   await store.init();
@@ -177,7 +177,7 @@ async function searchKnowledge(query: string, limit: number): Promise<void> {
   }
 
   const provider = getProvider();
-  const dim = provider.dimensions || 768;
+  const dim = provider.dimensions || 2560;
 
   const store = new VectorStore(orgDbPath, dim);
   await store.init();
@@ -231,7 +231,7 @@ async function status(): Promise<void> {
   let orgCount = 0;
   const orgExists = fs.existsSync(orgDbPath);
   if (orgExists) {
-    const orgStore = new VectorStore(orgDbPath, 768);
+    const orgStore = new VectorStore(orgDbPath, 2560);
     try {
       await orgStore.init();
       orgCount = await orgStore.getCount();
@@ -260,7 +260,7 @@ async function status(): Promise<void> {
 
 async function reindex(force: boolean): Promise<void> {
   const provider = getProvider();
-  const dim = provider.dimensions || 768;
+  const dim = provider.dimensions || 2560;
 
   const store = new VectorStore(sessionDbPath, dim);
   await store.init();

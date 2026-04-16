@@ -56,12 +56,53 @@ Future: dictcli `stem` (Kiwi-based) will decompose Korean verb conjugations
 ("설계했다" → "설계") and compound nouns ("검색증강생성" → "검색"+"증강"+"생성").
 andenken Layer 1 consumes dictcli stem output without owning the Kiwi dependency.
 
+## Embedding Infrastructure — GPU Server Rule (MANDATORY)
+
+**인덱싱(임베딩)은 반드시 GPU 서버(gpu2i/gpu1i)로 한다. 로컬(ollama)에서 인덱싱 절대 금지.**
+
+| 용도 | 환경 | endpoint |
+|------|------|----------|
+| **인덱싱** (session/org) | GPU 서버 vLLM (RTX 5080) | `localhost:18000` (SSH tunnel) |
+| **쿼리** (검색) | 로컬 ollama (iGPU) | `localhost:11434` |
+
+- GPU 서버: ~350 emb/s (5분에 97K chunks 완료)
+- 로컬 ollama: ~0.1 files/s (97K chunks → 80분+, 실용 불가)
+- 로컬 ollama는 **쿼리 전용** — 터널 없이도 검색 가능하게 하는 것이 목적
+
+### 인덱싱 전 필수 절차
+
+```bash
+# 1. SSH 터널 열기
+ssh -f -N -L 18000:localhost:8000 gpu2i
+
+# 2. 터널 확인
+curl -s http://localhost:18000/v1/models | head -3
+
+# 3. 인덱싱 실행 (GPU 서버 경유)
+ANDENKEN_PROVIDER=vllm ANDENKEN_VLLM_ENDPOINT=http://localhost:18000 \
+  ANDENKEN_VLLM_MODEL=/storage/models/vllm/default \
+  ANDENKEN_VLLM_PRESET=Qwen/Qwen3-Embedding-4B \
+  npx tsx indexer.ts sessions --force
+```
+
+### 운영 모델
+
+- **Qwen3-Embedding-4B** (2560d) — org + session 공통
+- Gemini 호출 없음. 모든 임베딩은 로컬 인프라.
+
 ## Environment
 
 ```bash
-GEMINI_API_KEY    # preferred
-GOOGLE_AI_API_KEY # also accepted
-GOOGLE_API_KEY    # also accepted
+# Embedding provider (vLLM mandatory for indexing)
+ANDENKEN_PROVIDER=vllm
+ANDENKEN_VLLM_ENDPOINT=http://localhost:18000   # GPU server via SSH tunnel
+ANDENKEN_VLLM_MODEL=/storage/models/vllm/default
+ANDENKEN_VLLM_PRESET=Qwen/Qwen3-Embedding-4B
+
+# Query-time local (ollama)
+# ANDENKEN_VLLM_ENDPOINT=http://localhost:11434
+# ANDENKEN_VLLM_MODEL=qwen3-embedding:4b
+# ANDENKEN_VLLM_PRESET=ollama/qwen3-embedding:4b
 ```
 
 Index locations:
