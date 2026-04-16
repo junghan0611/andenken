@@ -26,8 +26,8 @@ llmlog: `20260413T213051` — 전략 문서
 | 2d | gpu2i vllm → embed mode | ✅ Qwen3-4B 서빙 중 |
 | 2e | test-provider.ts vllm 11/11 | ✅ |
 | 2f | gpu2i max-num-batched-tokens 튜닝 | ✅ 8192 (안정), 16384는 OOM |
-| 2g | gpu1i 준비 → dual-GPU | ⏳ 힘 준비 중 |
-| 2h | org 재인덱싱 (Qwen3-4B 2560d) | ⏳ dual-GPU 후 실행 |
+| 2g | gpu1i 준비 → dual-GPU | ⏳ 가용 |
+| 2h | org 재인덱싱 (Qwen3-4B 2560d) | ✅ 94,931 chunks, cleanup 완료 |
 | 2i | vllm.nix 수정 (--task embed) + nixos-rebuild | ⏳ |
 
 ### Phase 3: Bake-off
@@ -149,44 +149,18 @@ curl -s http://localhost:18001/v1/models | python3 -m json.tool | head -5
 ### Bake-off 인덱싱 상태
 
 - `data/bakeoff-qwen4b/org.lance` — **94,931 chunks, 2560d, err:0** (완료)
-- cleanup 진행 중 (tmux `cleanup` 세션) — 25K duplicate 제거
-- concurrency race condition이 원인 → cleanup으로 해결 가능
+- cleanup 완료 — 25K duplicate 제거됨
+- 운영 org.lance로 승격 완료
 
-### 다음 세션 첫 작업 (운영 전환 30분)
+### 운영 상태 (2026-04-16 재인덱싱 완료)
 
-```bash
-# 1. cleanup 완료 확인
-ANDENKEN_DATA=./data/bakeoff-qwen4b npx tsx indexer.ts verify org
-# → duplicate 0, orphan 0 확인
-
-# 2. golden-queries bake-off (Qwen3-4B vs Gemini 비교)
-ANDENKEN_PROVIDER=vllm \
-  ANDENKEN_VLLM_ENDPOINT=http://localhost:11434 \
-  ANDENKEN_VLLM_MODEL=qwen3-embedding:4b \
-  ANDENKEN_VLLM_PRESET="ollama/qwen3-embedding:4b" \
-  ANDENKEN_DATA=./data/bakeoff-qwen4b \
-  npx tsx golden-queries.ts --db org
-
-# 3. 품질 확인 후 운영 교체
-mv data/org.lance data/org.lance.gemini-768d-backup
-mv data/bakeoff-qwen4b/org.lance data/org.lance
-cp data/bakeoff-qwen4b/org-manifest.json data/org-manifest.json
-
-# 4. agent-config 환경변수 설정
-# ~/.env.local에 추가:
-#   ANDENKEN_PROVIDER=vllm
-#   ANDENKEN_VLLM_ENDPOINT=http://localhost:11434
-#   ANDENKEN_VLLM_MODEL=qwen3-embedding:4b
-#   ANDENKEN_VLLM_PRESET=ollama/qwen3-embedding:4b
-
-# 5. pi 재시작 → 완전한 로컬 시맨틱 검색
-```
-
-### 운영 전환 전 확인사항
-
-- golden-queries 8/8 PASS 필수 (Gemini 대비 품질 하락 없어야)
-- sessions 인덱스도 재구축 필요 (현재 768d → 2560d)
-- 양자화 차이 (ollama Q4 query vs vLLM fp16 index) 품질 영향 확인
+- Qwen3-Embedding-4B 2560d, dual-GPU 재인덱싱 완료
+- **95,274 chunks**, 2,836 files, 0 errors, 19.5분
+- 8/8 golden-queries PASS, 43/43 테스트 PASS
+- QMD 패턴 A/B/D + GBrain 패턴 3(dedup) 적용 완료
+- Score normalization + FTS expand + file dedup(pre+post) 적용
+- llmlog 통합문서: `20260416T115700` (QMD+GBrain 패턴 흡수 현황)
+- **다음 작업**: break point scoring (src block 보호) → doctor 확장
 
 ### Bake-off Models
 
@@ -261,60 +235,56 @@ bge-m3 유리: 메모리/속도, 검증된 기준축
 
 ---
 
-## Action Plan — QMD 패턴 4건 (2026-04-13 approved)
+## QMD + GBrain 패턴 흡수 현황 (2026-04-16 갱신)
 
-llmlog: `20260413T174833` — 전체 계획 + 코드 분석 상세
+llmlog: `20260416T115700` — 통합 비교 문서 (QMD 6건 + GBrain 5건)
 
-### 실행 순서
+### QMD 패턴
 
-| Step | Pattern | Lines | Status |
-|------|---------|-------|--------|
-| A | RRF top-rank bonus (retriever.ts rrfFusion) | ~10 | ⏳ next |
-| B | Query caching (gemini-embeddings.ts, in-memory Map+TTL) | ~20 | ⏳ |
-| C | Strong Signal Bypass (cli.ts + index.ts, 4 places) | ~30 | ⏳ FTS score distribution survey first |
-| D | Recall Tracking (index.ts → recalls.jsonl) | ~15 | ⏳ |
+| # | 패턴 | 상태 |
+|---|------|------|
+| 1 | RRF top-rank bonus | ✅ rrfFusion() |
+| 2 | Strong Signal Bypass | ❌ 보류 (로컬 무료) |
+| 3 | 쿼리 캐싱 | ✅ CachingProvider + dictcli expand cache |
+| 4 | Break point scoring | ⏳ 다음 (src block 보호) |
+| 5 | MCP 서버 | ❌ 장기 |
+| 6 | FTS5 고급 쿼리 | ❌ 장기 |
 
-### Key Constraints
+### GBrain 패턴
 
-- **No embedding rebuild** — all 4 patterns work with existing index
-- **One at a time** — golden-queries before/after comparison per pattern
-- **RRF bonus = sessions only** (rrf merge). org uses weighted merge — separate logic if needed, decide after A validates
-- **Strong Signal Bypass blocker**: LanceDB FTS `_score` scale differs from SQLite FTS5. Must survey score distribution before setting thresholds (0.85/0.15 are QMD values, not ours)
-- **Recall Tracking** → memory consolidation stage 2 entry point. Data feeds future MEMORY.md auto-promotion (stage 3)
+| # | 패턴 | 상태 |
+|---|------|------|
+| 1 | Compiled Truth | ⏳ 중기 |
+| 2 | 5가지 운영 규율 | 부분 |
+| 3 | 4단계 dedup | ✅ file dedup (pre+post) + MMR |
+| 4 | Brain-Agent Loop | 부분 |
+| 5 | doctor/maintain | ⏳ 다음 |
 
-### Excluded (verified reasons)
+### 이번 세션 추가 적용
 
-- LLM reranking: Jina v3 MRR drop 0.754→0.642 on Korean+English
-- GGUF local embedding: Gemini Free tier sufficient
-- MCP server, FTS5 migration, break-point scoring: too large scope
+- Score normalization + cross-signal bonus (×1.1)
+- FTS에 dictcli expand 반영
+- File dedup pre-merge(3/file) + post-merge cap(3/file)
+- Heading noise 감소 (min 20→40)
+- Recall tracking (recalls.jsonl)
 
-### Verification Protocol
+### Excluded (confirmed)
 
-```
-1. Run golden-queries → save baseline
-2. Apply one pattern (~10-30 lines)
-3. Add unit test
-4. Re-run golden-queries → compare
-5. No quality drop → commit
-6. Quality drop → rollback + analyze
-```
-
-### Review Notes (2026-04-13, from GLG)
-
-- Pattern A(RRF bonus) sessions-only analysis correct. Validate on sessions first, then decide org
-- Strong Signal Bypass trap correctly identified — FTS score scale investigation is prerequisite
-- Recall → consolidation 2→3 stage roadmap acknowledged
+- LLM 리랭킹: Jina MRR 하락 검증. 범용 리랭커는 개인 개념에 약함
+- LLM 쿼리 확장: dictcli expand가 비용 0으로 해냄
+- llmlog/agenda 인덱싱: 세션으로 커버. botlog 승격분만 인덱싱
 
 ## Architecture Quick Reference
 
 - sessions: rrf merge, halfLife=14d, mmr=off, minScore=0.001
-- org: weighted merge, halfLife=90d, mmr=on(λ=0.7), minScore=0.05
+- org: weighted merge + score norm, halfLife=90d, mmr=on(λ=0.7), minScore=0.05
+- file dedup: pre-merge 3/file + post-merge 3/file
 - candidateMultiplier: 4x both
-- Pipeline: dictcli expand → embedQuery → vector+FTS → merge → decay → filter → MMR
+- Pipeline: dictcli expand → embedQuery → vector+FTS(expanded) → file dedup → merge(norm+cross) → decay → filter → MMR → file cap
 
 ## Related Notes
 
-- `20260410T214031` — QMD vs andenken comparison (6 patterns analyzed)
+- `20260416T115700` — QMD+GBrain 패턴 흡수 현황 (통합)
 - `20260408T120252` — Memory consolidation 3-stage roadmap
 - `20260325T151425` — andenken worklog (Jina failure record)
 - `20260330T212639` — Embedding cost bomb analysis

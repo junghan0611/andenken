@@ -286,7 +286,7 @@ export default function (pi: ExtensionAPI) {
       const candidates = Math.min(limit * 4, 200); // openclaw candidateMultiplier
       const queryVector = await p.embedQuery(enrichedQuery);
       const vectorResults = await sessionStore.search(queryVector, candidates);
-      const bm25Query = expandQueryForBM25(params.query);
+      const bm25Query = expandQueryForBM25(enrichedQuery); // include dictcli expand terms in FTS
       const ftsResults = await sessionStore.fullTextSearch(bm25Query, candidates);
 
       let results = await retrieve(params.query, vectorResults, ftsResults, {
@@ -311,7 +311,7 @@ export default function (pi: ExtensionAPI) {
         const orgCandidates = Math.min(limit * 4, 200);
         const orgQueryVector = await p.embedQuery(enrichedQuery);
         const orgVec = await orgStore.search(orgQueryVector, orgCandidates, 0.05);
-        const orgFts = await orgStore.fullTextSearch(expandQueryForBM25(params.query), orgCandidates);
+        const orgFts = await orgStore.fullTextSearch(expandQueryForBM25(enrichedQuery), orgCandidates);
           const orgResults = await retrieve(params.query, orgVec, orgFts, {
             vectorWeight: 0.7,
             bm25Weight: 0.3,
@@ -394,7 +394,7 @@ export default function (pi: ExtensionAPI) {
       const candidates = Math.min(limit * 4, 200); // openclaw candidateMultiplier
       const queryVector = await p.embedQuery(enrichedQuery);
       const vectorResults = await orgStore.search(queryVector, candidates, 0.05);
-      const bm25Query = expandQueryForBM25(params.query);
+      const bm25Query = expandQueryForBM25(enrichedQuery); // include dictcli expand terms in FTS
       const ftsResults = await orgStore.fullTextSearch(bm25Query, candidates);
 
       const results = await retrieve(params.query, vectorResults, ftsResults, {

@@ -358,7 +358,7 @@ export function chunkOrgFile(
       h,
     );
 
-    if (headingText.length < 20) continue;
+    if (headingText.length < 40) continue; // skip tiny heading-only chunks (noise for embeddings)
 
     chunks.push({
       id: `${filePath}:h${h.lineNumber}`,

@@ -107,7 +107,7 @@ async function searchSessions(query: string, limit: number, source?: string): Pr
 
   const candidates = Math.min(limit * 4, 200); // openclaw candidateMultiplier pattern
   const queryVector = await provider.embedQuery(enrichedQuery);
-  const bm25Query = expandQueryForBM25(query);
+  const bm25Query = expandQueryForBM25(enrichedQuery); // include dictcli expand terms in FTS
   const vectorResults = await store.search(queryVector, candidates);
   const ftsResults = await store.fullTextSearch(bm25Query, candidates);
 
@@ -188,7 +188,7 @@ async function searchKnowledge(query: string, limit: number): Promise<void> {
 
   const candidates = Math.min(limit * 4, 200); // openclaw candidateMultiplier pattern
   const queryVector = await provider.embedQuery(enrichedQuery);
-  const bm25Query = expandQueryForBM25(query);
+  const bm25Query = expandQueryForBM25(enrichedQuery); // include dictcli expand terms in FTS
   const vectorResults = await store.search(queryVector, candidates, 0.05);
   const ftsResults = await store.fullTextSearch(bm25Query, candidates);
 

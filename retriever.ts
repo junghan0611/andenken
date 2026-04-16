@@ -37,6 +37,24 @@ const DEFAULT_CONFIG: RetrieverConfig = {
   },
 };
 
+// --- File-level dedup ---
+//
+// Vector search on dense embeddings returns many chunks from the SAME file
+// (e.g., 10/10 from one document). This kills diversity in the merge.
+// Keep only top-K chunks per file before merge to let other files surface.
+
+function fileDedup(results: SearchResult[], maxPerFile: number = 3): SearchResult[] {
+  const fileCounts = new Map<string, number>();
+  return results.filter(r => {
+    // Extract file path from chunk ID (format: /path/to/file.org:cN:M or :hN)
+    const file = r.id.replace(/:[ch]\d+.*$/, "");
+    const count = fileCounts.get(file) ?? 0;
+    if (count >= maxPerFile) return false;
+    fileCounts.set(file, count + 1);
+    return true;
+  });
+}
+
 // --- Weighted Sum Merge (OpenClaw pattern + score normalization) ---
 //
 // LanceDB FTS _score (~10-25) vs vector 1/(1+distance) (~0.4-0.65).
@@ -50,16 +68,19 @@ export function weightedMerge(
   vectorWeight: number,
   textWeight: number,
 ): SearchResult[] {
-  const maxVec = vectorResults.length > 0
-    ? Math.max(...vectorResults.map(r => r.score))
+  // File-level dedup: prevent one file from monopolizing either signal
+  const vecDeduped = fileDedup(vectorResults);
+  const ftsDeduped = fileDedup(ftsResults);
+  const maxVec = vecDeduped.length > 0
+    ? Math.max(...vecDeduped.map(r => r.score))
     : 1;
-  const maxFts = ftsResults.length > 0
-    ? Math.max(...ftsResults.map(r => r.score))
+  const maxFts = ftsDeduped.length > 0
+    ? Math.max(...ftsDeduped.map(r => r.score))
     : 1;
 
   const byId = new Map<string, { result: SearchResult; vecNorm: number; ftsNorm: number; inBoth: boolean }>();
 
-  for (const r of vectorResults) {
+  for (const r of vecDeduped) {
     byId.set(r.id, {
       result: r,
       vecNorm: maxVec > 0 ? r.score / maxVec : 0,
@@ -68,7 +89,7 @@ export function weightedMerge(
     });
   }
 
-  for (const r of ftsResults) {
+  for (const r of ftsDeduped) {
     const existing = byId.get(r.id);
     const norm = maxFts > 0 ? r.score / maxFts : 0;
     if (existing) {
@@ -347,7 +368,10 @@ export async function retrieve(
     results = mmrRerank(results, cfg.mmr.lambda);
   }
 
-  // 5. Optional Jina rerank (off by default for org, on for sessions)
+  // 5. Post-merge file cap: prevent one file from dominating final results
+  results = fileDedup(results, 3);
+
+  // 6. Optional Jina rerank (off by default for org, on for sessions)
   if (cfg.jinaApiKey && results.length > 0) {
     results = await jinaRerank(query, results, cfg.jinaApiKey, cfg.jinaModel, 10);
   }

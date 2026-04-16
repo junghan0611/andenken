@@ -153,7 +153,7 @@ async function runQuery(
   const targetDb = dbFilter ?? gq.db;
   const expanded = useExpand ? dictcliExpand(gq.query) : [];
   const enrichedQuery = expanded.length > 0 ? `${gq.query} ${expanded.join(" ")}` : gq.query;
-  const bm25Query = expandQueryForBM25(gq.query);
+  const bm25Query = expandQueryForBM25(enrichedQuery);
 
   const allResults: { score: number; text: string; project: string }[] = [];
 
