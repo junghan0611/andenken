@@ -42,6 +42,53 @@ export interface EmbeddingProvider {
   resetStats(): void;
 }
 
+// --- Caching Provider (query-time only, for long-lived processes like pi extension) ---
+
+export class CachingProvider implements EmbeddingProvider {
+  private inner: EmbeddingProvider;
+  private queryCache = new Map<string, { vector: number[]; expires: number }>();
+  private ttlMs: number;
+  private _hits = 0;
+
+  constructor(inner: EmbeddingProvider, ttlMs: number = 5 * 60 * 1000) {
+    this.inner = inner;
+    this.ttlMs = ttlMs;
+  }
+
+  get name() { return this.inner.name; }
+  get dimensions() { return this.inner.dimensions; }
+
+  async embedQuery(text: string): Promise<number[]> {
+    const cached = this.queryCache.get(text);
+    if (cached && cached.expires > Date.now()) {
+      this._hits++;
+      return cached.vector;
+    }
+    const vector = await this.inner.embedQuery(text);
+    this.queryCache.set(text, { vector, expires: Date.now() + this.ttlMs });
+    return vector;
+  }
+
+  async embedDocument(text: string): Promise<number[]> {
+    return this.inner.embedDocument(text);
+  }
+
+  async embedDocumentBatch(texts: string[]): Promise<number[][]> {
+    return this.inner.embedDocumentBatch(texts);
+  }
+
+  getStats(): EmbeddingStats {
+    const inner = this.inner.getStats();
+    return { ...inner, cacheHits: this._hits } as EmbeddingStats & { cacheHits: number };
+  }
+
+  resetStats(): void {
+    this.inner.resetStats();
+    this._hits = 0;
+    this.queryCache.clear();
+  }
+}
+
 // --- Gemini Provider ---
 
 import {

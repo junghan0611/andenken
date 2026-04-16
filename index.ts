@@ -18,9 +18,10 @@ import * as fs from "node:fs";
 import { execSync } from "node:child_process";
 import {
   createProviderFromEnv,
+  CachingProvider,
   type EmbeddingProvider,
 } from "./embedding-provider.js";
-import { VectorStore, getOrgDbPath } from "./store.js";
+import { VectorStore, getOrgDbPath, getDataDir } from "./store.js";
 import {
   findSessionFiles,
   extractSessionChunks,
@@ -41,9 +42,20 @@ interface SearchResult {
   score: number;
 }
 
-// --- dictcli expand (3층) ---
+// --- dictcli expand (3층) with in-memory cache ---
+
+const expandCache = new Map<string, { result: string[]; expires: number }>();
+const EXPAND_CACHE_TTL = 30 * 60 * 1000; // 30 min — Korean vocab doesn't change mid-session
 
 function dictcliExpand(query: string): string[] {
+  const cached = expandCache.get(query);
+  if (cached && cached.expires > Date.now()) return cached.result;
+  const result = dictcliExpandRaw(query);
+  expandCache.set(query, { result, expires: Date.now() + EXPAND_CACHE_TTL });
+  return result;
+}
+
+function dictcliExpandRaw(query: string): string[] {
   const koreanWords = query.match(/[\uAC00-\uD7AF]+/g) ?? [];
   if (koreanWords.length === 0) return [];
 
@@ -73,6 +85,24 @@ function dictcliExpand(query: string): string[] {
   return [...new Set(expanded)];
 }
 
+// --- Recall Tracking (memory consolidation stage 2) ---
+
+function recordRecall(query: string, tool: string, results: SearchResult[]): void {
+  try {
+    const recallPath = path.join(getDataDir(), "recalls.jsonl");
+    const entry = JSON.stringify({
+      timestamp: new Date().toISOString(),
+      query,
+      tool,
+      resultIds: results.slice(0, 5).map(r => r.id),
+      topScore: results[0]?.score ?? 0,
+    });
+    fs.appendFileSync(recallPath, entry + "\n");
+  } catch {
+    // best-effort — never block search
+  }
+}
+
 // --- Config ---
 
 /**
@@ -100,7 +130,9 @@ function loadEnvLocal(): void {
 
 function getProvider(): EmbeddingProvider | null {
   loadEnvLocal();
-  return createProviderFromEnv();
+  const inner = createProviderFromEnv();
+  if (!inner) return null;
+  return new CachingProvider(inner); // query cache for pi extension (long-lived process)
 }
 
 // --- Extension ---
@@ -294,9 +326,11 @@ export default function (pi: ExtensionAPI) {
           }
       }
 
+      const finalResults = results.slice(0, limit);
+      recordRecall(params.query, "session_search", finalResults);
       const output = formatResults(
         expanded.length > 0 ? `${params.query} (+expand: ${expanded.join(", ")})` : params.query,
-        results.slice(0, limit),
+        finalResults,
       );
       if (fallbackUsed) {
         output.content[0].text += "\n\n(⚡ session 결과 부족 → knowledge_search 폴백 포함)";
@@ -372,9 +406,11 @@ export default function (pi: ExtensionAPI) {
         mergeStrategy: "weighted" as const,
       });
 
+      const finalResults = results.slice(0, limit);
+      recordRecall(params.query, "knowledge_search", finalResults);
       return formatResults(
         expanded.length > 0 ? `${params.query} (+expand: ${expanded.join(", ")})` : params.query,
-        results.slice(0, limit),
+        finalResults,
       );
     },
   });

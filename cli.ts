@@ -19,9 +19,27 @@ import {
   createProviderFromEnv,
   type EmbeddingProvider,
 } from "./embedding-provider.js";
-import { VectorStore, getSessionsDbPath, getOrgDbPath, type SearchResult } from "./store.js";
+import { VectorStore, getSessionsDbPath, getOrgDbPath, getDataDir, type SearchResult } from "./store.js";
 import { findSessionFiles, extractSessionChunks } from "./session-indexer.js";
 import { retrieve, expandQueryForBM25, type MergeStrategy } from "./retriever.js";
+
+// --- Recall Tracking (memory consolidation stage 2) ---
+
+function recordRecall(query: string, tool: string, results: SearchResult[]): void {
+  try {
+    const recallPath = path.join(getDataDir(), "recalls.jsonl");
+    const entry = JSON.stringify({
+      timestamp: new Date().toISOString(),
+      query,
+      tool,
+      resultIds: results.slice(0, 5).map(r => r.id),
+      topScore: results[0]?.score ?? 0,
+    });
+    fs.appendFileSync(recallPath, entry + "\n");
+  } catch {
+    // best-effort — never block search
+  }
+}
 
 // --- Config ---
 
@@ -136,6 +154,7 @@ async function searchSessions(query: string, limit: number, source?: string): Pr
   }
 
   const finalResults = results.slice(0, limit);
+  recordRecall(query, "search-sessions", finalResults);
   console.log(
     JSON.stringify({
       query,
@@ -183,6 +202,7 @@ async function searchKnowledge(query: string, limit: number): Promise<void> {
   });
 
   const finalResults = results.slice(0, limit);
+  recordRecall(query, "search-knowledge", finalResults);
   console.log(
     JSON.stringify({
       query,

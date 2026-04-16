@@ -175,7 +175,7 @@ async function runQuery(
         mmr: { enabled: false, lambda: 0.7 },
       });
       allResults.push(...results.slice(0, 5).map((r) => ({
-        score: r.score, text: r.text.slice(0, 200), project: r.project,
+        score: r.score, text: r.text.slice(0, 500), project: r.project,
       })));
       await store.close();
     }
@@ -197,7 +197,7 @@ async function runQuery(
         mmr: { enabled: true, lambda: 0.7 },
       });
       allResults.push(...results.slice(0, 5).map((r) => ({
-        score: r.score, text: r.text.slice(0, 200), project: r.project,
+        score: r.score, text: r.text.slice(0, 500), project: r.project,
       })));
       await store.close();
     }

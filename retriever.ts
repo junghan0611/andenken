@@ -37,7 +37,12 @@ const DEFAULT_CONFIG: RetrieverConfig = {
   },
 };
 
-// --- Weighted Sum Merge (OpenClaw pattern) ---
+// --- Weighted Sum Merge (OpenClaw pattern + score normalization) ---
+//
+// LanceDB FTS _score (~10-25) vs vector 1/(1+distance) (~0.4-0.65).
+// Without normalization, FTS dominates ~90% of the weighted sum,
+// making vector semantic search effectively useless.
+// Max-normalization brings both to [0, 1] so weights are meaningful.
 
 export function weightedMerge(
   vectorResults: SearchResult[],
@@ -45,30 +50,47 @@ export function weightedMerge(
   vectorWeight: number,
   textWeight: number,
 ): SearchResult[] {
-  const byId = new Map<string, { result: SearchResult; vectorScore: number; textScore: number }>();
+  const maxVec = vectorResults.length > 0
+    ? Math.max(...vectorResults.map(r => r.score))
+    : 1;
+  const maxFts = ftsResults.length > 0
+    ? Math.max(...ftsResults.map(r => r.score))
+    : 1;
+
+  const byId = new Map<string, { result: SearchResult; vecNorm: number; ftsNorm: number; inBoth: boolean }>();
 
   for (const r of vectorResults) {
-    byId.set(r.id, { result: r, vectorScore: r.score, textScore: 0 });
+    byId.set(r.id, {
+      result: r,
+      vecNorm: maxVec > 0 ? r.score / maxVec : 0,
+      ftsNorm: 0,
+      inBoth: false,
+    });
   }
 
   for (const r of ftsResults) {
     const existing = byId.get(r.id);
+    const norm = maxFts > 0 ? r.score / maxFts : 0;
     if (existing) {
-      existing.textScore = r.score;
+      existing.ftsNorm = norm;
+      existing.inBoth = true;
     } else {
-      byId.set(r.id, { result: r, vectorScore: 0, textScore: r.score });
+      byId.set(r.id, { result: r, vecNorm: 0, ftsNorm: norm, inBoth: false });
     }
   }
 
   return Array.from(byId.values())
-    .map(({ result, vectorScore, textScore }) => ({
-      ...result,
-      score: vectorWeight * vectorScore + textWeight * textScore,
-    }))
+    .map(({ result, vecNorm, ftsNorm, inBoth }) => {
+      let score = vectorWeight * vecNorm + textWeight * ftsNorm;
+      // Cross-signal agreement: both vector AND FTS found this result
+      if (inBoth) score *= 1.1;
+      return { ...result, score };
+    })
     .sort((a, b) => b.score - a.score);
 }
 
 // --- RRF (kept for session search where it works well) ---
+// QMD top-rank bonus: results ranking #1 in any list get score boost.
 
 export function rrfFusion(
   vectorResults: SearchResult[],
@@ -77,21 +99,35 @@ export function rrfFusion(
   bm25Weight: number,
   k: number = 60,
 ): SearchResult[] {
-  const scoreMap = new Map<string, { result: SearchResult; score: number }>();
+  const scoreMap = new Map<string, { result: SearchResult; score: number; topRank: number }>();
 
   vectorResults.forEach((r, rank) => {
     const s = vectorWeight / (k + rank + 1);
     const e = scoreMap.get(r.id);
-    if (e) e.score += s;
-    else scoreMap.set(r.id, { result: r, score: s });
+    if (e) {
+      e.score += s;
+      e.topRank = Math.min(e.topRank, rank);
+    } else {
+      scoreMap.set(r.id, { result: r, score: s, topRank: rank });
+    }
   });
 
   ftsResults.forEach((r, rank) => {
     const s = bm25Weight / (k + rank + 1);
     const e = scoreMap.get(r.id);
-    if (e) e.score += s;
-    else scoreMap.set(r.id, { result: r, score: s });
+    if (e) {
+      e.score += s;
+      e.topRank = Math.min(e.topRank, rank);
+    } else {
+      scoreMap.set(r.id, { result: r, score: s, topRank: rank });
+    }
   });
+
+  // Top-rank bonus (QMD pattern)
+  for (const entry of scoreMap.values()) {
+    if (entry.topRank === 0) entry.score += 0.05;
+    else if (entry.topRank <= 2) entry.score += 0.02;
+  }
 
   return Array.from(scoreMap.values())
     .sort((a, b) => b.score - a.score)
