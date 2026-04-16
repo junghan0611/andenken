@@ -27,7 +27,7 @@ llmlog: `20260413T213051` — 전략 문서
 | 2e | test-provider.ts vllm 11/11 | ✅ |
 | 2f | gpu2i max-num-batched-tokens 튜닝 | ✅ 8192 (안정), 16384는 OOM |
 | 2g | gpu1i 준비 → dual-GPU | ⏳ 가용 |
-| 2h | org 재인덱싱 (Qwen3-4B 2560d) | ✅ 94,931 chunks, cleanup 완료 |
+| 2h | org 재인덱싱 (Qwen3-4B 2560d) | ⏳ 재인덱싱 필요 (chunking 변경) |
 | 2i | vllm.nix 수정 (--task embed) + nixos-rebuild | ⏳ |
 
 ### Phase 3: Bake-off
@@ -152,15 +152,15 @@ curl -s http://localhost:18001/v1/models | python3 -m json.tool | head -5
 - cleanup 완료 — 25K duplicate 제거됨
 - 운영 org.lance로 승격 완료
 
-### 운영 상태 (2026-04-16 재인덱싱 완료)
+### 운영 상태 (2026-04-16 chunking 개선 완료, 재인덱싱 대기)
 
-- Qwen3-Embedding-4B 2560d, dual-GPU 재인덱싱 완료
-- **95,274 chunks**, 2,836 files, 0 errors, 19.5분
-- 8/8 golden-queries PASS, 43/43 테스트 PASS
-- QMD 패턴 A/B/D + GBrain 패턴 3(dedup) 적용 완료
-- Score normalization + FTS expand + file dedup(pre+post) 적용
+- org-aware break point scoring + 마이크로헤딩 병합 구현 완료
+- 블록 분할: 5,310→467 (-91%), 총 청크: 97K→80K (-17%)
+- heading 청크: 54K→41K (-24%), content 청크: 43K→40K (-9%)
+- 31/31 테스트 PASS, 8/8 golden-queries PASS
+- llmlog 설계문서: `20260416T135457` (org 청킹 설계)
 - llmlog 통합문서: `20260416T115700` (QMD+GBrain 패턴 흡수 현황)
-- **다음 작업**: break point scoring (src block 보호) → doctor 확장
+- **다음 작업**: GPU 재인덱싱 → verify + spot check → doctor 확장
 
 ### Bake-off Models
 
@@ -246,7 +246,7 @@ llmlog: `20260416T115700` — 통합 비교 문서 (QMD 6건 + GBrain 5건)
 | 1 | RRF top-rank bonus | ✅ rrfFusion() |
 | 2 | Strong Signal Bypass | ❌ 보류 (로컬 무료) |
 | 3 | 쿼리 캐싱 | ✅ CachingProvider + dictcli expand cache |
-| 4 | Break point scoring | ⏳ 다음 (src block 보호) |
+| 4 | Break point scoring | ✅ 완료 (org-aware scoring + 절대 블록 보호 + 마이크로헤딩 병합) |
 | 5 | MCP 서버 | ❌ 장기 |
 | 6 | FTS5 고급 쿼리 | ❌ 장기 |
 
