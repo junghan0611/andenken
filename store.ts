@@ -236,7 +236,7 @@ export class VectorStore {
       // Dimension mismatch: index built with different provider
       if (msg.includes("vector column") || msg.includes("dimension")) {
         process.stderr.write(
-          `⚠ Vector dimension mismatch (query=${queryVector.length}d vs index=${this.vectorDim}d). Falling back to FTS only.\n`,
+          `⚠ Vector dimension mismatch (query=${queryVector.length}d, db=${this.dbPath}): ${msg.slice(0, 120)}. Falling back to FTS only.\n`,
         );
         return [];
       }
