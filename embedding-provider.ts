@@ -457,7 +457,7 @@ export function createProviderFromEnv(): EmbeddingProvider | null {
     // (useful when model path differs from HF name, e.g., /storage/models/vllm/default)
     const presetName = process.env.ANDENKEN_VLLM_PRESET ?? model;
     const preset = getModelPreset(presetName);
-    if (preset) {
+    if (preset && process.env.ANDENKEN_LOG_PRESET === "1") {
       process.stderr.write(`📋 Preset: ${presetName} (${preset.dimensions}d, batch=${preset.maxBatchSize})\n`);
     }
 
