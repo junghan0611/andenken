@@ -234,12 +234,8 @@ const GOLDEN_QUERIES: GoldenQuery[] = [
     topK: 3,
   },
   {
-    // Known gap (2026-04-17): dictcli 어휘에 "조테로→zotero" 한글 음차 매핑 없음.
-    // BM25/vector 모두 "조테로" 리터럴을 zotero/bib/citation 컨텐츠와 못 묶음.
-    // 해결 경로는 andenken ranker가 아니라 dictcli 보강. 실패가 눈에 띄게 남도록
-    // 유지하되, 전체 fail 카운트 해석은 이 gap을 감안할 것.
     query: "오늘 조테로 어떻게 하기로 했지",
-    description: "최근 운영 결정 복원 — zotero save/sync 워크플로우 세션 [known dictcli gap: 조테로↔zotero]",
+    description: "최근 운영 결정 복원 — zotero save/sync 워크플로우 세션 (dictcli 음차 매핑 의존)",
     category: "operational-recovery",
     intent: "recovery",
     expectMinResults: 1,
