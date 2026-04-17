@@ -37,6 +37,13 @@ export class WriteBuffer {
     private batchSize: number,
   ) {}
 
+  async markFile(filePath: string): Promise<void> {
+    await this.enqueue(async () => {
+      if (!filePath) return;
+      await this.deleteFilesOnce([filePath]);
+    });
+  }
+
   async add(records: BufferedRecord[]): Promise<void> {
     await this.enqueue(async () => {
       if (records.length === 0) return;
@@ -47,11 +54,7 @@ export class WriteBuffer {
           .filter((f): f is string => Boolean(f)),
       );
 
-      for (const file of files) {
-        if (this.deletedFiles.has(file)) continue;
-        await this.store.deleteByFile(file);
-        this.deletedFiles.add(file);
-      }
+      await this.deleteFilesOnce(files);
 
       this.buffer.push(...records);
       if (this.buffer.length >= this.batchSize) {
@@ -77,6 +80,14 @@ export class WriteBuffer {
       () => undefined,
     );
     return run;
+  }
+
+  private async deleteFilesOnce(files: Iterable<string>): Promise<void> {
+    for (const file of files) {
+      if (!file || this.deletedFiles.has(file)) continue;
+      await this.store.deleteByFile(file);
+      this.deletedFiles.add(file);
+    }
   }
 
   private async flushUnlocked(): Promise<void> {

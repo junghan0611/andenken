@@ -64,6 +64,33 @@ const FOLDER_CHUNK_CONFIG: Record<string, { maxChars: number; overlap: number }>
   default: { maxChars: 4000, overlap: 300 },
 };
 
+export const INDEXABLE_ORG_FOLDERS = new Set(["meta", "bib", "notes", "journal", "botlog"]);
+export const JOURNAL_MIN_IDENTIFIER = "20250101T000000";
+const EXCLUDED_EMBED_TAGS = new Set(["noexport", "tts", "noembed", "llmlog"]);
+
+function normalizeTag(tag: string): string {
+  return tag.trim().toLowerCase();
+}
+
+function hasExcludedEmbedTag(tags: string[]): boolean {
+  return tags.some((tag) => EXCLUDED_EMBED_TAGS.has(normalizeTag(tag)));
+}
+
+export function getOrgFolder(filePath: string): string {
+  const parts = filePath.split("/");
+  const orgIdx = parts.findIndex((p) => p === "org");
+  return orgIdx >= 0 && orgIdx + 1 < parts.length ? parts[orgIdx + 1] : "unknown";
+}
+
+export function shouldIndexOrgFile(filePath: string): boolean {
+  const folder = getOrgFolder(filePath);
+  if (!INDEXABLE_ORG_FOLDERS.has(folder)) return false;
+  if (folder !== "journal") return true;
+
+  const identifier = parseDenoteFilename(filePath).identifier ?? "";
+  return identifier >= JOURNAL_MIN_IDENTIFIER;
+}
+
 // --- Front matter parsing ---
 
 export function parseDenoteFilename(filePath: string): Partial<DenoteMetadata> {
@@ -90,10 +117,7 @@ export function parseDenoteFilename(filePath: string): Partial<DenoteMetadata> {
 export function parseOrgFrontMatter(content: string, filePath: string): DenoteMetadata {
   const fromFilename = parseDenoteFilename(filePath);
 
-  // Folder from path
-  const parts = filePath.split("/");
-  const orgIdx = parts.findIndex((p) => p === "org");
-  const folder = orgIdx >= 0 && orgIdx + 1 < parts.length ? parts[orgIdx + 1] : "unknown";
+  const folder = getOrgFolder(filePath);
 
   // Parse #+key: value lines (only at start, before first heading)
   const headerEnd = content.indexOf("\n*");
@@ -178,8 +202,8 @@ export function parseOrgHeadings(content: string): OrgHeading[] {
       tags,
       lineNumber: i + 1,
       properties,
-      isArchive: tags.includes("ARCHIVE"),
-      isLlmlog: tags.includes("LLMLOG"),
+      isArchive: tags.some((t) => normalizeTag(t) === "archive"),
+      isLlmlog: tags.some((t) => normalizeTag(t) === "llmlog"),
     });
   }
 
@@ -200,6 +224,31 @@ function buildHierarchy(headings: OrgHeading[], currentIdx: number): string {
   }
 
   return path.join(" > ");
+}
+
+function computeExcludedHeadingIndices(headings: OrgHeading[]): Set<number> {
+  const excluded = new Set<number>();
+  const stack: Array<{ level: number; excluded: boolean }> = [];
+
+  for (let i = 0; i < headings.length; i++) {
+    const heading = headings[i];
+
+    while (stack.length > 0 && stack[stack.length - 1].level >= heading.level) {
+      stack.pop();
+    }
+
+    const ancestorExcluded = stack.length > 0 ? stack[stack.length - 1].excluded : false;
+    const selfExcluded = heading.isArchive || hasExcludedEmbedTag(heading.tags);
+    const isExcluded = ancestorExcluded || selfExcluded;
+
+    if (isExcluded) {
+      excluded.add(i);
+    }
+
+    stack.push({ level: heading.level, excluded: isExcluded });
+  }
+
+  return excluded;
 }
 
 // --- Content extraction between headings ---
@@ -492,20 +541,16 @@ interface HeadingSegment {
 function buildHeadingSegments(
   headings: OrgHeading[],
   lines: string[],
+  excludedHeadingIndices: Set<number>,
 ): HeadingSegment[] {
   const segments: HeadingSegment[] = [];
   for (let i = 0; i < headings.length; i++) {
     const h = headings[i];
-    if (h.isArchive) continue;
+    if (excludedHeadingIndices.has(i)) continue;
 
     const startLine = h.lineNumber; // 1-indexed, used as 0-indexed array offset
-    let endLine = lines.length;
-    for (let j = i + 1; j < headings.length; j++) {
-      if (headings[j].level <= h.level) {
-        endLine = headings[j].lineNumber - 1;
-        break;
-      }
-    }
+    const nextHeading = i + 1 < headings.length ? headings[i + 1] : undefined;
+    const endLine = nextHeading ? nextHeading.lineNumber - 1 : lines.length;
 
     const rawContent = extractContentBetween(lines, startLine, endLine);
     segments.push({ headingIdx: i, heading: h, rawContent, startLine, endLine });
@@ -591,18 +636,21 @@ export function chunkOrgFile(
   content: string,
   filePath: string,
 ): OrgChunk[] {
+  if (!shouldIndexOrgFile(filePath)) return [];
+  if (content.length < 50) return [];
+
   const metadata = parseOrgFrontMatter(content, filePath);
+  if (hasExcludedEmbedTag(metadata.filetags)) return [];
+
   const headings = parseOrgHeadings(content);
+  const excludedHeadingIndices = computeExcludedHeadingIndices(headings);
   const lines = content.split("\n");
   const chunks: OrgChunk[] = [];
 
   const folderConfig = FOLDER_CHUNK_CONFIG[metadata.folder] ?? FOLDER_CHUNK_CONFIG.default;
 
-  // Skip empty or very small files
-  if (content.length < 50) return [];
-
   // Pre-compute micro-heading merge groups (needed for both tiers)
-  const segments = headings.length > 0 ? buildHeadingSegments(headings, lines) : [];
+  const segments = headings.length > 0 ? buildHeadingSegments(headings, lines, excludedHeadingIndices) : [];
   const merged = headings.length > 0 ? mergeHeadingSegments(segments, headings) : [];
   const mergedHeadingLines = new Set<number>();
   for (const group of merged) {
@@ -617,7 +665,7 @@ export function chunkOrgFile(
 
   for (let i = 0; i < headings.length; i++) {
     const h = headings[i];
-    if (h.isArchive) continue; // Skip :ARCHIVE: headings
+    if (excludedHeadingIndices.has(i)) continue;
     if (mergedHeadingLines.has(h.lineNumber)) continue; // Skip merged micro-headings
 
     const hierarchy = buildHierarchy(headings, i);

@@ -19,7 +19,7 @@ import * as path from "node:path";
 import { execSync } from "node:child_process";
 import { VectorStore, getSessionsDbPath, getOrgDbPath } from "./store.js";
 import { findSessionFiles } from "./session-indexer.js";
-import { findOrgFiles, chunkOrgFile } from "./org-chunker.js";
+import { findOrgFiles, shouldIndexOrgFile } from "./org-chunker.js";
 
 // --- Types ---
 
@@ -36,8 +36,6 @@ interface CheckResult {
 
 const ORACLE_HOST = "oracle";
 const ANDENKEN_DIR = path.join(process.env.HOME ?? "", "repos", "gh", "andenken");
-const ORG_FOLDERS = new Set(["meta", "bib", "notes", "journal", "botlog"]);
-
 // --- Helpers ---
 
 function runSSH(cmd: string, timeout = 10000): string | null {
@@ -174,11 +172,7 @@ async function checkStaleFiles(): Promise<CheckResult> {
 
   // Org
   const orgDbPath = getOrgDbPath();
-  const allOrg = findOrgFiles().filter((f) => {
-    const parts = f.split("/");
-    const orgIdx = parts.findIndex((p) => p === "org");
-    return orgIdx >= 0 && orgIdx + 1 < parts.length && ORG_FOLDERS.has(parts[orgIdx + 1]);
-  });
+  const allOrg = findOrgFiles().filter((f) => shouldIndexOrgFile(f));
   let indexedOrg = 0;
 
   if (fs.existsSync(orgDbPath)) {
@@ -204,11 +198,7 @@ async function checkStaleFiles(): Promise<CheckResult> {
 
 function checkCostPreflight(): CheckResult {
   // Quick org estimate without full chunk computation
-  const allOrg = findOrgFiles().filter((f) => {
-    const parts = f.split("/");
-    const orgIdx = parts.findIndex((p) => p === "org");
-    return orgIdx >= 0 && orgIdx + 1 < parts.length && ORG_FOLDERS.has(parts[orgIdx + 1]);
-  });
+  const allOrg = findOrgFiles().filter((f) => shouldIndexOrgFile(f));
 
   // Rough estimate: avg 3 chunks/file, 800 chars/chunk, 4 chars/token, $0.20/1M tokens
   const estChunks = allOrg.length * 3;

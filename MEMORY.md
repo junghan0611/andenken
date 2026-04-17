@@ -152,20 +152,27 @@ curl -s http://localhost:18001/v1/models | python3 -m json.tool | head -5
 - cleanup 완료 — 25K duplicate 제거됨
 - 운영 org.lance로 승격 완료
 
-### 운영 상태 (2026-04-16 write-path incident 확인)
+### 운영 상태 (2026-04-17 conservative scope 정책 반영)
 
-- org-aware break point scoring + 마이크로헤딩 병합 구현 자체는 완료
-- 블록 분할: 5,310→467 (-91%), 총 청크: 106,674 (2560d, Qwen3-4B)
-- heading 청크: 54K→41K (-24%), content 청크: 43K→40K (-9%)
-- 31/31 테스트 PASS, 8/8 golden-queries PASS (org-only)
-- **Hybrid retrieval 로직 검증 완료**: 5/5 쿼리 vector+FTS 양쪽 반환, cross-signal 확인
-- **Block integrity**: src 블록 begin/end 100% paired (21/21, 11/11, 27/27)
+- org-aware break point scoring + 마이크로헤딩 병합 구현은 유지
+- **content chunk는 subtree 전체가 아니라 direct body만 임베딩** — 구조는 heading tier / child chunk가 담당
+- **저널은 2025년 이후만 임베딩** (`identifier >= 20250101T000000`)
+- **제외 태그 정책 활성화**: `noexport`, `tts`, `noembed`, `llmlog` (filetag면 전체 파일, heading tag면 subtree 제외, case-insensitive)
+- 기본 원칙은 **block first, open selectively later** — 임베딩 크기보다 신호 밀도가 우선
+- **hard guard 활성화**: `ANDENKEN_ORG_EMBED_MAX_CHARS` 기본값 `20000` 초과 org chunk는 임베딩에서 skip + warning
+- **manifest는 성공 후 갱신**, zero-chunk 파일도 기존 DB row를 지우도록 write-path 보강
+- 2026-04-17 코드 기준 빠른 스캔:
+  - indexable files: **2,189**
+  - raw org chunks: **45,279**
+  - `>20k chars`: **3**
+  - hard-guard skip 대상: **3**
+- 해석: parent/child duplication과 구형 journal 범위를 줄였고, 남은 초대형 chunk 3개는 hard guard가 막는다. 즉 **정책 축소 + 안전장치** 조합으로 재인덱싱 성공 확률이 크게 올라갔다.
 - **중요**: 2026-04-16에 shared `WriteBuffer` 동시성 버그 확인. dual-GPU / 병렬 임베딩 중 `sessions.lance`, `org.lance` 모두 duplicate rows가 생길 수 있었음.
-- **현재 운영 판단**: retrieval/chunking 로직은 유효하지만, **write-buffer fix 이전에 생성된 DB 내용은 신뢰하지 않는다. 해당 DB는 삭제 후 재인덱싱이 원칙.**
+- **현재 운영 판단**: write-buffer fix 이전에 생성된 DB는 신뢰하지 않는다. 해당 DB는 삭제 후 재인덱싱이 원칙.
 - **Dimension mismatch 원인**: session DB 768d(Gemini) vs org 2560d(Qwen3-4B). 두 DB는 별도 파일이며 독립적으로 다룬다.
 - llmlog 설계문서: `20260416T135457` (org 청킹 설계)
 - llmlog 통합문서: `20260416T115700` (QMD+GBrain 패턴 흡수 현황)
-- **다음 작업**: write-buffer fix 반영본 검수 → session/org DB 삭제 후 재인덱싱 → verify/search quality 재검증
+- **다음 작업**: audit rail 보강 → session/org DB 삭제 후 재인덱싱 → verify/search quality 재검증
 
 ### DB 운영 원칙 (2026-04-16 명문화)
 
@@ -178,6 +185,63 @@ curl -s http://localhost:18001/v1/models | python3 -m json.tool | head -5
   - `./run.sh verify sessions`
   - `./run.sh verify org`
   - golden/search quality spot check
+
+### Dual-GPU 인덱싱 퀵스타트 (2026-04-16)
+
+**모델**
+- GPU 인덱싱: `/storage/models/vllm/default` → `Qwen/Qwen3-Embedding-4B` (2560d)
+- 로컬 쿼리: `qwen3-embedding:4b` (ollama, same family, query-only)
+
+**터널 열기**
+```bash
+ssh -f -N -L 18000:localhost:8000 gpu2i
+ssh -f -N -L 18001:localhost:8000 gpu1i
+```
+
+**터널/모델 확인**
+```bash
+ss -tlnp | grep -E ':18000|:18001|:11434'
+curl -s http://localhost:18000/v1/models | python3 -m json.tool | head -20
+curl -s http://localhost:18001/v1/models | python3 -m json.tool | head -20
+curl -s http://localhost:11434/api/tags | python3 -m json.tool | head -20
+```
+
+**임베딩 endpoint smoke test**
+```bash
+python3 - <<'PY'
+import json, urllib.request
+body=json.dumps({"model":"/storage/models/vllm/default","input":["GPU 서버 임베딩 인프라"]}).encode()
+for port in (18000, 18001):
+    req=urllib.request.Request(f'http://localhost:{port}/v1/embeddings', data=body, headers={'Content-Type':'application/json'})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        data=json.load(r)
+        print(port, len(data['data'][0]['embedding']))
+PY
+```
+
+**주의: status 명령**
+```bash
+npx tsx indexer.ts status
+```
+- `npx tsx indexer.ts org --status` 는 status가 아니라 **실제 org 인덱싱을 시작**한다. 쓰지 말 것.
+
+**듀얼 GPU 재인덱싱**
+```bash
+export ANDENKEN_PROVIDER=vllm
+export ANDENKEN_VLLM_ENDPOINT=http://localhost:18000,http://localhost:18001
+export ANDENKEN_VLLM_MODEL=/storage/models/vllm/default
+export ANDENKEN_VLLM_PRESET=Qwen/Qwen3-Embedding-4B
+export INDEX_CONCURRENCY=4
+export ANDENKEN_EMBED_BATCH=500
+
+rm -rf data/sessions.lance
+npx tsx indexer.ts sessions --force
+./run.sh verify sessions
+
+rm -rf data/org.lance data/org-manifest.json
+npx tsx indexer.ts org --force
+./run.sh verify org
+```
 
 ### Bake-off Models
 
@@ -223,7 +287,12 @@ curl -s http://localhost:18001/v1/models | python3 -m json.tool | head -5
 
 # RTX 5080 16GB VRAM 기준
 --max-num-batched-tokens 8192    # 안정 (16384는 4B에서 OOM)
+```
 
+**운영 기준 컨텍스트 한도는 모델 이론치가 아니라 `--max-model-len 8192` 이다.**
+모든 audit / oversize 판정 / hard guard는 이 8K 서빙 한도를 기준으로 한다.
+
+```bash
 # symlink 관리 (gpu 서버에서)
 ln -sfn /storage/models/vllm/Qwen3-Embedding-4B /storage/models/vllm/default
 sudo systemctl restart vllm-api
@@ -289,6 +358,8 @@ llmlog: `20260416T115700` — 통합 비교 문서 (QMD 6건 + GBrain 5건)
 
 - LLM 리랭킹: Jina MRR 하락 검증. 범용 리랭커는 개인 개념에 약함
 - LLM 쿼리 확장: dictcli expand가 비용 0으로 해냄
+- pre-2025 journal 인덱싱: 범위 대비 신호가 낮고 형식 불안정. sessions / notes로 커버
+- `noexport` / `tts` / `noembed` / `llmlog` 태그가 붙은 org content: 기본적으로 임베딩 제외
 - llmlog/agenda 인덱싱: 세션으로 커버. botlog 승격분만 인덱싱
 
 ## Architecture Quick Reference

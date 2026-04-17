@@ -10,7 +10,7 @@
 
 andenken is not a generic RAG tool. The name comes from Heidegger's *Andenken* — recollective thinking that lets the past gain meaning in the present. It pairs with [geworfen](https://github.com/junghan0611/geworfen) (thrownness) in the same philosophical worldview.
 
-This system embeds the *entirety of one existence* — sessions, notes, journal, health, commits, bibliography — into vector space, so that a present question can meet buried records and bring them back to life.
+This system does **not** brute-force every artifact. It curates the *high-signal slices of one existence* — sessions, notes, recent journal, health, commits, bibliography — into vector space, so that a present question can meet buried records and bring them back to life.
 
 ## Architecture
 
@@ -25,6 +25,10 @@ cli.ts                    # CLI entry point
 index.ts                  # pi-extension entry point
 ```
 
+## Invariants
+
+Before changing chunking, indexing, or write-path behavior, read [INVARIANT.md](./INVARIANT.md).
+
 ## Key Design Decisions
 
 - **Hybrid retrieval:** Vector similarity (0.7) + BM25 full-text (0.3), not vector-only
@@ -35,6 +39,43 @@ index.ts                  # pi-extension entry point
 - **Korean BM25:** Particle stripping with dual-emit (original + stem). 25 particles from openclaw.
 - **Cross-lingual:** dictcli expands Korean queries to English tags automatically (Layer 3)
 - **Multi-runtime:** Same core serves pi (extension), Claude Code (skill), OpenCode (skill)
+- **Direct-body chunking:** content chunks embed a heading's direct body only; subtree structure lives in heading chunks and child chunks, avoiding parent/child duplicate emission
+- **Conservative scope first:** smaller, high-signal memory is preferred over brute-force corpus size
+
+## Embedding Scope Policy (2026-04-17)
+
+Default stance: **block first, open selectively later**.
+
+### Journal policy
+
+- `journal` is **not** a full-history embedding target
+- only journal files with Denote identifier **>= `20250101T000000`** are indexed
+- rationale: weekly note era (2025~) has stable structure; older journal files are too inconsistent and are better covered by sessions / notes when needed
+- do **not** re-open pre-2025 journal indexing without explicit approval
+
+### Exclusion tags
+
+The following tags exclude content from embedding, case-insensitively:
+
+- `noexport`
+- `tts`
+- `noembed`
+- `llmlog`
+
+Rules:
+- **filetags** containing one of these tags → skip the **entire file**
+- **heading tags** containing one of these tags → skip the **entire subtree**
+- examples:
+  - `#+filetags: :note:noembed:`
+  - `* Raw transcript :TTS:`
+  - `** Worklog dump :noexport:`
+  - `*** Agent trace :LLMLOG:`
+
+### Operational principle
+
+- embedding size alone is **not** a quality metric
+- prefer retrievable, bounded, semantically meaningful chunks
+- transcript dumps, append-only logs, giant raw blocks, and agent traces should be excluded first and re-opened only when they prove search value
 
 ## Three-Layer Principle
 

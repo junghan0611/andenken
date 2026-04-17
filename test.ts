@@ -25,6 +25,7 @@ import {
   extractProjectName,
   detectSource,
 } from "./session-indexer.ts";
+import { chunkOrgFile, shouldIndexOrgFile } from "./org-chunker.ts";
 import { WriteBuffer, type BufferedRecord } from "./write-buffer.ts";
 import {
   rrfFusion,
@@ -182,6 +183,49 @@ async function testSessionIndexer() {
   }
 }
 
+async function testOrgChunker() {
+  section("Org Chunker");
+
+  assert(
+    shouldIndexOrgFile("/home/junghan/sync/org/journal/20241230T000000--2024-12-30__journal_week01.org") === false,
+    "journal before 2025 is excluded",
+  );
+  assert(
+    shouldIndexOrgFile("/home/junghan/sync/org/journal/20250106T000000--2025-01-06__journal_week02.org") === true,
+    "journal from 2025 is included",
+  );
+
+  const noembedFile = "/home/junghan/sync/org/notes/20260417T100000--test__test.org";
+  const noembedContent = `#+title: Test\n#+filetags: :test:noembed:\n\n* Heading\nVisible text`;
+  assert(
+    chunkOrgFile(noembedContent, noembedFile).length === 0,
+    "filetag :noembed: skips entire file",
+  );
+
+  const taggedFile = "/home/junghan/sync/org/notes/20260417T100001--test__test.org";
+  const taggedContent = `#+title: Tagged document for semantic indexing\n#+filetags: :test:\n\n* Parent\nParent intro text that is long enough for content chunk generation.\n** Hidden :noembed:\nsecret payload that must never reach embeddings.\n** Speech :TTS:\nthis transcript-like subtree should also stay out of embeddings.\n** Archived :ARCHIVE:\narchived subtree must stay out too.\n** Trace :LLMLOG:\nagent trace should also be excluded.\n** Visible\nvisible body that should remain searchable after filtering.`;
+  const taggedChunks = chunkOrgFile(taggedContent, taggedFile);
+  const contentTexts = taggedChunks.filter((c) => c.chunkType === "content").map((c) => c.rawText);
+  const headingTexts = taggedChunks.filter((c) => c.chunkType === "heading").map((c) => c.rawText);
+
+  assert(
+    contentTexts.some((t) => t.includes("Parent intro")) && !contentTexts.some((t) => t.includes("secret payload")),
+    "excluded subtree content does not leak into parent chunk",
+  );
+  assert(
+    contentTexts.some((t) => t.includes("visible body")) && !contentTexts.some((t) => t.includes("transcript-like subtree")),
+    "visible sibling remains while :TTS: subtree is skipped",
+  );
+  assert(
+    !contentTexts.some((t) => t.includes("archived subtree")) && !contentTexts.some((t) => t.includes("agent trace")),
+    ":ARCHIVE: and :LLMLOG: subtrees are skipped from content tier",
+  );
+  assert(
+    !headingTexts.includes("Hidden") && !headingTexts.includes("Speech") && !headingTexts.includes("Archived") && !headingTexts.includes("Trace") && headingTexts.includes("Visible"),
+    "excluded headings are omitted from heading tier",
+  );
+}
+
 async function testRetriever() {
   section("Retriever");
 
@@ -325,6 +369,18 @@ async function testWriteBuffer() {
     store2.deletedFiles.filter((f) => f === "/tmp/c.jsonl").length === 1,
     "same file across multiple add calls: pre-delete still once",
   );
+
+  const store3 = new FakeStore();
+  const wb3 = new WriteBuffer(store3, 10);
+  await wb3.markFile("/tmp/d.jsonl");
+  await wb3.markFile("/tmp/d.jsonl");
+  await wb3.flush();
+
+  assert(
+    store3.deletedFiles.filter((f) => f === "/tmp/d.jsonl").length === 1,
+    "markFile deletes existing rows once for zero-chunk files",
+  );
+  assert(store3.insertedIds.length === 0, "markFile does not insert rows");
 }
 
 async function testVectorStore() {
@@ -587,6 +643,7 @@ console.log("🧠 andenken Test Suite\n");
 
 if (mode === "unit" || mode === "all") {
   await testSessionIndexer();
+  await testOrgChunker();
   await testRetriever();
   await testWriteBuffer();
   await testVectorStore();

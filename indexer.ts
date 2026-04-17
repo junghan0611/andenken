@@ -21,12 +21,8 @@ import {
 } from "./embedding-provider.js";
 import { VectorStore, getSessionsDbPath, getOrgDbPath, getDataDir } from "./store.js";
 import { findSessionFiles, extractSessionChunks } from "./session-indexer.js";
-import { findOrgFiles, chunkOrgFile } from "./org-chunker.js";
+import { findOrgFiles, chunkOrgFile, shouldIndexOrgFile } from "./org-chunker.js";
 import { WriteBuffer } from "./write-buffer.js";
-
-// --- Config ---
-
-const ORG_FOLDERS = new Set(["meta", "bib", "notes", "journal", "botlog"]);
 
 // --- dictcli stem integration (Layer 3 → Layer 1 bridge) ---
 
@@ -91,6 +87,7 @@ function enrichTextWithStems(text: string, stems: string[]): string {
 }
 const CONCURRENCY = parseInt(process.env.INDEX_CONCURRENCY ?? "", 10) || DEFAULT_CONCURRENCY;
 const DB_WRITE_BATCH = 2000; // flush to DB every N chunks → fewer fragments
+const ORG_EMBED_MAX_CHARS = parseInt(process.env.ANDENKEN_ORG_EMBED_MAX_CHARS ?? "", 10) || 20000;
 const CANDIDATE_MULTIPLIER = 4; // openclaw pattern: fetch 4x candidates for better MMR
 
 // --- Org Manifest (mtime-based stale detection) ---
@@ -129,7 +126,19 @@ function getStaleFiles(
 
   for (const f of files) {
     if (!indexed.has(f)) {
-      newFiles.push(f);
+      const entry = manifest.files[f];
+      if (!entry) {
+        newFiles.push(f);
+        continue;
+      }
+      try {
+        const stat = fs.statSync(f);
+        if (stat.mtimeMs > entry.mtimeMs || stat.size !== entry.size) {
+          staleFiles.push(f);
+        }
+      } catch {
+        // File may have been deleted
+      }
       continue;
     }
     // No manifest yet — skip stale check, just initialize manifest on this run
@@ -174,12 +183,6 @@ function getProvider(): EmbeddingProvider {
   if (!p) throw new Error("No embedding provider available (set ANDENKEN_PROVIDER=vllm)");
   console.log(`📡 Provider: ${p.name} (${p.dimensions}d)`);
   return p;
-}
-
-function getOrgFolder(filePath: string): string {
-  const parts = filePath.split("/");
-  const orgIdx = parts.findIndex((p) => p === "org");
-  return orgIdx >= 0 && orgIdx + 1 < parts.length ? parts[orgIdx + 1] : "";
 }
 
 // --- Progress ---
@@ -263,6 +266,8 @@ async function indexSessions(force: boolean) {
       await wb.add(chunks.map((c, j) => ({ ...c, vector: vectors[j] })));
       progress.tick(chunks.length);
     } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[session-index-error] ${file} :: ${msg}`);
       progress.error();
       throw err;
     }
@@ -295,7 +300,7 @@ async function indexOrg(force: boolean) {
   await store.ensureTable();
 
   const allFiles = findOrgFiles();
-  const files = allFiles.filter((f) => ORG_FOLDERS.has(getOrgFolder(f)));
+  const files = allFiles.filter((f) => shouldIndexOrgFile(f));
   const indexed = force ? new Set<string>() : await store.getIndexedFiles();
   let manifest = force ? { files: {}, lastUpdated: "" } as OrgFileManifest : loadManifest();
   const hasManifest = Object.keys(manifest.files).length > 0;
@@ -323,18 +328,38 @@ async function indexOrg(force: boolean) {
     return;
   }
 
-  // --- Batch stem: collect all chunks first, then stem in one JVM call ---
+  // --- Batch stem: collect chunks first, apply hard guard, then stem in one JVM call ---
   console.log("Collecting chunks for stem enrichment...");
-  const fileChunks: Array<{ file: string; chunks: ReturnType<typeof chunkOrgFile> }> = [];
+  const fileChunks: Array<{
+    file: string;
+    chunks: ReturnType<typeof chunkOrgFile>;
+    manifestEntry?: { mtimeMs: number; size: number; chunks: number };
+  }> = [];
+  let skippedOversizeChunks = 0;
+
   for (const file of toIndex) {
     const content = fs.readFileSync(file, "utf-8");
-    const chunks = chunkOrgFile(content, file);
-    // Update manifest even for 0-chunk files
+    const rawChunks = chunkOrgFile(content, file);
+    const chunks = rawChunks.filter((chunk) => {
+      if (chunk.text.length <= ORG_EMBED_MAX_CHARS) return true;
+      skippedOversizeChunks++;
+      console.warn(
+        `[org-embed-skip] ${file}:${chunk.lineNumber} ${chunk.chunkType} ${chunk.text.length} chars > ${ORG_EMBED_MAX_CHARS} :: ${chunk.hierarchy || chunk.metadata.title}`,
+      );
+      return false;
+    });
+
+    let manifestEntry: { mtimeMs: number; size: number; chunks: number } | undefined;
     try {
       const stat = fs.statSync(file);
-      manifest.files[file] = { mtimeMs: stat.mtimeMs, size: stat.size, chunks: chunks.length };
+      manifestEntry = { mtimeMs: stat.mtimeMs, size: stat.size, chunks: chunks.length };
     } catch { /* file may have been deleted */ }
-    fileChunks.push({ file, chunks });
+
+    fileChunks.push({ file, chunks, manifestEntry });
+  }
+
+  if (skippedOversizeChunks > 0) {
+    console.log(`⚠️  Hard guard skipped ${skippedOversizeChunks} oversize org chunks (> ${ORG_EMBED_MAX_CHARS} chars)`);
   }
 
   const allChunkTexts = fileChunks.flatMap(fc => fc.chunks.map(c => c.text));
@@ -373,11 +398,19 @@ async function indexOrg(force: boolean) {
   const progress = new Progress(enrichedFileChunks.length, "Org");
   const wb = new WriteBuffer(store, DB_WRITE_BATCH);
 
-  const tasks = enrichedFileChunks.map(({ chunks }) => async () => {
+  const tasks = enrichedFileChunks.map(({ file, chunks, manifestEntry }) => async () => {
     try {
       if (chunks.length === 0) {
+        await wb.markFile(file);
+        if (manifestEntry) {
+          manifest.files[file] = manifestEntry;
+        }
         filesProcessed++;
         progress.tick(0);
+        if (filesProcessed % CHECKPOINT_INTERVAL === 0) {
+          saveManifest(manifest);
+          console.log(`  📌 Manifest checkpoint at ${filesProcessed}/${enrichedFileChunks.length} files`);
+        }
         return;
       }
 
@@ -409,6 +442,9 @@ async function indexOrg(force: boolean) {
           })),
         );
       }
+      if (manifestEntry) {
+        manifest.files[file] = manifestEntry;
+      }
       filesProcessed++;
       progress.tick(chunks.length);
 
@@ -418,6 +454,8 @@ async function indexOrg(force: boolean) {
         console.log(`  📌 Manifest checkpoint at ${filesProcessed}/${enrichedFileChunks.length} files`);
       }
     } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[org-index-error] ${file} :: ${msg}`);
       progress.error();
       throw err;
     }
@@ -516,7 +554,7 @@ async function status() {
     await orgStore.init();
     const oCount = await orgStore.getCount();
     const oIndexed = await orgStore.getIndexedFiles();
-    const oFiles = findOrgFiles().filter((f) => ORG_FOLDERS.has(getOrgFolder(f)));
+    const oFiles = findOrgFiles().filter((f) => shouldIndexOrgFile(f));
     const oSize = execSync(`du -sh ${orgDbPath}`).toString().split("\t")[0];
     const oFragDir = path.join(orgDbPath, "session_chunks.lance", "data");
     const oFrags = fs.existsSync(oFragDir)
@@ -635,7 +673,7 @@ async function cleanup(target: string) {
     // 5. Manifest repair (org only)
     if (t === "org") {
       const manifest = loadManifest();
-      const oFiles = findOrgFiles().filter(f => ORG_FOLDERS.has(getOrgFolder(f)));
+      const oFiles = findOrgFiles().filter(f => shouldIndexOrgFile(f));
       const oFileSet = new Set(oFiles);
       let repaired = 0;
 
@@ -731,7 +769,7 @@ async function verify(target: string) {
     if (t === "org") {
       const manifest = loadManifest();
       const mEntries = Object.keys(manifest.files).length;
-      const oFiles = findOrgFiles().filter(f => ORG_FOLDERS.has(getOrgFolder(f)));
+      const oFiles = findOrgFiles().filter(f => shouldIndexOrgFile(f));
       const oFileSet = new Set(oFiles);
 
       // Deleted in manifest

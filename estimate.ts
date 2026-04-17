@@ -13,7 +13,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { findOrgFiles, chunkOrgFile } from "./org-chunker.js";
+import { findOrgFiles, chunkOrgFile, shouldIndexOrgFile } from "./org-chunker.js";
 import { findSessionFiles, extractSessionChunks } from "./session-indexer.js";
 
 // --- Gemini Embedding Pricing (2026-03 확인) ---
@@ -26,8 +26,6 @@ import { findSessionFiles, extractSessionChunks } from "./session-indexer.js";
 const PRICE_PER_1M_TOKENS = 0.20; // USD — gemini-embedding-2-preview (Paid tier)
 const USD_TO_KRW = 1450;
 const CHARS_PER_TOKEN = 4; // Korean ≈ 2-3, English ≈ 4, 혼합 ≈ 4 (보수적)
-
-const ORG_FOLDERS = new Set(["meta", "bib", "notes", "journal", "botlog"]);
 
 interface EstimateResult {
   label: string;
@@ -45,11 +43,7 @@ interface EstimateResult {
 
 function estimateOrg(): EstimateResult {
   const allOrg = findOrgFiles();
-  const orgFiles = allOrg.filter((f) => {
-    const parts = f.split("/");
-    const orgIdx = parts.findIndex((p) => p === "org");
-    return orgIdx >= 0 && orgIdx + 1 < parts.length && ORG_FOLDERS.has(parts[orgIdx + 1]);
-  });
+  const orgFiles = allOrg.filter((f) => shouldIndexOrgFile(f));
 
   let chunks = 0;
   let totalChars = 0;
