@@ -362,6 +362,26 @@ export class VectorStore {
   }
 
   /**
+   * Actual vector dimension of the stored table, read by sampling one row.
+   * Returns null if table is empty or unreadable. Use this for status/diagnostics
+   * so the displayed dim reflects the DB truth, not the configured provider.
+   */
+  async getActualVectorDim(): Promise<number | null> {
+    await this.ensureInitialized();
+    if (!this.table) return null;
+    try {
+      const rows = await this.table.query().limit(1).toArray();
+      if (rows.length === 0) return null;
+      const v = rows[0].vector;
+      if (Array.isArray(v)) return v.length;
+      if (v && typeof v.length === "number") return v.length;
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Drop all data and recreate
    */
   async reset(): Promise<void> {

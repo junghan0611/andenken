@@ -24,6 +24,14 @@ export interface RetrieverConfig {
   };
   jinaApiKey?: string;
   jinaModel?: string;
+  /**
+   * Multiplier applied to scaffold chunks (History/KEYWORDS/Related-Notes
+   * sections) during ranking. < 1 demotes them. Intent-aware: definition
+   * queries (누구였지/뭐였지/시작점/왜 중요) trigger a stronger penalty.
+   * Set to 1 to disable.
+   */
+  scaffoldPenalty: number;
+  scaffoldPenaltyDefinition: number;
 }
 
 const DEFAULT_CONFIG: RetrieverConfig = {
@@ -35,7 +43,49 @@ const DEFAULT_CONFIG: RetrieverConfig = {
     enabled: true,
     lambda: 0.7, // OpenClaw default
   },
+  scaffoldPenalty: 0.65,
+  scaffoldPenaltyDefinition: 0.5,
 };
+
+// --- Scaffold & Intent ---
+//
+// Org notes carry structural sections that surface in retrieval as low-signal
+// "scaffold" chunks: History, KEYWORDS, Related-Notes. They are useful for
+// navigation but bad as top results for definition queries. Damping is applied
+// multiplicatively after merge so MMR/decay still operate on damped scores.
+
+export const SCAFFOLD_MARKERS: readonly string[] = Object.freeze([
+  "> History",
+  "> KEYWORDS",
+  "> Related-Notes",
+  "> Related Notes",
+  "> 히스토리",
+  "> 관련노트",
+  "> 연결노트",
+]);
+
+export function isScaffoldChunk(text: string): boolean {
+  return SCAFFOLD_MARKERS.some((m) => text.includes(m));
+}
+
+// Definition intent: "누구였지", "뭐였지", "시작점", "왜 중요", "소개", "이란",
+// or query ending with bare "뭐지/누구지".
+const DEFINITION_INTENT_RE =
+  /누구였지|누구지$|누구야$|뭐였지|뭐지$|뭐야$|시작점|왜\s*중요|소개$|소개야$|이란\?|란\s*뭐/;
+
+export function isDefinitionQuery(query: string): boolean {
+  return DEFINITION_INTENT_RE.test(query);
+}
+
+export function applyScaffoldDamping(
+  results: SearchResult[],
+  penalty: number,
+): SearchResult[] {
+  if (penalty >= 1) return results;
+  return results.map((r) =>
+    isScaffoldChunk(r.text) ? { ...r, score: r.score * penalty } : r,
+  );
+}
 
 // --- File-level dedup ---
 //
@@ -356,22 +406,28 @@ export async function retrieve(
       ? rrfFusion(vectorResults, ftsResults, cfg.vectorWeight, cfg.bm25Weight)
       : weightedMerge(vectorResults, ftsResults, cfg.vectorWeight, cfg.bm25Weight);
 
-  // 2. Temporal decay
+  // 2. Scaffold damping (intent-aware)
+  const penalty = isDefinitionQuery(query)
+    ? cfg.scaffoldPenaltyDefinition
+    : cfg.scaffoldPenalty;
+  results = applyScaffoldDamping(results, penalty);
+
+  // 3. Temporal decay
   results = applyRecencyDecay(results, cfg.recencyHalfLifeDays);
   results.sort((a, b) => b.score - a.score);
 
-  // 3. Min score filter
+  // 4. Min score filter
   results = results.filter((r) => r.score >= cfg.minScore);
 
-  // 4. MMR diversity (default on)
+  // 5. MMR diversity (default on)
   if (cfg.mmr?.enabled && results.length > 1) {
     results = mmrRerank(results, cfg.mmr.lambda);
   }
 
-  // 5. Post-merge file cap: prevent one file from dominating final results
+  // 6. Post-merge file cap: prevent one file from dominating final results
   results = fileDedup(results, 3);
 
-  // 6. Optional Jina rerank (off by default for org, on for sessions)
+  // 7. Optional Jina rerank (off by default for org, on for sessions)
   if (cfg.jinaApiKey && results.length > 0) {
     results = await jinaRerank(query, results, cfg.jinaApiKey, cfg.jinaModel, 10);
   }

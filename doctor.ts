@@ -7,8 +7,8 @@
  *   npx tsx doctor.ts --json
  *
  * Checks:
- *   1. API health (Gemini embedding)
- *   2. Local session/org DB status
+ *   1. API health (vLLM embedding endpoint; Gemini fallback if configured)
+ *   2. Local session/org DB status (+ dim parity vs provider)
  *   3. Oracle session/org DB status (SSH)
  *   4. Stale files (unindexed)
  *   5. Cost pre-flight (org incremental estimate)
@@ -20,6 +20,7 @@ import { execSync } from "node:child_process";
 import { VectorStore, getSessionsDbPath, getOrgDbPath } from "./store.js";
 import { findSessionFiles } from "./session-indexer.js";
 import { findOrgFiles, shouldIndexOrgFile } from "./org-chunker.js";
+import { createProviderFromEnv } from "./embedding-provider.js";
 
 // --- Types ---
 
@@ -65,13 +66,41 @@ function getKST(): string {
 // --- Checks ---
 
 async function checkAPI(): Promise<CheckResult> {
-  const apiKey = process.env.GOOGLE_AI_API_KEY ?? process.env.GEMINI_API_KEY ?? "";
-  if (!apiKey) {
-    return { name: "Gemini API", status: "FAIL", detail: "GEMINI_API_KEY not set" };
+  const providerType = process.env.ANDENKEN_PROVIDER ?? "";
+  const vllmEndpoint = process.env.ANDENKEN_VLLM_ENDPOINT ?? "";
+  const vllmModel = process.env.ANDENKEN_VLLM_MODEL ?? "";
+
+  // Primary operational provider is vLLM. Check first endpoint if comma-separated.
+  if (providerType === "vllm" || vllmEndpoint) {
+    const endpoint = vllmEndpoint.split(",")[0]?.trim();
+    if (!endpoint || !vllmModel) {
+      return { name: "vLLM", status: "FAIL", detail: "ANDENKEN_VLLM_ENDPOINT / ANDENKEN_VLLM_MODEL not set" };
+    }
+    try {
+      const resp = await fetch(`${endpoint}/v1/embeddings`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: vllmModel, input: ["ping"] }),
+        signal: AbortSignal.timeout(10000),
+      });
+      if (resp.ok) {
+        const data = await resp.json() as { data?: Array<{ embedding: number[] }> };
+        const dim = data.data?.[0]?.embedding?.length ?? 0;
+        return { name: "vLLM", status: "OK", detail: `${endpoint} responding, dim=${dim}` };
+      }
+      const body = await resp.text();
+      return { name: "vLLM", status: "FAIL", detail: `HTTP ${resp.status}: ${body.slice(0, 100)}` };
+    } catch (e) {
+      return { name: "vLLM", status: "FAIL", detail: `${endpoint}: ${String(e).slice(0, 100)}` };
+    }
   }
 
+  // Legacy Gemini fallback — only if explicitly selected or no vLLM configured
+  const apiKey = process.env.GOOGLE_AI_API_KEY ?? process.env.GEMINI_API_KEY ?? "";
+  if (!apiKey) {
+    return { name: "API", status: "WARN", detail: "no provider configured (set ANDENKEN_PROVIDER=vllm + VLLM env)" };
+  }
   try {
-    // Minimal embedding call — 1 token cost
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-2-preview:embedContent?key=${apiKey}`;
     const resp = await fetch(url, {
       method: "POST",
@@ -84,33 +113,37 @@ async function checkAPI(): Promise<CheckResult> {
       }),
       signal: AbortSignal.timeout(10000),
     });
-
     if (resp.ok) {
-      return { name: "Gemini API", status: "OK", detail: "embedding-2-preview responding" };
-    } else {
-      const body = await resp.text();
-      return { name: "Gemini API", status: "FAIL", detail: `HTTP ${resp.status}: ${body.slice(0, 100)}` };
+      return { name: "Gemini API (legacy)", status: "OK", detail: "embedding-2-preview responding" };
     }
+    const body = await resp.text();
+    return { name: "Gemini API (legacy)", status: "FAIL", detail: `HTTP ${resp.status}: ${body.slice(0, 100)}` };
   } catch (e) {
-    return { name: "Gemini API", status: "FAIL", detail: String(e).slice(0, 100) };
+    return { name: "Gemini API (legacy)", status: "FAIL", detail: String(e).slice(0, 100) };
   }
 }
 
-async function checkLocalDB(label: string, dbPath: string): Promise<CheckResult> {
+async function checkLocalDB(label: string, dbPath: string, providerDim?: number): Promise<CheckResult> {
   if (!fs.existsSync(dbPath)) {
     return { name: `Local ${label}`, status: "WARN", detail: "DB not found", value: 0 };
   }
 
   try {
-    const store = new VectorStore(dbPath, 2560);
+    const store = new VectorStore(dbPath);
     await store.init();
     const count = await store.getCount();
     const files = await store.getIndexedFiles();
+    const actualDim = await store.getActualVectorDim();
     await store.close();
+    const dimStr = actualDim ? `${actualDim}d` : "empty";
+    const mismatch = actualDim && providerDim && actualDim !== providerDim;
+    const base = `${count.toLocaleString()} chunks, ${files.size} files, ${dimStr}`;
     return {
       name: `Local ${label}`,
-      status: count > 0 ? "OK" : "WARN",
-      detail: `${count.toLocaleString()} chunks, ${files.size} files`,
+      status: mismatch ? "WARN" : count > 0 ? "OK" : "WARN",
+      detail: mismatch
+        ? `${base}  ⚠ provider=${providerDim}d (FTS-only fallback)`
+        : base,
       value: count,
     };
   } catch (e) {
@@ -161,7 +194,7 @@ async function checkStaleFiles(): Promise<CheckResult> {
 
   if (fs.existsSync(sessionDbPath)) {
     try {
-      const store = new VectorStore(sessionDbPath, 2560);
+      const store = new VectorStore(sessionDbPath);
       await store.init();
       indexedSessions = (await store.getIndexedFiles()).size;
       await store.close();
@@ -177,7 +210,7 @@ async function checkStaleFiles(): Promise<CheckResult> {
 
   if (fs.existsSync(orgDbPath)) {
     try {
-      const store = new VectorStore(orgDbPath, 2560);
+      const store = new VectorStore(orgDbPath);
       await store.init();
       indexedOrg = (await store.getIndexedFiles()).size;
       await store.close();
@@ -227,9 +260,11 @@ async function main() {
   // 1. API
   checks.push(await checkAPI());
 
-  // 2. Local DBs
-  checks.push(await checkLocalDB("Sessions", getSessionsDbPath()));
-  checks.push(await checkLocalDB("Knowledge", getOrgDbPath()));
+  // 2. Local DBs — pass active provider dim for parity check
+  const provider = createProviderFromEnv();
+  const providerDim = provider?.dimensions;
+  checks.push(await checkLocalDB("Sessions", getSessionsDbPath(), providerDim));
+  checks.push(await checkLocalDB("Knowledge", getOrgDbPath(), providerDim));
 
   // 3. Oracle (single SSH call)
   checks.push(checkOracleDB("Sessions"));

@@ -41,7 +41,7 @@ Query ──→ Embed ──→ │                  └── Claude Code sessi
 Query: "설계했다" (한국어 verb conjugation of "설계/design")
 
 Layer 1 — andenken (Embedding + BM25)
-    Vector: Gemini Embedding 2 catches semantic similarity
+    Vector: Qwen3-Embedding-4B (2560d) via vLLM, cross-lingual ko↔en
     BM25:   Korean particle stripping ("봇멘트를" → "봇멘트를" + "봇멘트")
     candidateMultiplier: 4x initial pool for better MMR diversity
     Incremental: mtime-based stale detection for modified org files
@@ -177,7 +177,8 @@ npx tsx golden-queries.ts --db org
 
 Port openclaw's `KO_TRAILING_PARTICLES` logic. 25 particles stripped with dual-emit
 strategy (original + stem both in BM25 query). +27% BM25 score for particle-laden queries.
-Applied to BM25 only — vector queries unchanged (Gemini handles Korean natively).
+Applied to BM25 only — vector path relies on the embedding model's own tokenization
+(originally Gemini, now Qwen3-Embedding-4B).
 
 Future: Kiwi morphological analysis via dictcli `stem` for verb conjugation decomposition
 ("설계했다" → "설계"), compound nouns ("검색증강생성" → "검색"+"증강"+"생성").

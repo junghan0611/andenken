@@ -16,13 +16,15 @@ This system does **not** brute-force every artifact. It curates the *high-signal
 
 ```
 core/
-├── store.ts              # LanceDB vector store
-├── retriever.ts          # Hybrid retrieval (weighted/RRF + decay + MMR)
-├── gemini-embeddings.ts  # Gemini Embedding 2 API
-├── session-indexer.ts    # Session JSONL parser (pi + Claude Code)
-├── org-chunker.ts        # Org-mode note chunker
-cli.ts                    # CLI entry point
-index.ts                  # pi-extension entry point
+├── store.ts               # LanceDB vector store
+├── retriever.ts           # Hybrid retrieval (weighted/RRF + decay + MMR)
+├── embedding-provider.ts  # EmbeddingProvider interface + vLLM/Gemini impl
+├── model-presets.ts       # Qwen3-Embedding-4B / bge-m3 / Gemini presets
+├── session-indexer.ts     # Session JSONL parser (pi + Claude Code)
+├── org-chunker.ts         # Org-mode note chunker
+├── gemini-embeddings.ts   # Historical: pre-2026-04 Gemini baseline (bake-off only)
+cli.ts                     # CLI entry point
+index.ts                   # pi-extension entry point
 ```
 
 ## Invariants

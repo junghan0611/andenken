@@ -1,5 +1,5 @@
 /**
- * Unified Indexer — Sessions (768d) + Org (768d)
+ * Unified Indexer — Sessions + Org (dim follows active provider; runtime 2560d with Qwen3-4B)
  *
  * Parallel embedding + batched DB writes to minimize LanceDB fragments.
  *
@@ -228,7 +228,7 @@ class Progress {
   }
 }
 
-// --- Session Indexing (768d) ---
+// --- Session Indexing ---
 
 async function indexSessions(force: boolean) {
   const provider = getProvider();
@@ -290,7 +290,7 @@ async function indexSessions(force: boolean) {
   await store.close();
 }
 
-// --- Org Indexing (768d) ---
+// --- Org Indexing ---
 
 async function indexOrg(force: boolean) {
   const provider = getProvider();
@@ -527,12 +527,15 @@ async function compact(target: string) {
 
 async function status() {
   const { execSync } = await import("node:child_process");
+  // Status must reflect DB truth, not configured provider.
+  // Configured dim is informational only (shown if no rows to sample).
   const provider = createProviderFromEnv();
-  const dim = provider?.dimensions ?? 2560;
+  const configuredDim = provider?.dimensions;
 
-  const sessionStore = new VectorStore(undefined, dim);
+  const sessionStore = new VectorStore();
   await sessionStore.init();
   const sCount = await sessionStore.getCount();
+  const sActualDim = await sessionStore.getActualVectorDim();
   const sIndexed = await sessionStore.getIndexedFiles();
   const sFiles = findSessionFiles();
   const sDbPath = getSessionsDbPath();
@@ -543,16 +546,27 @@ async function status() {
   const sFrags = fs.existsSync(sFragDir)
     ? fs.readdirSync(sFragDir).length
     : 0;
+  const sDimLabel = sActualDim
+    ? `${sActualDim}d`
+    : configuredDim
+      ? `empty, provider=${configuredDim}d`
+      : "empty";
   console.log(
-    `🧠 Sessions (${dim}d): ${sCount} chunks | ${sIndexed.size}/${sFiles.length} files | ${sFrags} frags | ${sSize}`,
+    `🧠 Sessions (${sDimLabel}): ${sCount} chunks | ${sIndexed.size}/${sFiles.length} files | ${sFrags} frags | ${sSize}`,
   );
+  if (sActualDim && configuredDim && sActualDim !== configuredDim) {
+    console.log(
+      `   ⚠ provider dim=${configuredDim}d differs from DB dim=${sActualDim}d — queries will fall back to FTS only`,
+    );
+  }
   await sessionStore.close();
 
   const orgDbPath = getOrgDbPath();
   if (fs.existsSync(orgDbPath)) {
-    const orgStore = new VectorStore(orgDbPath, dim);
+    const orgStore = new VectorStore(orgDbPath);
     await orgStore.init();
     const oCount = await orgStore.getCount();
+    const oActualDim = await orgStore.getActualVectorDim();
     const oIndexed = await orgStore.getIndexedFiles();
     const oFiles = findOrgFiles().filter((f) => shouldIndexOrgFile(f));
     const oSize = execSync(`du -sh ${orgDbPath}`).toString().split("\t")[0];
@@ -568,9 +582,19 @@ async function status() {
     const oFileSet = new Set(oFiles);
     const deletedCount = Object.keys(manifest.files).filter((f) => !oFileSet.has(f)).length;
 
+    const oDimLabel = oActualDim
+      ? `${oActualDim}d`
+      : configuredDim
+        ? `empty, provider=${configuredDim}d`
+        : "empty";
     console.log(
-      `📚 Org (${dim}d): ${oCount} chunks | ${oIndexed.size}/${oFiles.length} files | ${oFrags} frags | ${oSize}`,
+      `📚 Org (${oDimLabel}): ${oCount} chunks | ${oIndexed.size}/${oFiles.length} files | ${oFrags} frags | ${oSize}`,
     );
+    if (oActualDim && configuredDim && oActualDim !== configuredDim) {
+      console.log(
+        `   ⚠ provider dim=${configuredDim}d differs from DB dim=${oActualDim}d — queries will fall back to FTS only`,
+      );
+    }
     console.log(
       `   ↳ manifest: ${manifestEntries} entries | new: ${newFiles.length} | stale: ${staleFiles.length} | deleted: ${deletedCount} | to-index: ${newFiles.length + staleFiles.length}`,
     );

@@ -26,8 +26,8 @@ Usage: ./run.sh <command> [args]
   setup                       npm install
 
 === Indexing ===
-  index:sessions [--force]    Index pi + Claude Code sessions (768d)
-  index:org [--force]         Index org-mode knowledge base (768d)
+  index:sessions [--force]    Index pi + Claude Code sessions
+  index:org [--force]         Index org-mode knowledge base
   compact [sessions|org]      Defragment LanceDB
   cleanup [sessions|org]      Dedup + orphan removal + manifest repair + compact
   cleanup [target] --dry-run  Dry-run (report only)
@@ -79,7 +79,7 @@ case "${1:-help}" in
   verify)
     shift; load_env; cd "$SCRIPT_DIR" && npx tsx indexer.ts verify "${1:-all}" ;;
   status)
-    cd "$SCRIPT_DIR" && npx tsx indexer.ts status ;;
+    load_env; cd "$SCRIPT_DIR" && npx tsx indexer.ts status ;;
 
   # === Search ===
   search)

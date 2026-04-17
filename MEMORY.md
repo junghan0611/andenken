@@ -1,5 +1,24 @@
 # andenken MEMORY
 
+> **Reading order.** Sections marked `## Current` describe the present operational state.
+> Sections marked `## Historical` are closed incidents / migration notes kept for archaeological
+> reference only — do **not** treat them as current truth. When a Historical section contradicts
+> a Current section, Current wins.
+
+## Current Operational State (2026-04-17)
+
+- **Embedding provider:** Qwen3-Embedding-4B (2560d) via vLLM. No Gemini calls in operation.
+- **DB dimensions:** sessions = 2560d, org = 2560d. Verified by `./run.sh status`.
+- **Rebuild policy:** no compact, no incremental repair. Drop and re-embed.
+- **Rebuild script:** `scripts/rebuild-dual-full.sh`.
+- **Status verifies DB truth:** `./run.sh status` reads the actual vector dim from each
+  LanceDB table and flags any provider↔DB mismatch explicitly (no silent fallback).
+
+Everything below this line is either (a) active action plan, or (b) historical record.
+If you are a new agent, stop here and run `./run.sh status` before reading further.
+
+---
+
 ## Active Action Plan — Local Embedding Transition (2026-04-15)
 
 llmlog: `20260413T213051` — 전략 문서
@@ -132,10 +151,14 @@ curl -s http://localhost:18001/v1/models | python3 -m json.tool | head -5
 
 ### Dimension Mismatch Handling
 
-기존 Gemini 768d 인덱스에 vLLM 1024d 쿼리 시:
+**[Historical — migration-era behavior, pre-2026-04-17]**
+과거 Gemini 768d 인덱스에 vLLM 쿼리를 섞어 쓰던 전환기 동작:
 - store.ts가 dimension mismatch 감지 → vector search skip → FTS only fallback
 - 에러 없이 결과 반환 (graceful degradation)
-- 실제 bake-off 시 vLLM으로 재인덱싱 필수
+
+**Current (2026-04-17~):**
+현재 운영 DB는 sessions/org 모두 2560d. Provider↔DB mismatch가 감지되면
+`./run.sh status` 와 `doctor` 가 경고를 띄운다. 정상 상태에서는 발생하지 않는다.
 
 ### Key Findings
 
@@ -181,7 +204,7 @@ curl -s http://localhost:18001/v1/models | python3 -m json.tool | head -5
 - 해석: conservative scope + direct-body chunking + single-writer + zero-chunk cleanup + hard guard 조합이 실제 dual-GPU full rebuild에서도 안정적으로 동작함을 검증했다.
 - **중요**: 2026-04-16에 shared `WriteBuffer` 동시성 버그 확인. dual-GPU / 병렬 임베딩 중 `sessions.lance`, `org.lance` 모두 duplicate rows가 생길 수 있었음.
 - **현재 운영 판단**: write-buffer fix 이전에 생성된 DB는 신뢰하지 않는다. 해당 DB는 삭제 후 재인덱싱이 원칙.
-- **Dimension mismatch 원인**: session DB 768d(Gemini) vs org 2560d(Qwen3-4B). 두 DB는 별도 파일이며 독립적으로 다룬다.
+- **[Historical — Closed 2026-04-17]** 2026-04-16 시점에 일시적으로 session DB 768d(Gemini) / org 2560d(Qwen3-4B) 불일치가 있었음. **현재는 둘 다 2560d로 통일.** 이 문장은 archaeological reference로만 남긴다.
 - llmlog 설계문서: `20260416T135457` (org 청킹 설계)
 - llmlog 통합문서: `20260416T115700` (QMD+GBrain 패턴 흡수 현황)
 - **다음 작업**: hybrid retrieval spot check / doctor audit 확장

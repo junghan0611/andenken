@@ -23,23 +23,61 @@ import {
   type EmbeddingProvider,
 } from "./embedding-provider.js";
 import { VectorStore, getSessionsDbPath, getOrgDbPath } from "./store.js";
-import { retrieve, expandQueryForBM25, type MergeStrategy } from "./retriever.js";
+import {
+  retrieve,
+  expandQueryForBM25,
+  isScaffoldChunk,
+  type MergeStrategy,
+} from "./retriever.js";
 
 // --- Golden Query Fixtures ---
 // 힣의 언어장에서 뽑은 쿼리. 각 쿼리에 기대하는 최소 조건을 명시.
+//
+// Categories (retrieval quality dimensions):
+//   sanity              — baseline "can we find anything"
+//   intent-definition   — 누구/뭐였지/시작점 — 설명 chunk가 top-1이어야 함
+//   operational-recovery — 최근 운영 결정 복원 — session 우선
+//   abstract-context    — 메타 질의 → 2단계 검색 hint가 top-3에 나와야
+//   local-magnet        — 힣 가든 고유 자석 (국제/어쏠로지 등) 유지
+//   hard-negative       — 특정 chunk 종류가 top-K에 나오면 안 됨
+//
+// Intent is used by rankers (R2) to route query-type-sensitive scoring.
+
+type QueryCategory =
+  | "sanity"
+  | "intent-definition"
+  | "operational-recovery"
+  | "abstract-context"
+  | "local-magnet"
+  | "hard-negative";
+
+type QueryIntent = "definition" | "recovery" | "concept" | "magnet" | "abstract";
+
+// Scaffold detection is shared with retriever.ts so the eval measures the
+// same chunks the ranker damps.
 
 interface GoldenQuery {
   query: string;
   description: string;          // 왜 이 쿼리가 중요한지
+  category: QueryCategory;
+  intent?: QueryIntent;
   expectMinResults: number;     // 최소 N개 결과가 나와야
-  expectKeywords?: string[];    // 결과 텍스트에 이 중 하나는 포함되어야
+  expectKeywords?: string[];    // 결과 텍스트에 이 중 하나는 포함되어야 (top-K 합산)
+  top1MustContain?: string[];   // top-1 텍스트에 이 중 하나는 포함되어야 (엄격)
+  top1MustNotContain?: string[]; // top-1 텍스트에 이 중 어떤 것도 포함되면 안 됨 (hard negative)
+  topKMustNotContain?: string[]; // top-K 어디에도 포함되면 안 됨 (:ARCHIVE:/:LLMLOG: 류)
+  top1NoScaffold?: boolean;     // top-1이 SCAFFOLD_MARKERS 중 하나를 포함하면 fail (R1 guard)
+  topKScaffoldMax?: number;     // top-K 내 scaffold chunk가 이 값 이하여야 함 (R1 density)
   db: "session" | "org" | "both"; // 어느 DB에서 테스트할지
+  topK?: number;                // 기본 5
 }
 
 const GOLDEN_QUERIES: GoldenQuery[] = [
+  // ─── sanity (기존 baseline) ────────────────────────────────
   {
     query: "보편 학문",
     description: "paideia/universalism — dictcli expand가 영어 태그로 확장해야",
+    category: "sanity",
     expectMinResults: 1,
     expectKeywords: ["보편", "paideia", "universalism", "학문"],
     db: "org",
@@ -47,6 +85,7 @@ const GOLDEN_QUERIES: GoldenQuery[] = [
   {
     query: "설계했다",
     description: "한국어 어간 '설계' — Kiwi stem이 동작해야",
+    category: "sanity",
     expectMinResults: 1,
     expectKeywords: ["설계"],
     db: "org",
@@ -54,6 +93,7 @@ const GOLDEN_QUERIES: GoldenQuery[] = [
   {
     query: "존재사건",
     description: "힣 고유 워딩 — Ereignis/존재론",
+    category: "sanity",
     expectMinResults: 1,
     expectKeywords: ["존재", "사건", "Ereignis"],
     db: "org",
@@ -61,6 +101,7 @@ const GOLDEN_QUERIES: GoldenQuery[] = [
   {
     query: "피투성",
     description: "하이데거 Geworfenheit — 힣의 핵심 개념",
+    category: "sanity",
     expectMinResults: 1,
     expectKeywords: ["피투", "Geworfenheit", "던져진"],
     db: "org",
@@ -68,12 +109,14 @@ const GOLDEN_QUERIES: GoldenQuery[] = [
   {
     query: "뜻새김",
     description: "힣 고유 개념 — semantic/meaning-making",
+    category: "sanity",
     expectMinResults: 1,
     db: "org",
   },
   {
     query: "봇멘트 remark42",
     description: "최근 인프라 작업 — 세션에서 잘 찾아야",
+    category: "sanity",
     expectMinResults: 1,
     expectKeywords: ["봇멘트", "remark42", "botment"],
     db: "session",
@@ -81,6 +124,7 @@ const GOLDEN_QUERIES: GoldenQuery[] = [
   {
     query: "andenken 임베딩 비용",
     description: "비용 폭탄 사건 — 세션/지식 양쪽에서",
+    category: "sanity",
     expectMinResults: 1,
     expectKeywords: ["임베딩", "비용", "embedding", "cost"],
     db: "both",
@@ -88,6 +132,7 @@ const GOLDEN_QUERIES: GoldenQuery[] = [
   {
     query: "1KB 프로파일 존재",
     description: "힣의 핵심 비전 — 1KB로 존재를 전달",
+    category: "sanity",
     expectMinResults: 1,
     expectKeywords: ["1KB", "프로파일", "존재"],
     db: "both",
@@ -95,6 +140,7 @@ const GOLDEN_QUERIES: GoldenQuery[] = [
   {
     query: "delegate session directory",
     description: "영어 기술 쿼리 — delegate 세션 관리",
+    category: "sanity",
     expectMinResults: 1,
     expectKeywords: ["delegate", "session"],
     db: "session",
@@ -102,9 +148,183 @@ const GOLDEN_QUERIES: GoldenQuery[] = [
   {
     query: "디지털 가든 공진화",
     description: "힣의 방향성 — AI와 인간의 공진화",
+    category: "sanity",
     expectMinResults: 1,
     expectKeywords: ["가든", "공진화", "digital", "garden"],
     db: "org",
+  },
+
+  // ─── intent-definition: top-1이 설명 chunk여야, scaffold 밀도 제한 ────
+  {
+    query: "바네바 부시 누구였지",
+    description: "정의 질의 — bib/설명 chunk가 top-1이어야. scaffold heading이면 fail",
+    category: "intent-definition",
+    intent: "definition",
+    expectMinResults: 1,
+    expectKeywords: ["바네바", "부시", "Vannevar", "Bush", "As We May Think", "Memex"],
+    top1NoScaffold: true,
+    topKScaffoldMax: 1,
+    db: "org",
+  },
+  {
+    query: "메멕스 시작점",
+    description: "정의 질의 — As We May Think 설명이 top-1이어야",
+    category: "intent-definition",
+    intent: "definition",
+    expectMinResults: 1,
+    expectKeywords: ["Memex", "메멕스", "As We May Think", "1945"],
+    top1NoScaffold: true,
+    topKScaffoldMax: 1,
+    db: "org",
+  },
+  {
+    query: "어쏠로지 뭐였지",
+    description: "힣 고유어 정의 질의 — canonical 설명이 top-1이어야",
+    category: "intent-definition",
+    intent: "definition",
+    expectMinResults: 1,
+    expectKeywords: ["어쏠로지", "authology"],
+    top1NoScaffold: true,
+    topKScaffoldMax: 1,
+    db: "org",
+  },
+  {
+    query: "Andenken 뜻",
+    description: "프로젝트 네이밍 정의 질의 — Heidegger 설명이 top-1",
+    category: "intent-definition",
+    intent: "definition",
+    expectMinResults: 1,
+    expectKeywords: ["Andenken", "뜻새김", "Heidegger", "recollective", "이기상"],
+    top1NoScaffold: true,
+    topKScaffoldMax: 1,
+    db: "both",
+  },
+  {
+    query: "일일일생 왜 중요",
+    description: "힣 고유 개념 정의 질의 — 본문 설명이 top-1이어야",
+    category: "intent-definition",
+    intent: "definition",
+    expectMinResults: 1,
+    top1NoScaffold: true,
+    topKScaffoldMax: 1,
+    db: "org",
+  },
+  {
+    query: "보편학 파이데이아",
+    description: "개념명 질의 (explicit intent 없음) — top-1/2은 content여야, scaffold는 뒤로",
+    category: "intent-definition",
+    intent: "concept",
+    expectMinResults: 1,
+    expectKeywords: ["파이데이아", "paideia", "universalism", "모티머", "애들러"],
+    top1NoScaffold: true,
+    topKScaffoldMax: 2,
+    db: "org",
+  },
+
+  // ─── operational-recovery: session 우선 ────────────────────
+  {
+    query: "최근 org 임베딩 폭파 이유",
+    description: "운영 복원 — 최근+프로젝트 일치 세션이 top-3 내. 딴 리포 세션이 top-1이면 fail",
+    category: "operational-recovery",
+    intent: "recovery",
+    expectMinResults: 1,
+    expectKeywords: ["andenken", "org", "임베딩", "embedding", "폭파", "duplicate"],
+    top1MustNotContain: ["hej-nixos-cluster", "nixos-config commit"],
+    db: "session",
+    topK: 3,
+  },
+  {
+    // Known gap (2026-04-17): dictcli 어휘에 "조테로→zotero" 한글 음차 매핑 없음.
+    // BM25/vector 모두 "조테로" 리터럴을 zotero/bib/citation 컨텐츠와 못 묶음.
+    // 해결 경로는 andenken ranker가 아니라 dictcli 보강. 실패가 눈에 띄게 남도록
+    // 유지하되, 전체 fail 카운트 해석은 이 gap을 감안할 것.
+    query: "오늘 조테로 어떻게 하기로 했지",
+    description: "최근 운영 결정 복원 — zotero save/sync 워크플로우 세션 [known dictcli gap: 조테로↔zotero]",
+    category: "operational-recovery",
+    intent: "recovery",
+    expectMinResults: 1,
+    expectKeywords: ["zotero", "bibcli", "sync", "citation", "bib"],
+    db: "session",
+  },
+  {
+    query: "dual GPU 인덱싱 튜닝",
+    description: "최근 인프라 결정 — max-num-batched-tokens / round-robin 세션",
+    category: "operational-recovery",
+    intent: "recovery",
+    expectMinResults: 1,
+    expectKeywords: ["vllm", "GPU", "batched", "round-robin", "8192", "16384"],
+    db: "session",
+  },
+  {
+    query: "duplicate rows 재인덱싱 결정",
+    description: "WriteBuffer 동시성 버그 관련 운영 결정",
+    category: "operational-recovery",
+    intent: "recovery",
+    expectMinResults: 1,
+    expectKeywords: ["duplicate", "write-buffer", "rebuild", "재인덱싱"],
+    db: "both",
+  },
+
+  // ─── abstract-context: 메타 질의 → concrete term top-3 ─────
+  {
+    query: "요즘 뭐하고 있지",
+    description: "추상 질의 — top-3에 프로젝트명/파일명 같은 concrete term이 나와야 다음 쿼리 가능",
+    category: "abstract-context",
+    intent: "abstract",
+    expectMinResults: 3,
+    db: "session",
+    topK: 3,
+  },
+  {
+    query: "남은 작업 뭐지",
+    description: "메타 질의 — next/todo/pending 언급된 세션 상위",
+    category: "abstract-context",
+    intent: "abstract",
+    expectMinResults: 1,
+    expectKeywords: ["TODO", "NEXT", "pending", "다음"],
+    db: "both",
+  },
+
+  // ─── local-magnet: 힣 가든 고유 자석 ───────────────────────
+  {
+    query: "국제",
+    description: "로컬 자석 — 비영리/IB/AIONS 계열이 top-5 내",
+    category: "local-magnet",
+    intent: "magnet",
+    expectMinResults: 3,
+    expectKeywords: ["비영리", "IB", "AIONS", "인터내셔널", "바칼로레아"],
+    db: "org",
+  },
+  {
+    query: "어쏠로지",
+    description: "힣 고유 조어 — 어쏠로지/어쏠로그/어쏠로지스트 계열 생존",
+    category: "local-magnet",
+    intent: "magnet",
+    expectMinResults: 2,
+    expectKeywords: ["어쏠로지", "authology", "어쏠로그", "어쏠로지스트"],
+    db: "org",
+  },
+
+  // ─── hard-negative: 나오면 안 되는 것 ─────────────────────
+  {
+    query: "존재사건",
+    description: "hard-neg — :ARCHIVE:/:LLMLOG:/noembed chunk는 top-10에 없어야",
+    category: "hard-negative",
+    intent: "concept",
+    expectMinResults: 1,
+    topKMustNotContain: [":ARCHIVE:", ":LLMLOG:", ":noembed:", "#+filetags:   :llmlog:"],
+    db: "org",
+    topK: 10,
+  },
+  {
+    query: "피투성",
+    description: "hard-neg — archive/llmlog tagged chunks는 나오면 안 됨",
+    category: "hard-negative",
+    intent: "concept",
+    expectMinResults: 1,
+    topKMustNotContain: [":ARCHIVE:", ":LLMLOG:"],
+    db: "org",
+    topK: 10,
   },
 ];
 
@@ -135,13 +355,22 @@ function dictcliExpand(query: string): string[] {
 interface QueryResult {
   query: string;
   description: string;
+  category: QueryCategory;
+  intent?: QueryIntent;
   db: string;
   expanded: string[];
   resultCount: number;
   topScore: number;
   keywordHit: boolean;
+  top1Hit: boolean;
+  top1NegClean: boolean;
+  topKNegClean: boolean;
+  top1NoScaffoldOk: boolean;
+  topKScaffoldOk: boolean;
+  scaffoldCount: number;    // # scaffold chunks in top-K (diagnostic)
+  failReasons: string[];
   pass: boolean;
-  topResults: { score: number; text: string; project?: string }[];
+  topResults: { score: number; text: string; project?: string; scaffold?: boolean }[];
 }
 
 async function runQuery(
@@ -205,27 +434,104 @@ async function runQuery(
 
   // Sort by score
   allResults.sort((a, b) => b.score - a.score);
-  const top = allResults.slice(0, 5);
+  const topK = gq.topK ?? 5;
+  const top = allResults.slice(0, topK);
 
-  // Check keyword hit
+  const failReasons: string[] = [];
+
+  // expectMinResults
+  if (top.length < gq.expectMinResults) {
+    failReasons.push(`resultCount=${top.length} < expectMin=${gq.expectMinResults}`);
+  }
+
+  // expectKeywords: any keyword in top-K joined text (loose)
   let keywordHit = true;
   if (gq.expectKeywords && gq.expectKeywords.length > 0) {
     const allText = top.map((r) => r.text.toLowerCase()).join(" ");
     keywordHit = gq.expectKeywords.some((kw) => allText.includes(kw.toLowerCase()));
+    if (!keywordHit) failReasons.push(`no expectKeyword in top-${topK}`);
   }
 
-  const pass = top.length >= gq.expectMinResults && keywordHit;
+  // top1MustContain: strict — top-1 must contain one of these
+  let top1Hit = true;
+  if (gq.top1MustContain && gq.top1MustContain.length > 0) {
+    const t1 = (top[0]?.text ?? "").toLowerCase();
+    top1Hit = gq.top1MustContain.some((kw) => t1.includes(kw.toLowerCase()));
+    if (!top1Hit) failReasons.push(`top1 missing required keyword`);
+  }
+
+  // top1MustNotContain: hard negative on top-1 (scaffold heading detection)
+  let top1NegClean = true;
+  if (gq.top1MustNotContain && gq.top1MustNotContain.length > 0) {
+    const t1 = top[0]?.text ?? "";
+    const hit = gq.top1MustNotContain.find((kw) => t1.includes(kw));
+    if (hit !== undefined) {
+      top1NegClean = false;
+      failReasons.push(`top1 contains forbidden: "${hit}"`);
+    }
+  }
+
+  // topKMustNotContain: hard negative anywhere in top-K
+  let topKNegClean = true;
+  if (gq.topKMustNotContain && gq.topKMustNotContain.length > 0) {
+    for (let i = 0; i < top.length; i++) {
+      const hit = gq.topKMustNotContain.find((kw) => top[i].text.includes(kw));
+      if (hit !== undefined) {
+        topKNegClean = false;
+        failReasons.push(`top${i + 1} contains forbidden: "${hit}"`);
+        break;
+      }
+    }
+  }
+
+  // Scaffold checks (R1)
+  const scaffoldFlags = top.map((r) => isScaffoldChunk(r.text));
+  const scaffoldCount = scaffoldFlags.filter(Boolean).length;
+
+  let top1NoScaffoldOk = true;
+  if (gq.top1NoScaffold) {
+    if (scaffoldFlags[0]) {
+      top1NoScaffoldOk = false;
+      failReasons.push(`top-1 is a scaffold chunk (History/KEYWORDS/Related-Notes)`);
+    }
+  }
+
+  let topKScaffoldOk = true;
+  if (typeof gq.topKScaffoldMax === "number") {
+    if (scaffoldCount > gq.topKScaffoldMax) {
+      topKScaffoldOk = false;
+      failReasons.push(`scaffold density ${scaffoldCount} > max ${gq.topKScaffoldMax} in top-${top.length}`);
+    }
+  }
+
+  const pass =
+    top.length >= gq.expectMinResults &&
+    keywordHit &&
+    top1Hit &&
+    top1NegClean &&
+    topKNegClean &&
+    top1NoScaffoldOk &&
+    topKScaffoldOk;
 
   return {
     query: gq.query,
     description: gq.description,
+    category: gq.category,
+    intent: gq.intent,
     db: targetDb,
     expanded,
     resultCount: top.length,
     topScore: top[0]?.score ?? 0,
     keywordHit,
+    top1Hit,
+    top1NegClean,
+    topKNegClean,
+    top1NoScaffoldOk,
+    topKScaffoldOk,
+    scaffoldCount,
+    failReasons,
     pass,
-    topResults: top,
+    topResults: top.map((r, i) => ({ ...r, scaffold: scaffoldFlags[i] })),
   };
 }
 
@@ -297,19 +603,33 @@ async function main() {
   console.log(`\n🔍 golden-queries — ${passed}/${total} passed\n`);
   console.log("─".repeat(80));
 
+  // Group by category
+  const byCategory = new Map<QueryCategory, QueryResult[]>();
   for (const r of results) {
-    const icon = r.pass ? "✅" : "❌";
-    const expandInfo = r.expanded.length > 0 ? ` +[${r.expanded.join(",")}]` : "";
-    console.log(`  ${icon} "${r.query}" (${r.db})${expandInfo}`);
-    console.log(`     ${r.description}`);
-    console.log(`     results=${r.resultCount} topScore=${r.topScore.toFixed(4)} keywordHit=${r.keywordHit}`);
+    const list = byCategory.get(r.category) ?? [];
+    list.push(r);
+    byCategory.set(r.category, list);
+  }
 
-    if (!r.pass && r.topResults.length > 0) {
-      console.log(`     top: "${r.topResults[0].text.slice(0, 80)}..."`);
+  for (const [cat, list] of byCategory) {
+    const catPass = list.filter((r) => r.pass).length;
+    console.log(`\n📂 ${cat} — ${catPass}/${list.length}`);
+    for (const r of list) {
+      const icon = r.pass ? "✅" : "❌";
+      const expandInfo = r.expanded.length > 0 ? ` +[${r.expanded.join(",")}]` : "";
+      console.log(`  ${icon} "${r.query}" (${r.db})${expandInfo}`);
+      console.log(`     ${r.description}`);
+      console.log(`     results=${r.resultCount} topScore=${r.topScore.toFixed(4)}`);
+      if (!r.pass) {
+        console.log(`     fail: ${r.failReasons.join(" | ")}`);
+        if (r.topResults.length > 0) {
+          console.log(`     top-1: "${r.topResults[0].text.slice(0, 100).replace(/\n/g, " ")}..."`);
+        }
+      }
     }
   }
 
-  console.log("─".repeat(80));
+  console.log("\n" + "─".repeat(80));
 
   if (passed === total) {
     console.log(`  ✅ ALL PASSED — 검색 품질 정상\n`);
