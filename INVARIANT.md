@@ -133,6 +133,11 @@ Examples:
 
 Required action:
 ```bash
+scripts/rebuild-dual-full.sh
+```
+
+Equivalent minimal org-only reset:
+```bash
 rm -rf data/org.lance data/org-manifest.json
 npx tsx indexer.ts org --force
 ```

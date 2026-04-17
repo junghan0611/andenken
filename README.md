@@ -4,11 +4,11 @@
 > Heidegger's term for the kind of memory that doesn't merely retrieve,
 > but lets the past gain meaning in the present.
 
-Semantic memory for humans and AI agents. Not a corporate RAG pipeline — an interface to the *entirety of one existence* laid out on a time axis.
+Semantic memory for humans and AI agents. Not a corporate RAG pipeline — an interface to the *high-signal slices of one existence* laid out on a time axis.
 
 ## What It Does
 
-Records buried in time — session conversations, org-mode notes, journal entries, health data, commit history, bibliography — are embedded into vector space. When a question is thrown, buried records come alive with meaning.
+Records buried in time — session conversations, org-mode notes, recent journal entries, health data, commit history, bibliography — are embedded into vector space. The system now prefers **conservative scope first**: block noisy corpora, then open selectively when retrieval proves a need. When a question is thrown, buried records come alive with meaning.
 
 This is exactly what Andenken is.
 
@@ -27,7 +27,7 @@ Query ──→ Embed ──→ │                  └── Claude Code sessi
   │                 ├─ Org Chunker ────── 3,000+ Denote notes
   │                 └─ (future: health, bib, commits, journal)
   │
-  ├─ Vector Search (Gemini Embedding 2, LanceDB)
+  ├─ Vector Search (Qwen3-Embedding-4B via vLLM, LanceDB)
   ├─ Full-Text Search (BM25)
   ├─ Hybrid Merge (weighted sum / RRF)
   ├─ Temporal Decay (exponential, configurable half-life)
@@ -60,16 +60,23 @@ Layer 2 provides structural navigation.
 Layer 3 reflects the human's thought patterns and Korean language habits.
 Each layer catches what the others miss. Together they reconstruct a *bunshin*'s memory.
 
-## Current Scale (2026-03-30)
+## Current Scale (2026-04-17 verified rebuild)
 
 | Source | Chunks | Notes |
 |--------|--------|-------|
-| Sessions (pi) | 27,478 | 304 session files |
-| Knowledge (org) | 96,848 | 2,812+ Denote notes |
+| Sessions | 17,384 | full dual-GPU rebuild, verify PASS |
+| Knowledge (org) | 44,167 | 2,010 indexed files, 179 policy-excluded 0-chunk files |
+
+Validation after rebuild:
+- no duplicate IDs
+- no orphan files
+- no ghost zone
+- manifest clean
+- golden queries: **8/8 PASS**
 
 ## Stack
 
-- **Embeddings:** Gemini Embedding 2 (768d unified — cost control)
+- **Embeddings:** Qwen3-Embedding-4B via vLLM (2560d)
 - **Vector Store:** LanceDB (serverless, file-based)
 - **Retrieval:** Weighted merge + RRF + temporal decay + MMR
 - **Chunking:** Org-aware 2-tier (heading + content)
@@ -111,7 +118,60 @@ In Heidegger, *Geworfenheit* (thrownness) and *Andenken* (recollective thinking)
 
 → [Naming document](https://notes.junghanacs.com/botlog/20260319T110800.html) (Korean)
 
+## Scope and Safety Policy
+
+- `journal` is intentionally partial: only files with identifier `>= 20250101T000000`
+- exclusion tags block embedding conservatively:
+  - filetag: `noexport`, `tts`, `noembed`, `llmlog`
+  - heading/subtree: same tags plus `archive`
+- content chunking uses **direct body only** to avoid parent/child duplicate emission
+- hard guard skips oversize org chunks before they can kill the run
+- indexing policy changes are treated as **full rebuild events**, not incremental syncs
+
+See also:
+- [AGENTS.md](./AGENTS.md)
+- [INVARIANT.md](./INVARIANT.md)
+- [MEMORY.md](./MEMORY.md)
+
+## Rebuild and Verification
+
+Reproducible full rebuild script:
+
+```bash
+cd ~/repos/gh/andenken
+scripts/rebuild-dual-full.sh
+```
+
+This performs:
+1. full sessions rebuild
+2. full org rebuild
+3. verify sessions
+4. verify org
+
+Search quality baseline:
+
+```bash
+export ANDENKEN_PROVIDER=vllm
+export ANDENKEN_VLLM_ENDPOINT=http://localhost:18000
+export ANDENKEN_VLLM_MODEL=/storage/models/vllm/default
+export ANDENKEN_VLLM_PRESET=Qwen/Qwen3-Embedding-4B
+npx tsx golden-queries.ts --db org
+```
+
 ## Changelog
+
+### 0.3.4 — Conservative Scope + Invariants + Reproducible Dual Rebuild (2026-04-17)
+
+- journal indexing narrowed to 2025+ weekly-note era
+- exclusion tags enforced (`noexport`, `tts`, `noembed`, `llmlog`, subtree `archive`)
+- direct-body chunking replaces subtree-wide content emission
+- hard guard skips oversize org chunks instead of killing the run
+- manifest now updates after successful file processing
+- zero-chunk files clear stale DB rows
+- added `INVARIANT.md`
+- added `scripts/rebuild-dual-full.sh`
+- verified full dual-GPU rebuild: sessions + org both PASS
+- golden queries: **8/8 PASS**
 
 ### 0.3.3 — Korean Particle Stripping for BM25 (2026-03-30)
 

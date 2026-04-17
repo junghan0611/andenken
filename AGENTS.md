@@ -61,15 +61,17 @@ The following tags exclude content from embedding, case-insensitively:
 - `tts`
 - `noembed`
 - `llmlog`
+- `archive` (heading/subtree only)
 
 Rules:
-- **filetags** containing one of these tags → skip the **entire file**
-- **heading tags** containing one of these tags → skip the **entire subtree**
+- **filetags** containing `noexport`, `tts`, `noembed`, or `llmlog` → skip the **entire file**
+- **heading tags** containing one of these tags, or `archive` → skip the **entire subtree**
 - examples:
   - `#+filetags: :note:noembed:`
   - `* Raw transcript :TTS:`
   - `** Worklog dump :noexport:`
   - `*** Agent trace :LLMLOG:`
+  - `* Old branch :ARCHIVE:`
 
 ### Operational principle
 
@@ -239,6 +241,21 @@ A periodic checkpoint (e.g., every 50 files) would reduce re-work after interrup
 5. rsync `org.lance` + `org-manifest.json` to oracle
 6. sync oracle sessions incrementally
 7. report actual cost/time from the `💰 API:` lines
+
+### Reproducible full rebuild
+
+When policy changes or a clean rebuild is needed, use:
+
+```bash
+scripts/rebuild-dual-full.sh
+```
+
+This is the canonical full reset path for:
+- `data/sessions.lance`
+- `data/org.lance`
+- `data/org-manifest.json`
+- verify sessions
+- verify org
 
 ### Post-indexing Verification
 

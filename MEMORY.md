@@ -152,27 +152,39 @@ curl -s http://localhost:18001/v1/models | python3 -m json.tool | head -5
 - cleanup 완료 — 25K duplicate 제거됨
 - 운영 org.lance로 승격 완료
 
-### 운영 상태 (2026-04-17 conservative scope 정책 반영)
+### 운영 상태 (2026-04-17 final verified dual rebuild)
 
 - org-aware break point scoring + 마이크로헤딩 병합 구현은 유지
 - **content chunk는 subtree 전체가 아니라 direct body만 임베딩** — 구조는 heading tier / child chunk가 담당
 - **저널은 2025년 이후만 임베딩** (`identifier >= 20250101T000000`)
-- **제외 태그 정책 활성화**: `noexport`, `tts`, `noembed`, `llmlog` (filetag면 전체 파일, heading tag면 subtree 제외, case-insensitive)
+- **제외 태그 정책 활성화**: `noexport`, `tts`, `noembed`, `llmlog` (filetag면 전체 파일, heading tag면 subtree 제외, case-insensitive, `:ARCHIVE:` subtree 제외 유지)
 - 기본 원칙은 **block first, open selectively later** — 임베딩 크기보다 신호 밀도가 우선
 - **hard guard 활성화**: `ANDENKEN_ORG_EMBED_MAX_CHARS` 기본값 `12000` 초과 org chunk는 임베딩에서 skip + warning
 - **manifest는 성공 후 갱신**, zero-chunk 파일도 기존 DB row를 지우도록 write-path 보강
-- 2026-04-17 코드 기준 빠른 스캔:
-  - indexable files: **2,189**
-  - raw org chunks: **45,279**
-  - `>20k chars`: **3**
-  - hard-guard skip 대상 (`>12k chars`): **83**
-- 해석: parent/child duplication과 구형 journal 범위를 줄였고, 긴 hierarchy/heavy-Korean chunk까지 hard guard가 막는다. 즉 **정책 축소 + 안전장치** 조합으로 재인덱싱 성공 확률이 크게 올라갔다.
+- 재현 가능한 전체 리빌드 스크립트:
+  - `scripts/rebuild-dual-full.sh`
+- 2026-04-17 검증 완료 수치:
+  - Sessions: **17,384 chunks | 0 errors | 204s**
+  - Org: **44,167 chunks | 0 errors | 439s**
+  - Org indexed files: **2,010**
+  - 0-chunk policy-excluded files: **179**
+  - hard-guard skip: **6 chunks**
+  - org DB size: **579M**
+- verify 결과:
+  - no duplicate IDs
+  - no orphan files
+  - row count consistent
+  - manifest clean
+  - no ghost zone
+- search baseline:
+  - `npx tsx golden-queries.ts --db org` → **8/8 PASS**
+- 해석: conservative scope + direct-body chunking + single-writer + zero-chunk cleanup + hard guard 조합이 실제 dual-GPU full rebuild에서도 안정적으로 동작함을 검증했다.
 - **중요**: 2026-04-16에 shared `WriteBuffer` 동시성 버그 확인. dual-GPU / 병렬 임베딩 중 `sessions.lance`, `org.lance` 모두 duplicate rows가 생길 수 있었음.
 - **현재 운영 판단**: write-buffer fix 이전에 생성된 DB는 신뢰하지 않는다. 해당 DB는 삭제 후 재인덱싱이 원칙.
 - **Dimension mismatch 원인**: session DB 768d(Gemini) vs org 2560d(Qwen3-4B). 두 DB는 별도 파일이며 독립적으로 다룬다.
 - llmlog 설계문서: `20260416T135457` (org 청킹 설계)
 - llmlog 통합문서: `20260416T115700` (QMD+GBrain 패턴 흡수 현황)
-- **다음 작업**: audit rail 보강 → session/org DB 삭제 후 재인덱싱 → verify/search quality 재검증
+- **다음 작업**: hybrid retrieval spot check / doctor audit 확장
 
 ### DB 운영 원칙 (2026-04-16 명문화)
 
@@ -226,6 +238,11 @@ npx tsx indexer.ts status
 - `npx tsx indexer.ts org --status` 는 status가 아니라 **실제 org 인덱싱을 시작**한다. 쓰지 말 것.
 
 **듀얼 GPU 재인덱싱**
+```bash
+scripts/rebuild-dual-full.sh
+```
+
+Equivalent manual steps:
 ```bash
 export ANDENKEN_PROVIDER=vllm
 export ANDENKEN_VLLM_ENDPOINT=http://localhost:18000,http://localhost:18001
