@@ -87,7 +87,7 @@ function enrichTextWithStems(text: string, stems: string[]): string {
 }
 const CONCURRENCY = parseInt(process.env.INDEX_CONCURRENCY ?? "", 10) || DEFAULT_CONCURRENCY;
 const DB_WRITE_BATCH = 2000; // flush to DB every N chunks → fewer fragments
-const ORG_EMBED_MAX_CHARS = parseInt(process.env.ANDENKEN_ORG_EMBED_MAX_CHARS ?? "", 10) || 20000;
+const ORG_EMBED_MAX_CHARS = parseInt(process.env.ANDENKEN_ORG_EMBED_MAX_CHARS ?? "", 10) || 12000; // conservative guard for Korean + long hierarchy under 8K serving limit
 const CANDIDATE_MULTIPLIER = 4; // openclaw pattern: fetch 4x candidates for better MMR
 
 // --- Org Manifest (mtime-based stale detection) ---

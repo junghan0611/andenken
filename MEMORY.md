@@ -159,14 +159,14 @@ curl -s http://localhost:18001/v1/models | python3 -m json.tool | head -5
 - **저널은 2025년 이후만 임베딩** (`identifier >= 20250101T000000`)
 - **제외 태그 정책 활성화**: `noexport`, `tts`, `noembed`, `llmlog` (filetag면 전체 파일, heading tag면 subtree 제외, case-insensitive)
 - 기본 원칙은 **block first, open selectively later** — 임베딩 크기보다 신호 밀도가 우선
-- **hard guard 활성화**: `ANDENKEN_ORG_EMBED_MAX_CHARS` 기본값 `20000` 초과 org chunk는 임베딩에서 skip + warning
+- **hard guard 활성화**: `ANDENKEN_ORG_EMBED_MAX_CHARS` 기본값 `12000` 초과 org chunk는 임베딩에서 skip + warning
 - **manifest는 성공 후 갱신**, zero-chunk 파일도 기존 DB row를 지우도록 write-path 보강
 - 2026-04-17 코드 기준 빠른 스캔:
   - indexable files: **2,189**
   - raw org chunks: **45,279**
   - `>20k chars`: **3**
-  - hard-guard skip 대상: **3**
-- 해석: parent/child duplication과 구형 journal 범위를 줄였고, 남은 초대형 chunk 3개는 hard guard가 막는다. 즉 **정책 축소 + 안전장치** 조합으로 재인덱싱 성공 확률이 크게 올라갔다.
+  - hard-guard skip 대상 (`>12k chars`): **83**
+- 해석: parent/child duplication과 구형 journal 범위를 줄였고, 긴 hierarchy/heavy-Korean chunk까지 hard guard가 막는다. 즉 **정책 축소 + 안전장치** 조합으로 재인덱싱 성공 확률이 크게 올라갔다.
 - **중요**: 2026-04-16에 shared `WriteBuffer` 동시성 버그 확인. dual-GPU / 병렬 임베딩 중 `sessions.lance`, `org.lance` 모두 duplicate rows가 생길 수 있었음.
 - **현재 운영 판단**: write-buffer fix 이전에 생성된 DB는 신뢰하지 않는다. 해당 DB는 삭제 후 재인덱싱이 원칙.
 - **Dimension mismatch 원인**: session DB 768d(Gemini) vs org 2560d(Qwen3-4B). 두 DB는 별도 파일이며 독립적으로 다룬다.

@@ -111,7 +111,7 @@ must all treat **8K** as the real boundary.
 
 Invariant:
 - oversize org chunks must not be allowed to kill the whole indexing run
-- current behavior: chunks over `ANDENKEN_ORG_EMBED_MAX_CHARS` (default `20000`) are skipped with warning
+- current behavior: chunks over `ANDENKEN_ORG_EMBED_MAX_CHARS` (default `12000`) are skipped with warning
 
 This is a safety rail, not a final quality solution.
 
