@@ -155,6 +155,8 @@ export interface VLLMProviderConfig {
   documentInstruction?: string;
   /** Max texts per batch request */
   maxBatchSize?: number;
+  /** Bearer token for authenticated OpenAI-compatible endpoints (e.g. OpenRouter). Optional. */
+  apiKey?: string;
 }
 
 // Retry for local — simpler, shorter delays (GPU restart, etc.)
@@ -288,6 +290,12 @@ export class VLLMProvider implements EmbeddingProvider {
 
     const ep = this.nextEndpoint();
     const url = `${ep}/v1/embeddings`;
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (this.config.apiKey) {
+      headers["Authorization"] = `Bearer ${this.config.apiKey}`;
+    }
     const body: Record<string, unknown> = {
       model: this.config.model,
       input: inputs,
@@ -305,7 +313,7 @@ export class VLLMProvider implements EmbeddingProvider {
         const timeout = setTimeout(() => controller.abort(), 30000); // 30s timeout
         const res = await fetch(url, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers,
           body: JSON.stringify(body),
           signal: controller.signal,
         });
@@ -472,6 +480,7 @@ export function createProviderFromEnv(): EmbeddingProvider | null {
       maxBatchSize: process.env.ANDENKEN_VLLM_MAX_BATCH_SIZE
         ? parseInt(process.env.ANDENKEN_VLLM_MAX_BATCH_SIZE, 10)
         : preset?.maxBatchSize,
+      apiKey: process.env.ANDENKEN_VLLM_API_KEY,
     });
   }
 

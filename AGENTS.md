@@ -103,16 +103,17 @@ andenken Layer 1 consumes dictcli stem output without owning the Kiwi dependency
 
 ## Embedding Infrastructure — GPU Server Rule (MANDATORY)
 
-**인덱싱(임베딩)은 반드시 GPU 서버(gpu2i/gpu1i)로 한다. 로컬(ollama)에서 인덱싱 절대 금지.**
+**인덱싱(임베딩)은 반드시 GPU 서버(gpu2i/gpu1i)로 한다. 로컬에서 대량 인덱싱 절대 금지.**
 
-| 용도 | 환경 | endpoint |
-|------|------|----------|
-| **인덱싱** (session/org) | GPU 서버 vLLM (RTX 5080) | `localhost:18000` (SSH tunnel) |
-| **쿼리** (검색) | 로컬 ollama (iGPU) | `localhost:11434` |
+| 용도 | 환경 | endpoint | Why |
+|------|------|----------|-----|
+| **인덱싱** (session/org) | GPU 서버 vLLM (RTX 5080) | `localhost:18000,18001` (SSH tunnel) | 대량·배치 — 유료 API로 흘리면 돈 태움 |
+| **쿼리** (검색) | OpenRouter | `https://openrouter.ai/api` (`qwen/qwen3-embedding-4b`) | 쿼리당 $0 수준. 로컬 GPU·ollama 없어도 어디서든 검색 가능 (Oracle 포함) |
 
 - GPU 서버: ~350 emb/s (5분에 97K chunks 완료)
-- 로컬 ollama: ~0.1 files/s (97K chunks → 80분+, 실용 불가)
-- 로컬 ollama는 **쿼리 전용** — 터널 없이도 검색 가능하게 하는 것이 목적
+- OpenRouter: 쿼리 1건 ~100-500ms, ~$0.00000014/쿼리
+- 2560d 동일. 인덱싱 DB와 쿼리 벡터가 같은 공간에 있으므로 혼용 가능
+- 로컬 ollama는 **필요 없음** (2026-04-17 정리). Oracle·다른 호스트도 ollama 불요
 
 ### 인덱싱 전 필수 절차
 
@@ -133,21 +134,29 @@ ANDENKEN_PROVIDER=vllm ANDENKEN_VLLM_ENDPOINT=http://localhost:18000 \
 ### 운영 모델
 
 - **Qwen3-Embedding-4B** (2560d) — org + session 공통
-- Gemini 호출 없음. 모든 임베딩은 로컬 인프라.
+- 인덱싱: GPU 서버 vLLM (로컬 인프라, $0)
+- 쿼리: OpenRouter (cloud, 쿼리당 ~$0.00000014)
+- Gemini 호출 없음
 
 ## Environment
 
-```bash
-# Embedding provider (vLLM mandatory for indexing)
-ANDENKEN_PROVIDER=vllm
-ANDENKEN_VLLM_ENDPOINT=http://localhost:18000   # GPU server via SSH tunnel
-ANDENKEN_VLLM_MODEL=/storage/models/vllm/default
-ANDENKEN_VLLM_PRESET=Qwen/Qwen3-Embedding-4B
+Query-time default (`~/.env.local`):
 
-# Query-time local (ollama)
-# ANDENKEN_VLLM_ENDPOINT=http://localhost:11434
-# ANDENKEN_VLLM_MODEL=qwen3-embedding:4b
-# ANDENKEN_VLLM_PRESET=ollama/qwen3-embedding:4b
+```bash
+export ANDENKEN_PROVIDER=vllm
+export ANDENKEN_VLLM_ENDPOINT=https://openrouter.ai/api
+export ANDENKEN_VLLM_MODEL=qwen/qwen3-embedding-4b
+export ANDENKEN_VLLM_API_KEY="$OPENROUTER_API_KEY"
+export ANDENKEN_VLLM_DIMENSIONS=2560
+export ANDENKEN_VLLM_PRESET=Qwen/Qwen3-Embedding-4B
+```
+
+Indexing (GPU server) — `scripts/rebuild-dual-full.sh` overrides `.env.local`:
+
+```bash
+export ANDENKEN_VLLM_ENDPOINT=http://localhost:18000,http://localhost:18001
+export ANDENKEN_VLLM_MODEL=/storage/models/vllm/default
+unset ANDENKEN_VLLM_API_KEY   # never leak query key to indexing
 ```
 
 Index locations:

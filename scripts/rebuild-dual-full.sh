@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Full dual rebuild — MUST run on the GPU server.
+# Intentionally overrides ANDENKEN_VLLM_* from ~/.env.local so query-time
+# OpenRouter defaults don't leak into the indexing path (cost + rate-limit risk).
+# Per ~/AGENTS.md: "GPU 서버 인덱싱 의무".
 set -euo pipefail
 
 cd /home/junghan/repos/gh/andenken
@@ -7,6 +11,7 @@ export ANDENKEN_PROVIDER=vllm
 export ANDENKEN_VLLM_ENDPOINT=http://localhost:18000,http://localhost:18001
 export ANDENKEN_VLLM_MODEL=/storage/models/vllm/default
 export ANDENKEN_VLLM_PRESET=Qwen/Qwen3-Embedding-4B
+unset ANDENKEN_VLLM_API_KEY
 export INDEX_CONCURRENCY=4
 export ANDENKEN_EMBED_BATCH=500
 

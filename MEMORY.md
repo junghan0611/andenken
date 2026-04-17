@@ -93,26 +93,29 @@ ANDENKEN_DATA=./data/bakeoff-qwen4b
 # Gemini (existing, fallback)
 GOOGLE_AI_API_KEY=xxx
 
-# ollama (thinkpad 로컬 쿼리용 — GPU 서버 없이도 검색 가능)
+# OpenRouter (host-agnostic 쿼리용 — thinkpad/Oracle 어디서든 작동)
 ANDENKEN_PROVIDER=vllm
-ANDENKEN_VLLM_ENDPOINT=http://localhost:11434
-ANDENKEN_VLLM_MODEL=qwen3-embedding:4b
-ANDENKEN_VLLM_PRESET=ollama/qwen3-embedding:4b
+ANDENKEN_VLLM_ENDPOINT=https://openrouter.ai/api
+ANDENKEN_VLLM_MODEL=qwen/qwen3-embedding-4b
+ANDENKEN_VLLM_API_KEY="$OPENROUTER_API_KEY"
+ANDENKEN_VLLM_DIMENSIONS=2560
+ANDENKEN_VLLM_PRESET=Qwen/Qwen3-Embedding-4B
 ```
 
-### 운영 모드 3가지
+### 운영 모드 3가지 (2026-04-17 갱신)
 
 | 모드 | endpoint | 용도 |
 |------|----------|------|
-| **ollama (로컬)** | localhost:11434 | 일상 쿼리 — 터널 불필요, 즉시 응답 |
+| **OpenRouter (쿼리 default)** | `https://openrouter.ai/api` | 일상 쿼리 — thinkpad/Oracle 어디서든. 쿼리당 ~$0 |
 | **vLLM single** | localhost:18000 (tunnel) | 인덱싱/실험 |
-| **vLLM dual** | localhost:18000,18001 | 대량 인덱싱 |
+| **vLLM dual** | localhost:18000,18001 | 대량 인덱싱 — `scripts/rebuild-dual-full.sh` |
 
-**양자화 차이 주의:**
-- vLLM (GPU): SafeTensors fp16 — 인덱싱용 풀 정밀도
-- ollama (thinkpad): GGUF Q4_K_M — 쿼리용 양자화
-- 동일 모델 + 동일 2560d. 실용적 차이 미미 (golden-queries로 검증 예정)
-- thinkpad: AMD Radeon 780M iGPU + Vulkan 가속
+로컬 ollama는 2026-04-17부로 **의존 제거** — 2560d Qwen3 호출이 OpenRouter로 통합됨.
+
+**양자화/서빙 차이 주의:**
+- vLLM (GPU 서버): SafeTensors fp16 — 인덱싱용 풀 정밀도
+- OpenRouter: 호스팅 inference (정확한 스펙 공개 X). 2560d 동일.
+- golden-queries 26/26 PASS through both paths (2026-04-17 검증)
 
 ### SSH Tunnel (thinkpad → GPU 서버)
 
@@ -225,9 +228,9 @@ curl -s http://localhost:18001/v1/models | python3 -m json.tool | head -5
 
 **모델**
 - GPU 인덱싱: `/storage/models/vllm/default` → `Qwen/Qwen3-Embedding-4B` (2560d)
-- 로컬 쿼리: `qwen3-embedding:4b` (ollama, same family, query-only)
+- 쿼리: OpenRouter `qwen/qwen3-embedding-4b` (same family, 2560d)
 
-**터널 열기**
+**터널 열기 (인덱싱 시에만 필요)**
 ```bash
 ssh -f -N -L 18000:localhost:8000 gpu2i
 ssh -f -N -L 18001:localhost:8000 gpu1i
@@ -235,10 +238,13 @@ ssh -f -N -L 18001:localhost:8000 gpu1i
 
 **터널/모델 확인**
 ```bash
-ss -tlnp | grep -E ':18000|:18001|:11434'
+ss -tlnp | grep -E ':18000|:18001'
 curl -s http://localhost:18000/v1/models | python3 -m json.tool | head -20
 curl -s http://localhost:18001/v1/models | python3 -m json.tool | head -20
-curl -s http://localhost:11434/api/tags | python3 -m json.tool | head -20
+curl -s -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+  -X POST https://openrouter.ai/api/v1/embeddings \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen/qwen3-embedding-4b","input":"ping"}' | head -c 200
 ```
 
 **임베딩 endpoint smoke test**

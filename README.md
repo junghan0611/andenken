@@ -151,14 +151,35 @@ This performs:
 Search quality baseline:
 
 ```bash
-export ANDENKEN_PROVIDER=vllm
-export ANDENKEN_VLLM_ENDPOINT=http://localhost:18000
-export ANDENKEN_VLLM_MODEL=/storage/models/vllm/default
-export ANDENKEN_VLLM_PRESET=Qwen/Qwen3-Embedding-4B
-npx tsx golden-queries.ts --db org
+# Local / GPU server — uses ~/.env.local defaults (OpenRouter query path works here too)
+./run.sh golden
 ```
 
+## Provider Split — Query vs. Indexing
+
+| Path | Default endpoint | Why |
+|---|---|---|
+| **Query** (search, golden, status) | OpenRouter (`https://openrouter.ai/api`, model `qwen/qwen3-embedding-4b`) | Works from any host (Oracle, laptop) — no local GPU/ollama needed. ~$0 per query. |
+| **Indexing** (`scripts/rebuild-dual-full.sh`) | Local vLLM (`http://localhost:18000,18001`, `Qwen/Qwen3-Embedding-4B`) | Bulk work must stay on GPU. Per ~/AGENTS.md: "GPU 서버 인덱싱 의무". |
+
+Both paths produce the same 2560d vectors — the same LanceDB is queryable anywhere as long as
+the query provider also emits 2560d. Indexing script explicitly overrides `ANDENKEN_VLLM_*`
+from `~/.env.local`, so the two worlds do not collide.
+
+For Oracle (or any other query-only host): rsync the `data/*.lance` directories, set
+`OPENROUTER_API_KEY` + the `ANDENKEN_VLLM_*` defaults in `~/.env.local`, and queries just work.
+
 ## Changelog
+
+### 0.3.5 — OpenRouter Query Path + Provider Split (2026-04-17)
+
+- `VLLMProvider` now accepts optional `apiKey` → `Authorization: Bearer` header
+- `ANDENKEN_VLLM_API_KEY` env var recognized by factory
+- Query-time default switched to OpenRouter `qwen/qwen3-embedding-4b` (same 2560d)
+- Indexing path (`rebuild-dual-full.sh`) explicitly unsets the API key and pins localhost
+  vLLM — indexing never leaks to a paid API
+- Unblocks remote query-only hosts (Oracle) without shipping a 4B embedding model there
+- Golden: 26/26 PASS through OpenRouter (same results as local vLLM)
 
 ### 0.3.4 — Conservative Scope + Invariants + Reproducible Dual Rebuild (2026-04-17)
 
