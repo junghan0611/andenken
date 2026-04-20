@@ -106,11 +106,18 @@ ANDENKEN_VLLM_PRESET=Qwen/Qwen3-Embedding-4B
 
 | 모드 | endpoint | 용도 |
 |------|----------|------|
-| **OpenRouter (쿼리 default)** | `https://openrouter.ai/api` | 일상 쿼리 — thinkpad/Oracle 어디서든. 쿼리당 ~$0 |
+| **OpenRouter (쿼리 default)** | `https://openrouter.ai/api` | 일상 쿼리 전용 — thinkpad/Oracle 어디서든. **인덱싱 임베딩 경로로 착각하지 말 것** |
 | **vLLM single** | localhost:18000 (tunnel) | 인덱싱/실험 |
-| **vLLM dual** | localhost:18000,18001 | 대량 인덱싱 — `scripts/rebuild-dual-full.sh` |
+| **vLLM dual (full)** | localhost:18000,18001 | 풀 리빌드 — `scripts/rebuild-dual-full.sh` |
+| **vLLM dual (incremental)** | localhost:18000,18001 | 증분 (manifest 기반) — `scripts/rebuild-dual-incremental.sh` |
 
 로컬 ollama는 2026-04-17부로 **의존 제거** — 2560d Qwen3 호출이 OpenRouter로 통합됨.
+
+**운영 원칙 (2026-04-20 추가):**
+- `OPENROUTER_API_KEY` / `ANDENKEN_VLLM_API_KEY`는 **쿼리용 기본 경로**다.
+- **인덱싱/재임베딩 비용 추정**을 말할 때는 현재 provider가 OpenRouter인지, 로컬 GPU vLLM인지 먼저 확인한다.
+- 로컬 GPU vLLM(single/dual)로 임베딩 중이면 **외부 API 비용을 전제로 말하면 안 된다**.
+- 특히 사용자가 "지금 andenken에서 듀얼로 돌린다"고 말한 경우, 그 작업은 **로컬 GPU 임베딩**으로 이해한다.
 
 **양자화/서빙 차이 주의:**
 - vLLM (GPU 서버): SafeTensors fp16 — 인덱싱용 풀 정밀도
