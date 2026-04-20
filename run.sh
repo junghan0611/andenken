@@ -23,7 +23,8 @@ andenken — recollective thinking
 Usage: ./run.sh <command> [args]
 
 === Setup ===
-  setup                       npm install
+  setup                       npm install + build dist/
+  build                       rebuild dist/ only (after source edits)
 
 === Indexing ===
   index:sessions [--force]    Index pi + Claude Code sessions
@@ -63,8 +64,12 @@ case "${1:-help}" in
 
   # === Setup ===
   setup)
-    echo "andenken: npm install"
-    cd "$SCRIPT_DIR" && npm install
+    echo "andenken: npm install + build"
+    cd "$SCRIPT_DIR" && npm install && npm run build
+    ;;
+  build)
+    echo "andenken: build dist/"
+    cd "$SCRIPT_DIR" && npm run build
     ;;
 
   # === Index ===
