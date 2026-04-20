@@ -453,7 +453,13 @@ export function createProviderFromEnv(): EmbeddingProvider | null {
   // Lazy-load ~/.env.local for processes that didn't source it (e.g. pi tool calls).
   // process.env takes priority; env file is fallback only.
   let _cachedEnvFile: Record<string, string> | undefined;
-  const getEnv = (key: string): string | undefined => process.env[key] ?? (_cachedEnvFile ??= loadEnvFile())[key];
+  const getEnv = (key: string): string | undefined => {
+    const val = process.env[key];
+    // Treat unexpanded $VAR placeholders (e.g. "$OPENROUTER_API_KEY") as absent;
+    // fall back to env file which resolves references in declaration order.
+    if (val !== undefined && !val.includes("$")) return val;
+    return (_cachedEnvFile ??= loadEnvFile())[key];
+  };
 
   const providerType = getEnv("ANDENKEN_PROVIDER") as "gemini" | "vllm" | undefined;
 
