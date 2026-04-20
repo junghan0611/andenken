@@ -66,60 +66,20 @@ function getKST(): string {
 // --- Checks ---
 
 async function checkAPI(): Promise<CheckResult> {
-  const providerType = process.env.ANDENKEN_PROVIDER ?? "";
-  const vllmEndpoint = process.env.ANDENKEN_VLLM_ENDPOINT ?? "";
-  const vllmModel = process.env.ANDENKEN_VLLM_MODEL ?? "";
-
-  // Primary operational provider is vLLM. Check first endpoint if comma-separated.
-  if (providerType === "vllm" || vllmEndpoint) {
-    const endpoint = vllmEndpoint.split(",")[0]?.trim();
-    if (!endpoint || !vllmModel) {
-      return { name: "vLLM", status: "FAIL", detail: "ANDENKEN_VLLM_ENDPOINT / ANDENKEN_VLLM_MODEL not set" };
-    }
-    try {
-      const resp = await fetch(`${endpoint}/v1/embeddings`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: vllmModel, input: ["ping"] }),
-        signal: AbortSignal.timeout(10000),
-      });
-      if (resp.ok) {
-        const data = await resp.json() as { data?: Array<{ embedding: number[] }> };
-        const dim = data.data?.[0]?.embedding?.length ?? 0;
-        return { name: "vLLM", status: "OK", detail: `${endpoint} responding, dim=${dim}` };
-      }
-      const body = await resp.text();
-      return { name: "vLLM", status: "FAIL", detail: `HTTP ${resp.status}: ${body.slice(0, 100)}` };
-    } catch (e) {
-      return { name: "vLLM", status: "FAIL", detail: `${endpoint}: ${String(e).slice(0, 100)}` };
-    }
-  }
-
-  // Legacy Gemini fallback — only if explicitly selected or no vLLM configured
-  const apiKey = process.env.GOOGLE_AI_API_KEY ?? process.env.GEMINI_API_KEY ?? "";
-  if (!apiKey) {
-    return { name: "API", status: "WARN", detail: "no provider configured (set ANDENKEN_PROVIDER=vllm + VLLM env)" };
+  // Use createProviderFromEnv() so auth (including ~/.env.local $VAR expansion) is handled identically to production.
+  const provider = createProviderFromEnv();
+  if (!provider) {
+    return { name: "API", status: "WARN", detail: "no provider configured (set ANDENKEN_PROVIDER=vllm + env vars)" };
   }
   try {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-2-preview:embedContent?key=${apiKey}`;
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: "models/gemini-embedding-2-preview",
-        content: { parts: [{ text: "ping" }] },
-        taskType: "RETRIEVAL_QUERY",
-        outputDimensionality: 768,
-      }),
-      signal: AbortSignal.timeout(10000),
-    });
-    if (resp.ok) {
-      return { name: "Gemini API (legacy)", status: "OK", detail: "embedding-2-preview responding" };
-    }
-    const body = await resp.text();
-    return { name: "Gemini API (legacy)", status: "FAIL", detail: `HTTP ${resp.status}: ${body.slice(0, 100)}` };
+    const [vec] = await provider.embedBatch(["ping"]);
+    const dim = vec?.length ?? 0;
+    const label = provider.constructor.name.replace("Provider", "");
+    return { name: label, status: "OK", detail: `responding, dim=${dim}` };
   } catch (e) {
-    return { name: "Gemini API (legacy)", status: "FAIL", detail: String(e).slice(0, 100) };
+    const msg = e instanceof Error ? e.message : String(e);
+    const label = provider.constructor.name.replace("Provider", "");
+    return { name: label, status: "FAIL", detail: msg.slice(0, 120) };
   }
 }
 
