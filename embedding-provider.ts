@@ -450,11 +450,16 @@ export function createProvider(config: ProviderConfig): EmbeddingProvider {
  * Falls back to Gemini if ANDENKEN_PROVIDER not set.
  */
 export function createProviderFromEnv(): EmbeddingProvider | null {
-  const providerType = process.env.ANDENKEN_PROVIDER as "gemini" | "vllm" | undefined;
+  // Lazy-load ~/.env.local for processes that didn't source it (e.g. pi tool calls).
+  // process.env takes priority; env file is fallback only.
+  let _cachedEnvFile: Record<string, string> | undefined;
+  const getEnv = (key: string): string | undefined => process.env[key] ?? (_cachedEnvFile ??= loadEnvFile())[key];
+
+  const providerType = getEnv("ANDENKEN_PROVIDER") as "gemini" | "vllm" | undefined;
 
   if (providerType === "vllm") {
-    const endpoint = process.env.ANDENKEN_VLLM_ENDPOINT;
-    const model = process.env.ANDENKEN_VLLM_MODEL;
+    const endpoint = getEnv("ANDENKEN_VLLM_ENDPOINT");
+    const model = getEnv("ANDENKEN_VLLM_MODEL");
     if (!endpoint || !model) {
       process.stderr.write("⚠ ANDENKEN_PROVIDER=vllm but ANDENKEN_VLLM_ENDPOINT or ANDENKEN_VLLM_MODEL not set\n");
       return null;
@@ -463,24 +468,22 @@ export function createProviderFromEnv(): EmbeddingProvider | null {
     // Auto-apply model preset if available
     // ANDENKEN_VLLM_PRESET overrides model name for preset lookup
     // (useful when model path differs from HF name, e.g., /storage/models/vllm/default)
-    const presetName = process.env.ANDENKEN_VLLM_PRESET ?? model;
+    const presetName = getEnv("ANDENKEN_VLLM_PRESET") ?? model;
     const preset = getModelPreset(presetName);
-    if (preset && process.env.ANDENKEN_LOG_PRESET === "1") {
+    if (preset && getEnv("ANDENKEN_LOG_PRESET") === "1") {
       process.stderr.write(`📋 Preset: ${presetName} (${preset.dimensions}d, batch=${preset.maxBatchSize})\n`);
     }
 
+    const dimStr = getEnv("ANDENKEN_VLLM_DIMENSIONS");
+    const batchStr = getEnv("ANDENKEN_VLLM_MAX_BATCH_SIZE");
     return new VLLMProvider({
       endpoint,
       model,
-      dimensions: process.env.ANDENKEN_VLLM_DIMENSIONS
-        ? parseInt(process.env.ANDENKEN_VLLM_DIMENSIONS, 10)
-        : preset?.dimensions,
-      queryInstruction: process.env.ANDENKEN_VLLM_QUERY_INSTRUCTION ?? preset?.queryInstruction,
-      documentInstruction: process.env.ANDENKEN_VLLM_DOCUMENT_INSTRUCTION ?? preset?.documentInstruction,
-      maxBatchSize: process.env.ANDENKEN_VLLM_MAX_BATCH_SIZE
-        ? parseInt(process.env.ANDENKEN_VLLM_MAX_BATCH_SIZE, 10)
-        : preset?.maxBatchSize,
-      apiKey: process.env.ANDENKEN_VLLM_API_KEY,
+      dimensions: dimStr ? parseInt(dimStr, 10) : preset?.dimensions,
+      queryInstruction: getEnv("ANDENKEN_VLLM_QUERY_INSTRUCTION") ?? preset?.queryInstruction,
+      documentInstruction: getEnv("ANDENKEN_VLLM_DOCUMENT_INSTRUCTION") ?? preset?.documentInstruction,
+      maxBatchSize: batchStr ? parseInt(batchStr, 10) : preset?.maxBatchSize,
+      apiKey: getEnv("ANDENKEN_VLLM_API_KEY"),
     });
   }
 
@@ -494,34 +497,59 @@ export function createProviderFromEnv(): EmbeddingProvider | null {
   });
 }
 
-// --- Gemini key loader (consolidated from 4 duplicate getGeminiConfig functions) ---
+// --- Env file loader with variable expansion ---
 
 import * as fs from "node:fs";
 import * as nodePath from "node:path";
 
+// Parses ~/.env.local into a Record, resolving $VAR references in declaration order.
+// Handles: export KEY=value, KEY="value", KEY='value', KEY=$OTHER_KEY
+function loadEnvFile(): Record<string, string> {
+  const result: Record<string, string> = {};
+  try {
+    const envPath = nodePath.join(process.env.HOME ?? "", ".env.local");
+    const content = fs.readFileSync(envPath, "utf-8");
+    for (const line of content.split("\n")) {
+      const stripped = line.trim().replace(/^export\s+/, "");
+      if (!stripped || stripped.startsWith("#")) continue;
+      const eqIdx = stripped.indexOf("=");
+      if (eqIdx < 0) continue;
+      const key = stripped.slice(0, eqIdx).trim();
+      if (!key) continue;
+      const raw = stripped.slice(eqIdx + 1).trim();
+
+      let value: string;
+      if (raw.startsWith("'") && raw.endsWith("'")) {
+        value = raw.slice(1, -1); // single-quoted: no expansion
+      } else {
+        const inner = raw.startsWith('"') && raw.endsWith('"') ? raw.slice(1, -1) : raw;
+        // Expand $VAR and ${VAR} using already-parsed values then process.env
+        value = inner.replace(/\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/g, (_, v) =>
+          result[v] ?? process.env[v] ?? "",
+        );
+      }
+      result[key] = value;
+    }
+  } catch {
+    // file not found or unreadable
+  }
+  return result;
+}
+
 function loadGeminiKey(): string {
-  // Check process.env first
   const fromEnv =
     process.env.GOOGLE_AI_API_KEY ??
     process.env.GEMINI_API_KEY ??
     process.env.GOOGLE_API_KEY;
   if (fromEnv) return fromEnv;
 
-  // Read ~/.env.local as fallback
-  try {
-    const envPath = nodePath.join(process.env.HOME ?? "", ".env.local");
-    const content = fs.readFileSync(envPath, "utf-8");
-    for (const line of content.split("\n")) {
-      const stripped = line.trim().replace(/^export\s+/, "");
-      const match = stripped.match(
-        /^(GOOGLE_AI_API_KEY|GEMINI_API_KEY|GOOGLE_API_KEY)=["']?([^"'\s]+)["']?/,
-      );
-      if (match) return match[2];
-    }
-  } catch {
-    // file not found
-  }
-  return "";
+  const envFile = loadEnvFile();
+  return (
+    envFile["GOOGLE_AI_API_KEY"] ??
+    envFile["GEMINI_API_KEY"] ??
+    envFile["GOOGLE_API_KEY"] ??
+    ""
+  );
 }
 
 // --- Re-exports for backward compatibility ---
