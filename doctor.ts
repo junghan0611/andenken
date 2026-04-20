@@ -72,7 +72,7 @@ async function checkAPI(): Promise<CheckResult> {
     return { name: "API", status: "WARN", detail: "no provider configured (set ANDENKEN_PROVIDER=vllm + env vars)" };
   }
   try {
-    const [vec] = await provider.embedBatch(["ping"]);
+    const vec = await provider.embedQuery("ping");
     const dim = vec?.length ?? 0;
     const label = provider.constructor.name.replace("Provider", "");
     return { name: label, status: "OK", detail: `responding, dim=${dim}` };
