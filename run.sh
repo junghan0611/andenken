@@ -51,6 +51,13 @@ Usage: ./run.sh <command> [args]
   bench                       Full benchmark (needs API)
   bench:dry                   Dry run
 
+=== Doctor (operator triage) ===
+  doctor                      General: API / DB / oracle / stale / cost
+  doctor --org                Org triage: retrieval smoke + chunk + structure
+  doctor --org --no-smoke     Skip retrieval probes (no API calls)
+  doctor --org --save-baseline  Record current snapshot as baseline
+  doctor --org --json         JSON output
+
 === Utility ===
   env                         Show environment status
 EOF
@@ -105,6 +112,10 @@ case "${1:-help}" in
   # === Golden Queries ===
   golden)
     shift; load_env; cd "$SCRIPT_DIR" && npx tsx golden-queries.ts "$@" ;;
+
+  # === Doctor ===
+  doctor)
+    shift; load_env; cd "$SCRIPT_DIR" && npx tsx doctor.ts "$@" ;;
 
   # === Bench ===
   bench)

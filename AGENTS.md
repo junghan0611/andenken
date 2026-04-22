@@ -345,21 +345,62 @@ Test the 3-layer pipeline (andenken → denotecli → dictcli):
 5. andenken interprets results: pass/fail judgment + root cause for failures
 6. Report to agent-config (or Hih)
 
-#### Relationship to structural verify
+#### Four-Layer Quality Surface
 
-| Layer | Tool | What it checks |
-|-------|------|----------------|
-| Structural | `./run.sh verify all` | Duplicates, orphans, manifest, fragments |
-| Search quality | This spec (5 tests) | Retrieval actually works after changes |
-| Golden baseline | `npx tsx golden-queries.ts` | Regression detection across runs |
+Each layer answers a different question. None of them replaces another.
 
-All three layers are required. Structural verify alone is not enough.
+| Layer | Tool | Question it answers | Frequency |
+|-------|------|---------------------|-----------|
+| Structural | `./run.sh verify all` | Is the DB internally consistent? (duplicates, orphans, manifest, fragments) | After every indexing |
+| Operator triage | `./run.sh doctor --org` | Is retrieval/chunk/structure healthy *today*, baseline-compared? | Daily or before sync |
+| Search quality spec | Delegated 5-test suite (this spec) | Does retrieval actually work after changes? (deep check with different agent) | After cleanup or major indexing |
+| Golden baseline | `./run.sh golden` | Did search regress vs the frozen fixture? | Before declaring a rebuild done |
+
+**doctor is a triage layer — not a replacement.** Rules:
+
+- `verify` finds DB corruption. doctor does not.
+- `golden-queries` is the regression gate. doctor's 6-probe smoke is a sanity check, not a gate.
+- doctor adds what neither provides: a *one-screen, baseline-compared snapshot* of
+  retrieval / chunk / structure health, including malformed org files, oversize
+  risk, micro-heading chains, hard-guard skips, and zero-chunk unexpected.
+- When doctor WARNs, decide: is it a real regression (run golden), a DB problem
+  (run verify), or a garden maintenance item (manual repair)?
 
 **Who runs what**:
 - `verify`: andenken (after any indexing) or agent-config (post-sync check)
+- `doctor --org`: andenken or operator (read-only, local-only, any time)
 - `cleanup`: agent-config only (modifies DB)
 - Search quality spec: andenken (delegated to Sonnet, mandatory after cleanup/major indexing)
 - Golden queries: andenken (search quality baseline)
+
+#### doctor --org Operator Guide
+
+Stage-1 triage command. Read-only, local-only, zero embedding impact.
+
+```bash
+./run.sh doctor --org                    # full: smoke + chunk + structure
+./run.sh doctor --org --no-smoke         # no API calls (offline)
+./run.sh doctor --org --save-baseline    # record current snapshot
+./run.sh doctor --org --json             # JSON output for agents
+```
+
+What it checks:
+
+1. **Retrieval smoke** — 6 probes (cross-lingual, stem, local-concept×2,
+   definition, hard-negative). Not a regression gate; use `golden` for that.
+2. **Chunk health** — total, indexed files, heading/content ratio, top-N
+   concentration, zero-chunk unexpected, hard-guard skip total + top-N.
+3. **Org structure** — malformed `#+begin_/end_` pairing top-N, oversize
+   (>20k chars) top-N, micro-heading chain (L4+, length ≥4) top-N.
+
+Baseline: `data/doctor-org-baseline.json`. Update manually with `--save-baseline`
+when the current state is accepted as the new reference.
+
+Regression triggers (drive WARN/FAIL verdict):
+- any malformed block file, any zero-chunk unexpected file
+- `hardGuardSkipTotal` delta > 0 (new content silently filtered out)
+- `indexedFiles` delta < -2 (files disappeared from index)
+- `chunkTotal` delta < -50 (large chunk loss)
 
 ### Tooling
 
@@ -367,4 +408,5 @@ All three layers are required. Structural verify alone is not enough.
 - agent workflow: `memory-sync` skill
 - cost dry-run: `./run.sh estimate all`
 - integrity check: `./run.sh verify all`
+- operator triage: `./run.sh doctor --org`
 - cleanup: `./run.sh cleanup org [--dry-run]`

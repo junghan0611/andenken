@@ -93,7 +93,9 @@ const CANDIDATE_MULTIPLIER = 4; // openclaw pattern: fetch 4x candidates for bet
 // --- Org Manifest (mtime-based stale detection) ---
 
 interface OrgFileManifest {
-  files: Record<string, { mtimeMs: number; size: number; chunks: number }>;
+  // skippedOversize: count of chunks filtered out by ORG_EMBED_MAX_CHARS hard guard during the last index of this file.
+  // Omitted when 0. Surfaced by `doctor --org` so the operator can see which files are silently losing content.
+  files: Record<string, { mtimeMs: number; size: number; chunks: number; skippedOversize?: number }>;
   lastUpdated: string;
 }
 
@@ -333,26 +335,29 @@ async function indexOrg(force: boolean) {
   const fileChunks: Array<{
     file: string;
     chunks: ReturnType<typeof chunkOrgFile>;
-    manifestEntry?: { mtimeMs: number; size: number; chunks: number };
+    manifestEntry?: { mtimeMs: number; size: number; chunks: number; skippedOversize?: number };
   }> = [];
   let skippedOversizeChunks = 0;
 
   for (const file of toIndex) {
     const content = fs.readFileSync(file, "utf-8");
     const rawChunks = chunkOrgFile(content, file);
+    let fileSkipped = 0;
     const chunks = rawChunks.filter((chunk) => {
       if (chunk.text.length <= ORG_EMBED_MAX_CHARS) return true;
       skippedOversizeChunks++;
+      fileSkipped++;
       console.warn(
         `[org-embed-skip] ${file}:${chunk.lineNumber} ${chunk.chunkType} ${chunk.text.length} chars > ${ORG_EMBED_MAX_CHARS} :: ${chunk.hierarchy || chunk.metadata.title}`,
       );
       return false;
     });
 
-    let manifestEntry: { mtimeMs: number; size: number; chunks: number } | undefined;
+    let manifestEntry: { mtimeMs: number; size: number; chunks: number; skippedOversize?: number } | undefined;
     try {
       const stat = fs.statSync(file);
       manifestEntry = { mtimeMs: stat.mtimeMs, size: stat.size, chunks: chunks.length };
+      if (fileSkipped > 0) manifestEntry.skippedOversize = fileSkipped;
     } catch { /* file may have been deleted */ }
 
     fileChunks.push({ file, chunks, manifestEntry });

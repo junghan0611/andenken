@@ -17,6 +17,7 @@ andenken search-sessions "NixOS GPU cluster setup"
 andenken search-knowledge "체화인지 embodied cognition"
 andenken status
 andenken reindex
+./run.sh doctor --org      # operator triage: retrieval / chunk / structure health
 ```
 
 ## Architecture

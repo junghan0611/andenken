@@ -1,17 +1,19 @@
 #!/usr/bin/env npx tsx
 /**
- * andenken doctor — 운영 상태 한 화면 진단
+ * andenken doctor — operator triage
  *
- * Usage:
+ * General mode (default):
  *   npx tsx doctor.ts
  *   npx tsx doctor.ts --json
+ *   Checks API / local DBs / oracle / stale / cost pre-flight.
  *
- * Checks:
- *   1. API health (vLLM embedding endpoint; Gemini fallback if configured)
- *   2. Local session/org DB status (+ dim parity vs provider)
- *   3. Oracle session/org DB status (SSH)
- *   4. Stale files (unindexed)
- *   5. Cost pre-flight (org incremental estimate)
+ * Org triage mode (stage 1):
+ *   npx tsx doctor.ts --org
+ *   npx tsx doctor.ts --org --json
+ *   npx tsx doctor.ts --org --no-smoke
+ *   npx tsx doctor.ts --org --save-baseline
+ *   Read-only, local-only. Triage surface for retrieval / chunk / org structure
+ *   — NOT a replacement for `./run.sh verify all` or golden-queries.
  */
 
 import * as fs from "node:fs";
@@ -21,6 +23,7 @@ import { VectorStore, getSessionsDbPath, getOrgDbPath } from "./store.js";
 import { findSessionFiles } from "./session-indexer.js";
 import { findOrgFiles, shouldIndexOrgFile } from "./org-chunker.js";
 import { createProviderFromEnv } from "./embedding-provider.js";
+import { runOrgDoctor } from "./doctor-org.js";
 
 // --- Types ---
 
@@ -214,6 +217,20 @@ async function main() {
   const jsonMode = process.argv.includes("--json");
   const device = getDevice();
   const time = getKST();
+
+  // Org triage mode — stage 1 dispatch (read-only, local-only).
+  if (process.argv.includes("--org")) {
+    const smoke = !process.argv.includes("--no-smoke");
+    const saveBaseline = process.argv.includes("--save-baseline");
+    const exitCode = await runOrgDoctor({
+      smoke,
+      json: jsonMode,
+      saveBaseline,
+      device,
+      time,
+    });
+    process.exit(exitCode);
+  }
 
   const checks: CheckResult[] = [];
 
