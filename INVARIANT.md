@@ -9,6 +9,27 @@ Read this before changing:
 
 This file documents the rules that must stay true even as implementation changes.
 
+## 0. Cross-axis boundary invariants
+
+andenken implements the **embedding axis only**. Boundaries with the other two
+memory axes (active memory, dream) and the sidecars (dictcli, denotecli) must
+not drift.
+
+- andenken **never calls LLMs for recall**. Retrieval is vector + BM25 + merge + decay + MMR.
+  If an LLM-in-the-loop is ever needed, it is a harness concern (active memory), not andenken.
+- The **query path never writes** to LanceDB. Only indexing writes. This is what lets
+  query run on any host including Oracle without touching the DB.
+- **Hard guard is a safety rail, not a quality bar**. Oversize chunks being skipped is
+  never the end state; it is a signal that chunking or garden content needs work.
+- Korean morphology belongs in **dictcli**, not here. andenken stays language-agnostic.
+  Particle stripping is the one exception because it is BM25 preprocessing at the
+  tokenizer boundary.
+- Structural graph traversal (backlinks, dblock classification) belongs in **denotecli**.
+  andenken does not own Denote identifiers as first-class; it treats them as opaque file IDs.
+- When the harness wires **active memory** to andenken, the query API must expose a
+  graceful-degrade contract (`{ status: "timeout" | "unavailable", results: [] }`) instead
+  of throwing. Until that work lands, document the intent; do not pre-implement.
+
 ## 1. Scope invariants
 
 ### 1.1 Journal is intentionally partial
