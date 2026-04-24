@@ -23,7 +23,7 @@ andenken — recollective thinking
 Usage: ./run.sh <command> [args]
 
 === Setup ===
-  setup                       npm install + build dist/
+  setup                       pnpm install + build dist/
   build                       rebuild dist/ only (after source edits)
 
 === Indexing ===
@@ -71,57 +71,57 @@ case "${1:-help}" in
 
   # === Setup ===
   setup)
-    echo "andenken: npm install + build"
-    cd "$SCRIPT_DIR" && npm install && npm run build
+    echo "andenken: pnpm install + build"
+    cd "$SCRIPT_DIR" && pnpm install && pnpm run build
     ;;
   build)
     echo "andenken: build dist/"
-    cd "$SCRIPT_DIR" && npm run build
+    cd "$SCRIPT_DIR" && pnpm run build
     ;;
 
   # === Index ===
   index:sessions)
-    shift; load_env; cd "$SCRIPT_DIR" && npx tsx indexer.ts sessions "$@" ;;
+    shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts sessions "$@" ;;
   index:org)
-    shift; load_env; cd "$SCRIPT_DIR" && npx tsx indexer.ts org "$@" ;;
+    shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts org "$@" ;;
   compact)
-    shift; cd "$SCRIPT_DIR" && npx tsx indexer.ts compact "${1:-all}" ;;
+    shift; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts compact "${1:-all}" ;;
   cleanup)
-    shift; load_env; cd "$SCRIPT_DIR" && npx tsx indexer.ts cleanup "${1:-org}" "${@:2}" ;;
+    shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts cleanup "${1:-org}" "${@:2}" ;;
   verify)
-    shift; load_env; cd "$SCRIPT_DIR" && npx tsx indexer.ts verify "${1:-all}" ;;
+    shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts verify "${1:-all}" ;;
   status)
-    load_env; cd "$SCRIPT_DIR" && npx tsx indexer.ts status ;;
+    load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts status ;;
 
   # === Search ===
   search)
-    shift; load_env; cd "$SCRIPT_DIR" && npx tsx cli.ts search-sessions "$@" ;;
+    shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx cli.ts search-sessions "$@" ;;
   knowledge)
-    shift; load_env; cd "$SCRIPT_DIR" && npx tsx cli.ts search-knowledge "$@" ;;
+    shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx cli.ts search-knowledge "$@" ;;
 
   # === Test ===
   test)
-    shift; load_env; cd "$SCRIPT_DIR" && npx tsx test.ts "${@:-all}" ;;
+    shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx test.ts "${@:-all}" ;;
   test:unit)
-    cd "$SCRIPT_DIR" && npx tsx test.ts unit ;;
+    cd "$SCRIPT_DIR" && pnpm exec tsx test.ts unit ;;
   test:integration)
-    load_env; cd "$SCRIPT_DIR" && npx tsx test.ts integration ;;
+    load_env; cd "$SCRIPT_DIR" && pnpm exec tsx test.ts integration ;;
   test:search)
-    shift; load_env; cd "$SCRIPT_DIR" && npx tsx test.ts search "$@" ;;
+    shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx test.ts search "$@" ;;
 
   # === Golden Queries ===
   golden)
-    shift; load_env; cd "$SCRIPT_DIR" && npx tsx golden-queries.ts "$@" ;;
+    shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx golden-queries.ts "$@" ;;
 
   # === Doctor ===
   doctor)
-    shift; load_env; cd "$SCRIPT_DIR" && npx tsx doctor.ts "$@" ;;
+    shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx doctor.ts "$@" ;;
 
   # === Bench ===
   bench)
-    shift; load_env; cd "$SCRIPT_DIR" && npx tsx benchmark.ts "${@:-}" ;;
+    shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx benchmark.ts "${@:-}" ;;
   bench:dry)
-    cd "$SCRIPT_DIR" && npx tsx benchmark.ts dry ;;
+    cd "$SCRIPT_DIR" && pnpm exec tsx benchmark.ts dry ;;
 
   # === Utility ===
   env)
@@ -132,10 +132,10 @@ case "${1:-help}" in
     echo "  JINA:    ${JINA_API_KEY:+SET (${#JINA_API_KEY}ch)}"
     echo "  Dir:     $SCRIPT_DIR"
     echo ""
-    cd "$SCRIPT_DIR" && npx tsx indexer.ts status 2>/dev/null || echo "  (indexer not available)"
+    cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts status 2>/dev/null || echo "  (indexer not available)"
     ;;
   estimate)
-    shift; load_env; cd "$SCRIPT_DIR" && npx tsx estimate.ts "${1:-all}" ;;
+    shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx estimate.ts "${1:-all}" ;;
 
   *)
     echo "Unknown: $1"; help; exit 1 ;;
