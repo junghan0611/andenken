@@ -144,7 +144,7 @@ export class GeminiProvider implements EmbeddingProvider {
  */
 
 export interface VLLMProviderConfig {
-  endpoint: string;    // e.g. "http://gpu2i:8000" — comma-separated for multi-GPU: "http://gpu1:8000,http://gpu2:8000"
+  endpoint: string;    // e.g. "http://localhost:18000" (gpu1i tunnel). Comma-separated multi-endpoint round-robin is still supported but currently single-host (gpu2i moved to VOS 2026-04-30).
   model: string;       // e.g. "Qwen/Qwen3-Embedding-8B"
   dimensions?: number; // expected native dimensions (for VectorStore init). NOT sent to API unless truncateDimensions is true.
   /** If true, send dimensions param to API (for MRL/Matryoshka truncation). Default: false. */
@@ -437,7 +437,7 @@ export function createProvider(config: ProviderConfig): EmbeddingProvider {
  *
  * vLLM env vars:
  *   ANDENKEN_PROVIDER=vllm
- *   ANDENKEN_VLLM_ENDPOINT=http://gpu2i:8000
+ *   ANDENKEN_VLLM_ENDPOINT=http://localhost:18000   # gpu1i tunnel (gpu2i is VOS, do not embed against it)
  *   ANDENKEN_VLLM_MODEL=Qwen/Qwen3-Embedding-8B
  *   ANDENKEN_VLLM_DIMENSIONS=4096  (optional)
  *   ANDENKEN_VLLM_QUERY_INSTRUCTION="Instruct: ...\nQuery: "  (optional)

@@ -112,7 +112,7 @@ embeddings. See `index.ts` (pi) and `cli.ts` (CLI harnesses).
 | Path | Endpoint | Why |
 |------|----------|-----|
 | **Query** | OpenRouter `qwen/qwen3-embedding-4b` | Works from any host. ~$0 per query. |
-| **Indexing** | Local vLLM `localhost:18000,18001` (GPU servers) | Bulk work must stay on GPU. |
+| **Indexing** | Local vLLM `localhost:18000` (gpu1i tunnel) | Bulk work must stay on GPU. |
 
 Both paths produce identical 2560d vectors. The same LanceDB is queryable
 anywhere as long as the query provider also emits 2560d.
@@ -130,7 +130,7 @@ anywhere as long as the query provider also emits 2560d.
 
 ```bash
 cd ~/repos/gh/andenken
-scripts/rebuild-dual-full.sh   # sessions + org, verify both
+scripts/rebuild-full.sh        # sessions + org, verify both (gpu1i tunnel)
 ./run.sh golden                # search quality baseline (26/26 PASS target)
 ```
 

@@ -8,12 +8,12 @@
  *   npx tsx test-provider.ts unit               # unit only (no API)
  *   npx tsx test-provider.ts gemini             # Gemini provider integration
  *   npx tsx test-provider.ts vllm               # vLLM provider integration
- *   npx tsx test-provider.ts vllm http://gpu2i:8000 model-name  # custom endpoint
+ *   npx tsx test-provider.ts vllm http://localhost:18000 model-name  # custom endpoint
  *
  * Environment:
  *   GEMINI_API_KEY — for Gemini tests
  *   ANDENKEN_PROVIDER=vllm — for vLLM tests
- *   ANDENKEN_VLLM_ENDPOINT=http://gpu2i:8000
+ *   ANDENKEN_VLLM_ENDPOINT=http://localhost:18000   # gpu1i tunnel
  *   ANDENKEN_VLLM_MODEL=Qwen/Qwen3-Embedding-8B
  */
 
@@ -311,7 +311,7 @@ async function testVLLMIntegration(endpoint?: string, model?: string) {
 
   if (!ep || !md) {
     skip("ANDENKEN_VLLM_ENDPOINT / ANDENKEN_VLLM_MODEL not set");
-    skip("Usage: npx tsx test-provider.ts vllm http://gpu2i:8000 model-name");
+    skip("Usage: npx tsx test-provider.ts vllm http://localhost:18000 model-name");
     return;
   }
 

@@ -79,18 +79,26 @@ Kiwi morphology lives in dictcli.
 
 ## GPU server rule (mandatory)
 
-**인덱싱(임베딩)은 반드시 GPU 서버(gpu2i/gpu1i)로 한다. 로컬 대량 인덱싱 금지.**
+**인덱싱(임베딩)은 반드시 GPU 서버(gpu1i)로 한다. 로컬 대량 인덱싱 금지.**
 
 | Purpose | Environment | Endpoint |
 |---------|-------------|----------|
-| Indexing (session / org) | GPU server vLLM (RTX 5080) | `localhost:18000,18001` via SSH tunnel |
+| Indexing (session / org) | GPU server vLLM (RTX 5080) | `localhost:18000` via SSH tunnel to gpu1i |
 | Query (search) | OpenRouter | `https://openrouter.ai/api`, model `qwen/qwen3-embedding-4b` |
 
 Both emit 2560d. Same LanceDB is queryable anywhere that also emits 2560d.
 
-Indexing script (`scripts/rebuild-dual-full.sh`) explicitly unsets
-`ANDENKEN_VLLM_API_KEY` and pins localhost vLLM so indexing never leaks to a
-paid API.
+> **2026-04-30 — gpu2i removed from embedding role.**
+> gpu2i was repurposed as VOS chat-completion node (Qwen2.5-7B-Instruct-AWQ).
+> It now serves `/v1/chat/completions` and **must not be used for embedding** —
+> calling `/v1/embeddings` against it returns 3584d (last hidden state) and
+> would corrupt the 2560d index. gpu1i is the sole embedding endpoint until
+> further notice; this is a single point of failure to monitor.
+
+Indexing scripts (`scripts/rebuild-full.sh`, `scripts/rebuild-incremental.sh`)
+explicitly unset `ANDENKEN_VLLM_API_KEY`, pin localhost vLLM, and run a
+dimension probe before touching the index so a misrouted endpoint can never
+silently destroy the LanceDB.
 
 ## Cross-repo responsibility
 
@@ -128,7 +136,8 @@ shown there is a real command against real code; no documentation gap.
 
 Specific operations worth knowing by name:
 
-- `scripts/rebuild-dual-full.sh` — reproducible full rebuild (sessions + org + verify)
+- `scripts/rebuild-full.sh` — reproducible full rebuild (sessions + org + verify, with dim safety probe)
+- `scripts/rebuild-incremental.sh` — incremental sessions + org (manifest-driven, with dim safety probe)
 - `./run.sh verify all` — integrity check after indexing
 - `./run.sh doctor --org` — operator triage (read-only, local-only)
 - `./run.sh golden` — search quality baseline (regression gate)

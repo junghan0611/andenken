@@ -154,13 +154,13 @@ Examples:
 
 Required action:
 ```bash
-scripts/rebuild-dual-full.sh
+scripts/rebuild-full.sh
 ```
 
 Equivalent minimal org-only reset:
 ```bash
 rm -rf data/org.lance data/org-manifest.json
-npx tsx indexer.ts org --force
+pnpm exec tsx indexer.ts org --force
 ```
 
 ### 6.2 Manifest updates happen after successful file processing
