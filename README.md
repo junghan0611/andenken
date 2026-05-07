@@ -112,10 +112,11 @@ embeddings. See `index.ts` (pi) and `cli.ts` (CLI harnesses).
 | Path | Endpoint | Why |
 |------|----------|-----|
 | **Query** | OpenRouter `qwen/qwen3-embedding-4b` | Works from any host. ~$0 per query. |
-| **Indexing** | Local vLLM `localhost:18000` (gpu1i tunnel) | Bulk work must stay on GPU. |
+| **Sessions fast path** | laptop ollama `localhost:11434` (preferred) → gpu1i tunnel fallback | Hourly incremental, $0, works from a laptop on the road. |
+| **Org / full rebuild** | Local vLLM `localhost:18000` (gpu1i tunnel) | Bulk work stays on GPU. |
 
-Both paths produce identical 2560d vectors. The same LanceDB is queryable
-anywhere as long as the query provider also emits 2560d.
+All three paths produce identical Qwen3-Embedding-4B 2560d vectors. The same
+LanceDB is queryable anywhere as long as the query provider also emits 2560d.
 
 ## Scope and safety policy
 
@@ -130,9 +131,15 @@ anywhere as long as the query provider also emits 2560d.
 
 ```bash
 cd ~/repos/gh/andenken
-scripts/rebuild-full.sh        # sessions + org, verify both (gpu1i tunnel)
-./run.sh golden                # search quality baseline (26/26 PASS target)
+scripts/sync-sessions.sh           # sessions-only incremental (~30s, $0, ollama or gpu1i)
+scripts/rebuild-incremental.sh     # sessions + org incremental via gpu1i
+scripts/rebuild-full.sh            # full rebuild (sessions + org + verify, gpu1i)
+./run.sh golden                    # search quality baseline (26/26 PASS target)
 ```
+
+`sync-sessions.sh` is the operating heartbeat for the sessions track and what
+the agent-config `memory-sync` skill calls under the hood. The two `rebuild-*`
+scripts are for human-driven larger work.
 
 ## Why the name
 
@@ -153,6 +160,14 @@ In Heidegger, *Geworfenheit* and *Andenken* form a pair. 이기상 rendered
 
 ## Recent milestones
 
+- **2026-05-07** — Sessions promoted to live memory tier. `session-manifest.json`
+  with mtime/size stale detection picks up appended-to active conversations.
+  CJK substring fallback recovers 1–2 char Hangul queries that LanceDB FTS
+  drops, with an ASCII-boundary guard to keep `를`/`사` particle noise out.
+  `doctor --org` verdict now carries `reasons[]`. `scripts/sync-sessions.sh`
+  auto-selects laptop ollama or gpu1i tunnel for the hourly fast path.
+- **2026-04-30** — gpu2i moved to VOS chat-completion. gpu1i is the sole
+  GPU-side embedding endpoint until further notice.
 - **2026-04-22** — doctor `--org` stage 1: retrieval / chunk / structure triage
 - **2026-04-17** — OpenRouter query path + provider split. Indexing stays on
   local GPU; queries run from any host.

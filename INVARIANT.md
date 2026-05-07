@@ -177,6 +177,41 @@ Invariant:
 
 Zero-chunk does **not** mean "do nothing".
 
+### 6.4 Session manifest baselines only files already in the DB
+
+`session-manifest.json` exists so long-running JSONL sessions (active
+conversations that keep growing in place) get re-indexed when their
+mtime/size advances. The first-run baseline must populate manifest entries
+**only for files in the indexed set**.
+
+Invariant:
+- a session file that is **not** in the indexed set must **not** acquire a
+  manifest entry until it has been successfully embedded and persisted
+- pre-populating such a file with current mtime/size silently strands embed
+  failures: on the next run `getStaleFiles()` sees the file as
+  "not-indexed but manifest entry matches stat" → classified as neither new
+  nor stale → silently skipped forever
+
+Same rule applies to org-manifest. The pattern is shared.
+
+### 6.5 Manifest checkpoint must follow buffer flush
+
+`WriteBuffer` may hold buffered records up to `DB_WRITE_BATCH` before a
+LanceDB write. The session/org manifest must never be persisted while the
+WriteBuffer still holds rows for files the manifest claims are indexed.
+
+Invariant:
+- every `saveSessionManifest()` / `saveManifest()` checkpoint **must** be
+  preceded by `await wb.flush()` (or equivalent flush) so the DB and the
+  manifest agree at every persisted boundary
+- crash between checkpoint save and final flush would otherwise leave the
+  manifest claiming "indexed at mtime T" while LanceDB has nothing for that
+  file, and `getStaleFiles()` would never re-queue it
+
+The final flush at end-of-run still flushes before `saveSessionManifest()`
+for the same reason. Helper `checkpointIfNeeded()` in `indexSessions()`
+encodes this discipline explicitly.
+
 ## 7. Single-writer invariant
 
 Invariant:
@@ -207,6 +242,12 @@ At minimum, unit tests must prove:
 9. heading tier also excludes those headings
 10. `WriteBuffer.markFile()` deletes stale rows for zero-chunk files
 11. `WriteBuffer` still avoids duplicate writes under concurrency
+
+Coverage gaps to close (not blocking, but tracked):
+
+- `getShortCJKTokens()` boundary cases (punctuation, ASCII-adjacent, length cut)
+- session-search interleave order (substring + FTS round-robin)
+- session-manifest stale detection (mtime change, size change, deleted file)
 
 If a policy is added and no test changes, assume coverage is incomplete.
 

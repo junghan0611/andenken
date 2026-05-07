@@ -77,28 +77,45 @@ Layer 1 does **not** mix Layer 2/3 concerns. Korean particle stripping (25
 patterns, ported from openclaw) lives here because it is BM25 preprocessing.
 Kiwi morphology lives in dictcli.
 
-## GPU server rule (mandatory)
+## Indexing endpoints
 
-**인덱싱(임베딩)은 반드시 GPU 서버(gpu1i)로 한다. 로컬 대량 인덱싱 금지.**
+Two paths, same Qwen3-Embedding-4B 2560d output. Same LanceDB is queryable
+anywhere that also emits 2560d.
 
-| Purpose | Environment | Endpoint |
-|---------|-------------|----------|
-| Indexing (session / org) | GPU server vLLM (RTX 5080) | `localhost:18000` via SSH tunnel to gpu1i |
-| Query (search) | OpenRouter | `https://openrouter.ai/api`, model `qwen/qwen3-embedding-4b` |
+| Purpose | Endpoint | When |
+|---------|----------|------|
+| **Sessions fast path** | laptop ollama `localhost:11434` (preferred) → falls back to gpu1i tunnel | hourly incremental driven by `scripts/sync-sessions.sh` / agent-config `memory-sync` skill |
+| **Org / full rebuild** | gpu1i tunnel `localhost:18000` only | human-initiated, runs through `scripts/rebuild-full.sh` / `scripts/rebuild-incremental.sh` |
+| **Query (search)** | OpenRouter `https://openrouter.ai/api` model `qwen/qwen3-embedding-4b` | every retrieval call from any host |
 
-Both emit 2560d. Same LanceDB is queryable anywhere that also emits 2560d.
+### Why the split
+
+- **Sessions** churn constantly (every active conversation appends). They need
+  a path that costs nothing per call and is reachable from a laptop on the road.
+  Ollama on the laptop fits; gpu1i is the fallback when ollama isn't running.
+- **Org / full rebuild** processes thousands of files at once. That work belongs
+  on a real GPU. Letting it run anywhere else is how the ₩100K bill happened.
+- **Query** is small per call (one vector per search) and OpenRouter gives us a
+  stable host-agnostic URL.
+
+### Cost discipline (mandatory)
+
+- All indexing scripts unset `ANDENKEN_VLLM_API_KEY` before running so a
+  misconfigured endpoint cannot silently bill OpenRouter.
+- All indexing scripts run a dimension probe (must return 2560) before touching
+  the index. A wrong endpoint returning 3584d (e.g. gpu2i) can never corrupt
+  the LanceDB silently.
+- `memory-sync` skill (agent-config side) covers the sessions fast path only.
+  Org/full/oracle full-sync require human invocation from this repo.
 
 > **2026-04-30 — gpu2i removed from embedding role.**
 > gpu2i was repurposed as VOS chat-completion node (Qwen2.5-7B-Instruct-AWQ).
 > It now serves `/v1/chat/completions` and **must not be used for embedding** —
 > calling `/v1/embeddings` against it returns 3584d (last hidden state) and
-> would corrupt the 2560d index. gpu1i is the sole embedding endpoint until
-> further notice; this is a single point of failure to monitor.
-
-Indexing scripts (`scripts/rebuild-full.sh`, `scripts/rebuild-incremental.sh`)
-explicitly unset `ANDENKEN_VLLM_API_KEY`, pin localhost vLLM, and run a
-dimension probe before touching the index so a misrouted endpoint can never
-silently destroy the LanceDB.
+> would corrupt the 2560d index. gpu1i is the sole GPU embedding endpoint
+> until further notice; this remains a single point of failure for the org/full
+> path. The sessions fast path now has ollama as a second engine, but org
+> rebuild does not.
 
 ## Cross-repo responsibility
 
@@ -136,14 +153,34 @@ shown there is a real command against real code; no documentation gap.
 
 Specific operations worth knowing by name:
 
-- `scripts/rebuild-full.sh` — reproducible full rebuild (sessions + org + verify, with dim safety probe)
-- `scripts/rebuild-incremental.sh` — incremental sessions + org (manifest-driven, with dim safety probe)
+- `scripts/sync-sessions.sh` — sessions-only fast path (auto-selects ollama/gpu1i,
+  dim probe, optional `--push` to oracle). Hourly cadence target. Used by the
+  agent-config `memory-sync` skill.
+- `scripts/rebuild-incremental.sh` — incremental sessions + org through gpu1i
+  (manifest-driven, with dim safety probe). Human-driven.
+- `scripts/rebuild-full.sh` — reproducible full rebuild (sessions + org + verify,
+  with dim safety probe). Human-driven, full-cost.
 - `./run.sh verify all` — integrity check after indexing
-- `./run.sh doctor --org` — operator triage (read-only, local-only)
+- `./run.sh doctor --org` — operator triage (read-only, local-only). Verdict
+  comes with `reasons[]` so the operator sees *why* it WARNed.
 - `./run.sh golden` — search quality baseline (regression gate)
 
 If you want to add a new operation, add it to `run.sh` first. If it does not
 appear in `./run.sh` help, it does not exist for operators.
+
+### Sessions track operating cadence
+
+The sessions track is now load-bearing in a different sense than at the start
+of the project: it is the **live tier** of agent memory in a compact-not
+workflow. Implications:
+
+- `session-manifest.json` is treated as a first-class artifact alongside
+  `org-manifest.json`. Stale detection (mtime/size) is the entry point.
+- Hourly (or 30 min) sessions sync is the expected operating cadence. The
+  `memory-sync` skill in agent-config exists for that and only that — full
+  rebuild and oracle full-sync stay human-only.
+- Verify still runs through `./run.sh verify sessions` after any sync that
+  shows non-trivial chunk delta. Skill output alone is not verification.
 
 ## Pointers
 
