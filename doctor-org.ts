@@ -115,6 +115,13 @@ export interface OrgReport {
     microHeadingChainFiles: number | null;
   };
   verdict: OrgStatus;
+  /**
+   * Human-readable reasons for the current verdict.
+   *
+   * Operator triage tool — the verdict alone ("WARN") doesn't help, the
+   * operator needs to know which signals tripped it. Empty array on OK.
+   */
+  reasons: string[];
 }
 
 // ── Config ────────────────────────────────────────────────────────────
@@ -591,9 +598,13 @@ function computeDelta(baseline: Baseline | null, chunk: ChunkHealth, structure: 
 
 // ── Verdict ───────────────────────────────────────────────────────────
 
-function verdict(report: Omit<OrgReport, "verdict">): OrgStatus {
+function verdict(report: Omit<OrgReport, "verdict" | "reasons">): { status: OrgStatus; reasons: string[] } {
+  const reasons: string[] = [];
+
   const probeFail = report.probes.some((p) => p.status === "FAIL");
   const probeWarn = report.probes.some((p) => p.status === "WARN");
+  const failedProbes = report.probes.filter((p) => p.status === "FAIL").map((p) => p.id);
+  const warnedProbes = report.probes.filter((p) => p.status === "WARN").map((p) => p.id);
 
   const structFail =
     report.structure.malformedBlockFiles.length > 0 ||
@@ -603,17 +614,47 @@ function verdict(report: Omit<OrgReport, "verdict">): OrgStatus {
 
   // Baseline-driven regression signals
   const d = report.delta;
-  const regressed =
-    (d.chunkTotal !== null && d.chunkTotal < -50) ||
-    (d.indexedFiles !== null && d.indexedFiles < -2) ||
-    (d.malformedBlockFiles !== null && d.malformedBlockFiles > 0) ||
-    (d.zeroChunkUnexpected !== null && d.zeroChunkUnexpected > 0) ||
-    (d.hardGuardSkipTotal !== null && d.hardGuardSkipTotal > 0);
+  const regressionItems: string[] = [];
+  if (d.chunkTotal !== null && d.chunkTotal < -50)
+    regressionItems.push(`chunkTotal Δ${signed(d.chunkTotal)}`);
+  if (d.indexedFiles !== null && d.indexedFiles < -2)
+    regressionItems.push(`indexedFiles Δ${signed(d.indexedFiles)}`);
+  if (d.malformedBlockFiles !== null && d.malformedBlockFiles > 0)
+    regressionItems.push(`malformedBlockFiles Δ${signed(d.malformedBlockFiles)}`);
+  if (d.zeroChunkUnexpected !== null && d.zeroChunkUnexpected > 0)
+    regressionItems.push(`zeroChunkUnexpected Δ${signed(d.zeroChunkUnexpected)}`);
+  if (d.hardGuardSkipTotal !== null && d.hardGuardSkipTotal > 0)
+    regressionItems.push(`hardGuardSkipTotal Δ${signed(d.hardGuardSkipTotal)}`);
+  const regressed = regressionItems.length > 0;
 
-  if (probeFail || chunkFail) return "FAIL";
-  if (structFail || regressed) return "WARN";
-  if (probeWarn) return "WARN";
-  return "OK";
+  // Build human-readable reasons in the same priority order verdict uses
+  if (chunkFail) {
+    if (report.chunk.total === 0) reasons.push("chunk total = 0 (DB empty)");
+    if (report.chunk.indexedFiles === 0) reasons.push("indexedFiles = 0");
+  }
+  if (probeFail) {
+    reasons.push(`smoke probe FAIL: ${failedProbes.join(", ")}`);
+  }
+  if (report.structure.malformedBlockFiles.length > 0) {
+    reasons.push(`malformedBlockFiles=${report.structure.malformedBlockFiles.length}`);
+  }
+  if (report.structure.zeroChunkUnexpectedFiles.length > 0) {
+    reasons.push(`zeroChunkUnexpectedFiles=${report.structure.zeroChunkUnexpectedFiles.length}`);
+  }
+  if (regressed) {
+    reasons.push(`baseline regression: ${regressionItems.join(", ")}`);
+  }
+  if (probeWarn && reasons.length === 0) {
+    reasons.push(`smoke probe WARN: ${warnedProbes.join(", ")}`);
+  }
+
+  let status: OrgStatus;
+  if (probeFail || chunkFail) status = "FAIL";
+  else if (structFail || regressed) status = "WARN";
+  else if (probeWarn) status = "WARN";
+  else status = "OK";
+
+  return { status, reasons };
 }
 
 // ── Build + render ────────────────────────────────────────────────────
@@ -660,7 +701,8 @@ export async function buildOrgReport(opts: { smoke: boolean; device: string; tim
     structure,
     delta,
   };
-  return { ...base, verdict: verdict(base) };
+  const v = verdict(base);
+  return { ...base, verdict: v.status, reasons: v.reasons };
 }
 
 export function renderOrgReport(r: OrgReport): string {
@@ -785,6 +827,13 @@ export function renderOrgReport(r: OrgReport): string {
     : r.verdict === "FAIL" ? "FAIL — org triage blocked"
     : "SKIP";
   out.push(`  ${finalIcon} ${label}`);
+  if (r.reasons.length > 0) {
+    out.push("");
+    out.push("  Why this verdict:");
+    for (const reason of r.reasons) {
+      out.push(`    • ${reason}`);
+    }
+  }
   out.push("");
   return out.join("\n");
 }

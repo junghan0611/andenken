@@ -307,6 +307,63 @@ export class VectorStore {
   }
 
   /**
+   * Substring search via LanceDB `contains(text, '<term>')` filter.
+   *
+   * Acts as a CJK safety net: LanceDB's FTS (tantivy-based) can return
+   * 0 results for very short Korean/CJK tokens (1–2 chars) that the
+   * tokenizer drops or splits below match threshold. openclaw uses the
+   * same idea (`text LIKE '%term%'` substringTerms branch in
+   * planKeywordSearch). LIKE here goes through LanceDB's `contains()`.
+   *
+   * Score is rank-based — these results are merged into the FTS bucket
+   * upstream and re-ranked by the hybrid retriever; raw scores from
+   * substring search are not directly comparable to FTS BM25 scores.
+   */
+  async substringSearch(
+    term: string,
+    limit: number = 10,
+  ): Promise<SearchResult[]> {
+    await this.ensureInitialized();
+    if (!this.table) return [];
+    if (!term) return [];
+    // Escape single quotes for SQL string literal
+    const safe = term.replace(/'/g, "''");
+    try {
+      const results = await this.table
+        .query()
+        .where(`contains(text, '${safe}')`)
+        .select([
+          "id",
+          "text",
+          "sessionFile",
+          "project",
+          "lineNumber",
+          "timestamp",
+          "role",
+          "source",
+          "metadata",
+        ])
+        .limit(limit)
+        .toArray();
+
+      return results.map((r, i) => ({
+        id: r.id as string,
+        text: r.text as string,
+        sessionFile: r.sessionFile as string,
+        project: r.project as string,
+        lineNumber: r.lineNumber as number,
+        timestamp: r.timestamp as string,
+        role: r.role as string,
+        source: (r.source as string) ?? "",
+        metadata: JSON.parse(r.metadata as string),
+        score: 1 / (i + 1), // rank-based; not comparable to BM25
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  /**
    * Create FTS index on text column
    */
   async createFtsIndex(): Promise<void> {

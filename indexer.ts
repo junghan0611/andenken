@@ -117,6 +117,33 @@ function saveManifest(manifest: OrgFileManifest): void {
   fs.writeFileSync(getManifestPath(), JSON.stringify(manifest, null, 2));
 }
 
+// --- Session Manifest (mirrors org pattern; same shape, different path) ---
+//
+// Why a session manifest?
+// pi/Claude session files are append-only — a long-running session keeps
+// growing in the same JSONL. Without mtime/size tracking, only-new-file
+// indexing misses everything appended since first index. With this manifest
+// the next sync-sessions run picks up active conversations.
+type SessionFileManifest = OrgFileManifest;
+
+function getSessionManifestPath(): string {
+  return path.join(getDataDir(), "session-manifest.json");
+}
+
+function loadSessionManifest(): SessionFileManifest {
+  const p = getSessionManifestPath();
+  try {
+    return JSON.parse(fs.readFileSync(p, "utf-8"));
+  } catch {
+    return { files: {}, lastUpdated: "" };
+  }
+}
+
+function saveSessionManifest(manifest: SessionFileManifest): void {
+  manifest.lastUpdated = new Date().toISOString();
+  fs.writeFileSync(getSessionManifestPath(), JSON.stringify(manifest, null, 2));
+}
+
 function getStaleFiles(
   files: string[],
   indexed: Set<string>,
@@ -241,32 +268,102 @@ async function indexSessions(force: boolean) {
 
   const files = findSessionFiles();
   const indexed = force ? new Set<string>() : await store.getIndexedFiles();
-  const toIndex = files.filter((f) => !indexed.has(f));
+  let manifest: SessionFileManifest = force
+    ? { files: {}, lastUpdated: "" }
+    : loadSessionManifest();
+  const hasManifest = Object.keys(manifest.files).length > 0;
+
+  // Stale detection: new files + mtime/size-changed appended files
+  const { newFiles, staleFiles } = force
+    ? { newFiles: files.filter((f) => !indexed.has(f)), staleFiles: [] as string[] }
+    : getStaleFiles(files, indexed, manifest);
+  const toIndex = [...newFiles, ...staleFiles];
+
+  // First run without manifest: record current mtime/size as baseline so future
+  // appends are detectable. Only files already in the indexed set are baselined —
+  // baselining non-indexed files would let an embed-time failure get silently
+  // skipped on the next run (manifest matches, file not in indexed, classified
+  // as neither new nor stale). Files that genuinely produce 0 chunks get their
+  // manifest entry written from the processing path below.
+  if (!hasManifest && !force) {
+    let baselined = 0;
+    for (const f of files) {
+      if (!indexed.has(f)) continue;
+      try {
+        const stat = fs.statSync(f);
+        manifest.files[f] = { mtimeMs: stat.mtimeMs, size: stat.size, chunks: 0 };
+        baselined++;
+      } catch { /* skip */ }
+    }
+    console.log(`📌 Initializing session manifest from ${baselined} indexed files (baseline)`);
+    saveSessionManifest(manifest);
+  }
 
   console.log(
-    `Sessions: ${files.length} | indexed: ${indexed.size} | to index: ${toIndex.length} | concurrency: ${CONCURRENCY}`,
+    `Sessions: ${files.length} | indexed: ${indexed.size} | new: ${newFiles.length} | stale: ${staleFiles.length} | concurrency: ${CONCURRENCY}`,
   );
   if (toIndex.length === 0) {
-    console.log("✅ All sessions indexed.");
+    console.log("✅ All sessions indexed and up-to-date.");
     await store.close();
     return;
   }
 
   const progress = new Progress(toIndex.length, "Sessions");
   const wb = new WriteBuffer(store, DB_WRITE_BATCH);
+  const CHECKPOINT_INTERVAL = 100;
+  let filesProcessed = 0;
+
+  // Checkpoint discipline:
+  //
+  //   Manifest entry must never be persisted before the corresponding DB rows
+  //   are flushed. Otherwise a crash between save and flush leaves the
+  //   manifest claiming the file is indexed while the rows still sit in the
+  //   WriteBuffer — silent loss because getStaleFiles() then classifies the
+  //   file as "indexed elsewhere, mtime matches, skip" on the next run.
+  //
+  //   Concrete shape: every checkpoint awaits wb.flush() before saveSessionManifest().
+  //   wb.flush() is enqueued through WriteBuffer's serial tail, so concurrent
+  //   tasks can only re-enter the embedding stage after the flush completes.
+  const checkpointIfNeeded = async () => {
+    if (filesProcessed % CHECKPOINT_INTERVAL !== 0) return;
+    await wb.flush();
+    saveSessionManifest(manifest);
+    console.log(`  📌 Manifest checkpoint at ${filesProcessed}/${toIndex.length} files`);
+  };
 
   const tasks = toIndex.map((file) => async () => {
     try {
       const chunks = await extractSessionChunks(file);
+
+      // Capture mtime/size at index time for next staleness check
+      let manifestEntry: { mtimeMs: number; size: number; chunks: number } | undefined;
+      try {
+        const stat = fs.statSync(file);
+        manifestEntry = { mtimeMs: stat.mtimeMs, size: stat.size, chunks: chunks.length };
+      } catch { /* file may have been deleted between scan and stat */ }
+
       if (chunks.length === 0) {
+        // Stale file with no extractable content: ensure existing rows are removed.
+        // markFile only enqueues a delete; it doesn't move buffered rows — checkpoint
+        // still flushes any unrelated buffered records before saving the manifest.
+        await wb.markFile(file);
+        if (manifestEntry) manifest.files[file] = manifestEntry;
+        filesProcessed++;
         progress.tick(0);
+        await checkpointIfNeeded();
         return;
       }
+
       const vectors = await provider.embedDocumentBatch(
         chunks.map((c) => c.text),
       );
+      // wb.add() auto-deletes existing rows for this file before re-inserting,
+      // so stale chunks never linger when an active session is re-indexed.
       await wb.add(chunks.map((c, j) => ({ ...c, vector: vectors[j] })));
+      if (manifestEntry) manifest.files[file] = manifestEntry;
+      filesProcessed++;
       progress.tick(chunks.length);
+      await checkpointIfNeeded();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[session-index-error] ${file} :: ${msg}`);
@@ -277,6 +374,7 @@ async function indexSessions(force: boolean) {
 
   const { errors: sessionErrors } = await runWithConcurrency(tasks, CONCURRENCY);
   await wb.flush(); // final flush
+  saveSessionManifest(manifest); // final persist
   if (sessionErrors > 0) {
     throw new Error(`Session indexing failed for ${sessionErrors} files`);
   }
@@ -559,6 +657,31 @@ async function status() {
   console.log(
     `🧠 Sessions (${sDimLabel}): ${sCount} chunks | ${sIndexed.size}/${sFiles.length} files | ${sFrags} frags | ${sSize}`,
   );
+
+  // Manifest-based stale detection for sessions (mirrors org pattern below)
+  const sManifest = loadSessionManifest();
+  const sManifestEntries = Object.keys(sManifest.files).length;
+  if (sManifestEntries > 0) {
+    const { newFiles: sNewFiles, staleFiles: sStaleFiles } = getStaleFiles(
+      sFiles,
+      sIndexed,
+      sManifest,
+    );
+    const sFileSet = new Set(sFiles);
+    const sDeletedCount = Object.keys(sManifest.files).filter((f) => !sFileSet.has(f)).length;
+    const sToIndex = sNewFiles.length + sStaleFiles.length;
+    console.log(
+      `   ↳ manifest: ${sManifestEntries} entries | new: ${sNewFiles.length} | stale: ${sStaleFiles.length} | deleted: ${sDeletedCount} | to-index: ${sToIndex}`,
+    );
+    if (sManifest.lastUpdated) {
+      console.log(`   ↳ last indexed: ${sManifest.lastUpdated}`);
+    }
+  } else if (sIndexed.size > 0) {
+    console.log(
+      `   ↳ manifest: empty (will baseline on next index:sessions — appended files won't be re-indexed yet)`,
+    );
+  }
+
   if (sActualDim && configuredDim && sActualDim !== configuredDim) {
     console.log(
       `   ⚠ provider dim=${configuredDim}d differs from DB dim=${sActualDim}d — queries will fall back to FTS only`,

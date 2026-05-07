@@ -332,6 +332,58 @@ export async function jinaRerank(
   }));
 }
 
+// --- Short CJK token detection (Track 1 / openclaw planKeywordSearch port) ---
+//
+// Hangul, Hiragana, Katakana, CJK Unified Ideographs, Jamo. CJK_RUN_RE
+// extracts maximal CJK runs while ignoring whitespace, ASCII punctuation,
+// parentheses, etc. ASCII_ALNUM_RE is the boundary guard.
+//
+// Extraction is run-based (not whitespace-split) so queries like "맘?",
+// "(맘)", "맘," reduce to the bare CJK run "맘" and reach substringSearch
+// as the caller intended.
+//
+// Boundary guard skips CJK runs that touch ASCII letters/digits. Such runs
+// are almost always Korean particles or suffixes attached to English
+// identifiers — "API를", "OpenClaw사", "3개" — and `contains(text, '를')`
+// would match every Korean sentence, swamping the FTS bucket with noise.
+// Trade-off: deliberate mixed aliases like "Qwen맘" are also skipped, but
+// those are vanishingly rare in real query logs while particle-suffix noise
+// is constant.
+const CJK_RUN_RE =
+  /[぀-ヿ㐀-鿿가-힯ㄱ-ㅣ]+/gu;
+const ASCII_ALNUM_RE = /[a-zA-Z0-9]/;
+
+/**
+ * Pull short CJK runs (1–2 code points) out of a query.
+ *
+ * LanceDB FTS (tantivy) drops or splits tokens like "맘" / "갑" / "쟈" /
+ * "맘마" — they return 0 hits via `fullTextSearch`. We surface them so the
+ * caller can run `substringSearch` per run and merge into the FTS bucket.
+ *
+ * Mirrors openclaw's `planKeywordSearch().substringTerms` branch, but
+ * applied at the application layer because LanceDB has no `LIKE` operator
+ * directly — we use `contains()` instead.
+ */
+export function getShortCJKTokens(query: string): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  // matchAll yields the index of each run so we can inspect adjacent chars
+  // and apply the ASCII-boundary guard documented above.
+  for (const m of query.matchAll(CJK_RUN_RE)) {
+    const run = m[0];
+    // Array.from to count code points, not UTF-16 units
+    if (Array.from(run).length >= 3) continue;
+    const start = m.index ?? 0;
+    const end = start + run.length;
+    if (start > 0 && ASCII_ALNUM_RE.test(query[start - 1])) continue;
+    if (end < query.length && ASCII_ALNUM_RE.test(query[end])) continue;
+    if (seen.has(run)) continue;
+    out.push(run);
+    seen.add(run);
+  }
+  return out;
+}
+
 // --- Korean BM25 Query Preprocessing (Layer 1 optimization) ---
 // Ported from OpenClaw query-expansion.ts
 // Strips Korean trailing particles for better BM25 token matching.

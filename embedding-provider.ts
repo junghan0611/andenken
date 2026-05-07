@@ -310,7 +310,12 @@ export class VLLMProvider implements EmbeddingProvider {
     while (true) {
       try {
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 30000); // 30s timeout
+        // 30s default fits OpenRouter/vLLM. Ollama on a laptop can spend
+        // far longer on a single batch when a large session is chunked
+        // into hundreds of inputs at once. Allow override via env so the
+        // sync-sessions wrapper can relax this without a rebuild.
+        const timeoutMs = parseInt(process.env.ANDENKEN_VLLM_TIMEOUT_MS ?? "", 10) || 30000;
+        const timeout = setTimeout(() => controller.abort(), timeoutMs);
         const res = await fetch(url, {
           method: "POST",
           headers,
@@ -362,7 +367,7 @@ export class VLLMProvider implements EmbeddingProvider {
           throw new Error(`vLLM host not found: ${ep}`);
         }
         if (fullMsg.includes("abort") || fullMsg.includes("AbortError")) {
-          throw new Error(`vLLM request timeout (30s): ${ep}`);
+          throw new Error(`vLLM request timeout (${Math.round((parseInt(process.env.ANDENKEN_VLLM_TIMEOUT_MS ?? "", 10) || 30000) / 1000)}s): ${ep}`);
         }
         // Non-retryable marked errors (4xx)
         if ((err as { nonRetryable?: boolean })?.nonRetryable) {

@@ -26,7 +26,7 @@ import {
   findSessionFiles,
   extractSessionChunks,
 } from "./session-indexer.js";
-import { retrieve, expandQueryForBM25 } from "./retriever.js";
+import { retrieve, expandQueryForBM25, getShortCJKTokens } from "./retriever.js";
 
 // Re-declare minimal SearchResult to avoid jiti-incompatible import() type syntax
 interface SearchResult {
@@ -304,6 +304,44 @@ export default function (pi: ExtensionAPI) {
       const vectorResults = await getSessionStore().search(queryVector, candidates);
       const bm25Query = expandQueryForBM25(enrichedQuery); // include dictcli expand terms in FTS
       const ftsResults = await getSessionStore().fullTextSearch(bm25Query, candidates);
+
+      // Track 1 — CJK substring fallback for tokens LanceDB FTS drops
+      // (1-2 char Hangul like "맘", "갑", "쟈", "맘마"). Augments the FTS
+      // bucket so the hybrid merger sees them. No-op for English-heavy
+      // queries; cheap LanceDB filter scan otherwise.
+      //
+      // Order policy: round-robin interleave (FTS, sub, FTS, sub, ...). RRF
+      // ranks by array position, so appending substring hits at the tail
+      // after FTS has already filled `candidates` makes them effectively
+      // invisible. Interleaving gives short-CJK exact matches a real chance
+      // to surface on mixed queries like "맘 분신" while still letting the
+      // FTS top result keep its rank-0 boost.
+      const shortTokens = getShortCJKTokens(params.query);
+      if (shortTokens.length > 0) {
+        const ftsIds = new Set(ftsResults.map((r) => r.id));
+        const subLists = await Promise.all(
+          shortTokens.map((t) => getSessionStore().substringSearch(t, candidates)),
+        );
+        const subFlat: typeof ftsResults = [];
+        const subSeen = new Set<string>();
+        for (const list of subLists) {
+          for (const r of list) {
+            if (ftsIds.has(r.id) || subSeen.has(r.id)) continue;
+            subFlat.push(r);
+            subSeen.add(r.id);
+          }
+        }
+        if (subFlat.length > 0) {
+          const ftsCopy = ftsResults.slice();
+          ftsResults.length = 0;
+          let i = 0;
+          let j = 0;
+          while (i < ftsCopy.length || j < subFlat.length) {
+            if (i < ftsCopy.length) ftsResults.push(ftsCopy[i++]);
+            if (j < subFlat.length) ftsResults.push(subFlat[j++]);
+          }
+        }
+      }
 
       let results = await retrieve(params.query, vectorResults, ftsResults, {
         vectorWeight: 0.7,

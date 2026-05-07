@@ -21,7 +21,7 @@ import {
 } from "./embedding-provider.js";
 import { VectorStore, getSessionsDbPath, getOrgDbPath, getDataDir, type SearchResult } from "./store.js";
 import { findSessionFiles, extractSessionChunks } from "./session-indexer.js";
-import { retrieve, expandQueryForBM25, type MergeStrategy } from "./retriever.js";
+import { retrieve, expandQueryForBM25, getShortCJKTokens, type MergeStrategy } from "./retriever.js";
 
 // --- Recall Tracking (memory consolidation stage 2) ---
 
@@ -110,6 +110,39 @@ async function searchSessions(query: string, limit: number, source?: string): Pr
   const bm25Query = expandQueryForBM25(enrichedQuery); // include dictcli expand terms in FTS
   const vectorResults = await store.search(queryVector, candidates);
   const ftsResults = await store.fullTextSearch(bm25Query, candidates);
+
+  // Track 1 — CJK substring fallback (mirrors index.ts session_search path).
+  // Short Hangul tokens like "맘", "갑", "쟈" return 0 hits via LanceDB FTS;
+  // augment via `contains()` so the hybrid merger can still surface them.
+  //
+  // Round-robin interleave (FTS, sub, FTS, sub, ...) so substring hits keep
+  // a real RRF rank rather than being appended past `candidates`.
+  const shortTokens = getShortCJKTokens(query);
+  if (shortTokens.length > 0) {
+    const ftsIds = new Set(ftsResults.map((r) => r.id));
+    const subLists = await Promise.all(
+      shortTokens.map((t) => store.substringSearch(t, candidates)),
+    );
+    const subFlat: typeof ftsResults = [];
+    const subSeen = new Set<string>();
+    for (const list of subLists) {
+      for (const r of list) {
+        if (ftsIds.has(r.id) || subSeen.has(r.id)) continue;
+        subFlat.push(r);
+        subSeen.add(r.id);
+      }
+    }
+    if (subFlat.length > 0) {
+      const ftsCopy = ftsResults.slice();
+      ftsResults.length = 0;
+      let i = 0;
+      let j = 0;
+      while (i < ftsCopy.length || j < subFlat.length) {
+        if (i < ftsCopy.length) ftsResults.push(ftsCopy[i++]);
+        if (j < subFlat.length) ftsResults.push(subFlat[j++]);
+      }
+    }
+  }
 
   let results = await retrieve(query, vectorResults, ftsResults, {
     vectorWeight: 0.7,
