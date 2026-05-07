@@ -188,9 +188,28 @@ workflow. Implications:
 |--------|---------|
 | Rules that must stay true | [INVARIANT.md](./INVARIANT.md) |
 | Current operational state | [MEMORY.md](./MEMORY.md) |
+| **Next work / round handoff / decisions awaiting GLG** | [NEXT.md](./NEXT.md) |
 | Public framing / naming | [README.md](./README.md) |
 | "What can I run?" | `./run.sh` |
 
 When code and docs disagree, trust the code and update the doc. When MEMORY.md
 and AGENTS.md disagree, AGENTS.md is the stable surface — update MEMORY.md to
 match reality.
+
+### Where next-step work goes — NEXT.md
+
+Round handoffs, deferred items, and decisions awaiting GLG go into
+[NEXT.md](./NEXT.md), not into MEMORY.md and not scattered across llmlog. The
+contract:
+
+- **NEXT.md is overwriting, not appending.** When the next round opens, the
+  current NEXT.md is rewritten to reflect the new state. Old content moves to
+  llmlog, not to NEXT.md history.
+- **MEMORY.md is "now"; NEXT.md is "next."** If a piece of work is in flight,
+  it can live in MEMORY.md *Open Items*. The moment it becomes a queued round
+  with priorities and Mitsein recommendations, it belongs in NEXT.md.
+- **llmlog is the durable record.** NEXT.md points at the source llmlog so
+  later readers can reconstruct *why* the next round looks like this.
+- **GLG decisions are stored at the bottom of NEXT.md** as a Decision queue
+  until resolved; once resolved, they collapse into MEMORY.md *Last Words* or
+  the next round's llmlog.
