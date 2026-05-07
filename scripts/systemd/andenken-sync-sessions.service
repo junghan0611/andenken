@@ -1,0 +1,14 @@
+[Unit]
+Description=andenken sessions-only incremental embed
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/repos/gh/andenken
+EnvironmentFile=%h/.env.local
+ExecStart=%h/repos/gh/andenken/scripts/sync-sessions.sh
+StandardOutput=append:%h/.local/log/andenken-sync-sessions.log
+StandardError=append:%h/.local/log/andenken-sync-sessions.log
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
