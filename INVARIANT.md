@@ -139,7 +139,7 @@ This is a safety rail, not a final quality solution.
 If you change the threshold or strategy:
 - document why
 - re-run scan / tests
-- update `MEMORY.md`
+- stamp the change in `ROADMAP.md` History
 
 ## 6. DB + manifest invariants
 

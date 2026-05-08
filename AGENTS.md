@@ -186,30 +186,35 @@ workflow. Implications:
 
 | For... | Read... |
 |--------|---------|
+| **Core document — comparison, history, maintenance, boundaries (Korean)** | **[ROADMAP.md](./ROADMAP.md)** |
+| **Next single thing this agent is doing** | **[NEXT.md](./NEXT.md)** |
 | Rules that must stay true | [INVARIANT.md](./INVARIANT.md) |
-| Current operational state | [MEMORY.md](./MEMORY.md) |
-| **Next work / round handoff / decisions awaiting GLG** | [NEXT.md](./NEXT.md) |
 | Public framing / naming | [README.md](./README.md) |
 | "What can I run?" | `./run.sh` |
 
-When code and docs disagree, trust the code and update the doc. When MEMORY.md
-and AGENTS.md disagree, AGENTS.md is the stable surface — update MEMORY.md to
-match reality.
+When code and docs disagree, trust the code and update the doc. ROADMAP.md is
+the SSOT for *what andenken is and is not, vs OpenClaw*. AGENTS.md is the
+stable surface for identity / boundaries / ownership.
 
-### Where next-step work goes — NEXT.md
+### Document policy — single-axis discipline
 
-Round handoffs, deferred items, and decisions awaiting GLG go into
-[NEXT.md](./NEXT.md), not into MEMORY.md and not scattered across llmlog. The
-contract:
+andenken is the **embedding axis only**. It does not maintain self-memory
+(working state, scratchpad, "now" notes). Multi-axis context hydration is
+GLG's recap concern, not this agent-in-charge's.
 
-- **NEXT.md is overwriting, not appending.** When the next round opens, the
-  current NEXT.md is rewritten to reflect the new state. Old content moves to
-  llmlog, not to NEXT.md history.
-- **MEMORY.md is "now"; NEXT.md is "next."** If a piece of work is in flight,
-  it can live in MEMORY.md *Open Items*. The moment it becomes a queued round
-  with priorities and Mitsein recommendations, it belongs in NEXT.md.
-- **llmlog is the durable record.** NEXT.md points at the source llmlog so
-  later readers can reconstruct *why* the next round looks like this.
-- **GLG decisions are stored at the bottom of NEXT.md** as a Decision queue
-  until resolved; once resolved, they collapse into MEMORY.md *Last Words* or
-  the next round's llmlog.
+Concretely:
+
+- **No `MEMORY.md`.** Working state lives in code + `./run.sh status` + the
+  multi-axis recap on the harness side.
+- **No round queue.** ROADMAP.md is a comparison table + history + maintenance
+  + role boundaries. Round / micro-fix / chase-list framing is rejected at
+  this level — micro-fixes belong in commits, not in a top-level queue.
+- **`NEXT.md` holds exactly one thing.** The next item this agent-in-charge
+  is about to do, with the *why*. When done, the change is stamped into
+  ROADMAP History and `NEXT.md` is overwritten with the next item. Never
+  appended, never queued multiple items.
+- **Doctor signals are maintenance, not roadmap items.** `./run.sh doctor`
+  output triggers fixes; it does not shape the comparison table.
+- **GLG decisions** that affect andenken arrive as direct prompts. They do not
+  need a Decision queue file because GLG is the one running the multi-axis
+  flow — the queue is on GLG's side.

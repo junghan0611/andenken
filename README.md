@@ -153,9 +153,10 @@ In Heidegger, *Geworfenheit* and *Andenken* form a pair. 이기상 rendered
 
 ## Further reading
 
+- **[ROADMAP.md](./ROADMAP.md) — core document.** OpenClaw vs andenken comparison table, change history, maintenance signals, role boundaries. Korean.
+- **[NEXT.md](./NEXT.md) — the single next thing this agent is doing.** Korean.
 - [AGENTS.md](./AGENTS.md) — agent-in-charge doc (axes, boundaries, ownership)
 - [INVARIANT.md](./INVARIANT.md) — rules that must stay true across changes
-- [MEMORY.md](./MEMORY.md) — current operational state (short-term scratchpad)
 - `./run.sh` — living command catalogue (what this repo can actually do)
 
 ## Recent milestones
