@@ -4,62 +4,109 @@
 > 이 파일은 **andenken 담당자가 지금 하려는 다음 한 가지**.
 > 끝나면 ROADMAP History에 stamp 박고, 이 파일은 다음 항목으로 덮어씀.
 
-## 다음: 세션메모리 평가 로직을 OpenClaw 수준으로 맞추기
+## 다음: 세션 입력 sanitization을 OpenClaw 수준으로 맞추기
 
-ROADMAP §2 *"OpenClaw에 있고 우리에 없다 / 품질 측정 로직 / 이식 예정"*이 본 항목.
-5/8 baseline에서 retrieval 튜닝이 수평 정렬됐으니, **다음은 비교 가능한 평가 도구**다.
+평가 도구(`status --json` / `sanity` / `bake-off`) *전에* **입력 정제**를 먼저 한다.
 
-### 왜 micro-fix가 아니라 평가인가
+이유: andenken 검색 품질이 OpenClaw에 못 미친다면, 가장 가능성 큰 원인은
+*알고리즘이 아니라 입력 corpus의 noise/signal 비율*이다. 정제 안 된 corpus
+위에서는 무엇을 측정해도 의미가 약하다.
 
-평가 도구가 들어와야 interleave ratio / boundary 확장 / 청킹 변경의 이득을 *데이터로* 본다.
-평가 없이 튜닝하면 "감"으로 간다. 평가 로직 자체는 OpenClaw가 이미 운영 중이므로 **이식 가능 작업**.
+### 같은 pi JSONL, 다른 결과
 
-### "OpenClaw 수준"의 분해 — 세 종류
+OpenClaw 5/8 baseline (llmlog `20260507T193005`)에서 같은 pi 세션을 정제한 결과:
 
-| 종류 | 무엇 | 언제 |
-|------|------|------|
-| 운영 가시성 | provider/model/dim/source별 분포 한 번에 | 호출 시 |
-| sanity 표 | 정해진 query 셋 → top-1 hit 의미 표 | 매 sync 후 자동 |
-| bake-off | 같은 query → andenken vs OpenClaw top-3 나란히 | 비교 필요 시 |
+| agent | raw size | chunks | 살아남음 |
+|-------|---------|--------|---------|
+| main | 6 MB | 31 | **0.8%** |
+| gpt | 17.8 MB | 50 | **0.45%** |
+| glg (가족봇) | 3 MB | 1060 | 57% |
 
-andenken에는 이미 `./run.sh golden` (26 합성 query)이 있다. golden은 회귀 가드 (synthetic),
-sanity는 운영 hit 안정성 (real), bake-off는 시스템 간 비교. 셋은 보완적이다.
+→ 가족 직접 대화는 wrapper 적어서 거의 다 살림. **코드/툴 호출 transcript는
+system meta + tool result + provenance를 다 strip**. 이게 OpenClaw 정제의 본체.
 
-### 3단계 — 단계당 한 commit, 각 끝에 ROADMAP History stamp
+andenken sessions: 27,252 chunks / 1,573 sessions. 같은 입력 pi JSONL인데
+*훨씬 많이 살리고 있다*. 이건 우위가 아니라 **정제가 약하다는 신호**.
 
-**A. `./run.sh status --json`** — 운영 가시성 확장
-- 현재: chunks / files / manifest / last indexed
-- 추가: provider / model / dimension / source별(sessions vs org) 분포 / FTS index 상태
-- 대응: OpenClaw `memory status --deep --json`
+### 현 andenken sanitization 깊이 (`session-indexer.ts`, 384 lines)
 
-**B. `./run.sh sanity`** — 매 sync 후 1차 회귀 가드
-- 한국어 5–10 query 고정 셋 → 각 query의 top-1 hit을 표로 출력 (query / source / score / snippet)
-- PASS/FAIL 아님. *읽을 만한 표*.
-- query 셋은 OpenClaw 5/8 baseline llmlog §sanity search(`안녕/엄마/아빠/임베딩/openclaw/세션을`)를 참고하되 andenken corpus(pi sessions + org KB)에 맞게 재선정.
-- `sync-sessions.sh` 끝에 자동 호출.
+- `isNoise()` — noise pattern 정규식 몇 개 (tool errors, delegate failures, smoke tests)
+- `truncateText(text, 2000)` — 일괄 2000자 자르기
+- length threshold (assistant 100자 미만 필터)
+- compaction 이벤트 추출
+- pi/Claude Code source 분리
 
-**C. `./run.sh bakeoff <query>`** — andenken vs OpenClaw 같은 query 비교
-- 같은 자연어 query를 OpenClaw 6 agents + andenken sessions + andenken org에 던짐.
-- 출력: 각 source의 top-3 결과를 한 표에 나란히 (path, score, snippet).
-- 자동 verdict 없음 — 표를 *GLG가 읽고* 판단.
-- OpenClaw 호출은 컨테이너 exec(`openclaw memory search`) 또는 SDK 직접 사용. 인증/네트워크 옵션은 작업 시작 시 결정.
+빠진 것 (구조적 정제):
+- system meta strip
+- tool result truncation/제거
+- provenance / metadata 정리
+- transcript rewrite (대화 흐름 정제)
+- repeated tool call collapse
+
+### OpenClaw에서 이식할 위치 (`/home/junghan/repos/3rd/openclaw/`)
+
+| 파일 | 역할 |
+|------|------|
+| `src/agents/pi-embedded-runner/transcript-rewrite.ts` | **핵심** — transcript 정제 본체 |
+| `src/agents/pi-embedded-runner/tool-result-truncation.ts` | **핵심** — tool result 자르기 |
+| `src/sessions/transcript-events.ts` | transcript update emit/listener (참조) |
+| `src/config/sessions/transcript.ts` | transcript 설정 진입점 (참조) |
+| `src/agents/command/attempt-execution.ts` | tool 실행 정보 처리 (참조) |
+| `extensions/memory-core/src/memory/manager-sync-ops.ts` | session dirty/sync 흐름 (참조) |
+
+핵심은 위 두 파일(transcript-rewrite, tool-result-truncation). 나머지는 컨텍스트.
+
+### 3단계 — 단계당 한 commit, 끝에 ROADMAP History stamp
+
+**A. read-only 매핑**
+- OpenClaw 정제 로직 위 6개 파일 읽기.
+- andenken `session-indexer.ts`와 1:1 매핑. *어떤 strip이 우리에게 없는지* 표로.
+- 결과는 llmlog 한 건. 코드 변경 0건.
+
+**B. transcript-rewrite + tool-result-truncation 이식**
+- andenken에 동등 함수 추가. `parseMessageContent` / `extractTextContent` 호출 라인에 삽입.
+- before/after chunk 수 비교 (현 27,252 → 얼마로 떨어지나).
+- glg-equivalent(가족봇 같은 직접 대화)에 해당하는 *내* pi 세션은 손실 안 나는지 spot-check.
+
+**C. signal density spot-check**
+- 정제 후 sessions에서 무작위 50 샘플 뽑아 *읽고* 판단.
+- PASS/FAIL 아님. "쓸 만한 신호 비율이 OpenClaw 수준인가"를 사람이 결론.
+- 결과를 ROADMAP.md History stamp.
+
+C가 끝나면 NEXT.md는 다음 항목으로 덮어씀: **평가 도구**
+(`status --json` / `sanity` / `bake-off`) — 정제된 corpus 위에서야 의미를 가짐.
 
 ### 의도적으로 안 하는 것
 
-- 정량 top-1 precision / top-3 recall — *내* corpus라 정답 셋을 만들 수 없음. 합성 verdict는 무의미.
-- 자동 PASS/FAIL — 첫 결과를 *읽을* 권한은 GLG.
-- micro-fix (interleave ratio / `[-_.]` boundary / unit tests) — A/B/C가 끝난 *후* 데이터 위에서 본다.
+- **정제 강도 정량화** — `sanity` 도구가 들어올 일. 지금은 chunk 수 변화 + spot-check면 충분.
+- **가족봇 같은 직접 대화 정제 강화** — wrapper 적어서 이미 잘 살아남음. 잘못 건드리면 신호 손실.
+- **평가 도구 (status --json / sanity / bake-off)** — 정제된 corpus 위에서 의미. 다음 NEXT 항목.
+- **chunking 알고리즘 변경** (transcript window 등) — 정제 효과를 본 *후* 별도 NEXT로.
 
 ### 시작 조건
 
-GLG 승인 후 **A → B → C** 순서. 각 단계는 read-only 분석으로 시작해서 코드 변경, 끝에 ROADMAP History stamp.
+GLG 승인 후 **A → B → C** 순서. A는 read-only라 가장 작은 비용으로 가장 큰
+정보를 준다 — A 결과만 보고도 B 범위를 좁힐 수 있다.
 
-A 한 단계만으로도 운영 즉효 (지금 `./run.sh status`로는 source별 분포가 안 보임).
-B까지 가면 매 sync 후 품질 자기-진단이 가능.
-C까지 가면 ROADMAP §1/§2/§3 비교표가 *측정*에 의해 뒷받침됨.
+## 외부 의존 — 대기 중
+
+> 이 항목은 *현재 작업 한 가지*가 아니라 **다른 담당자의 결과를 기다리는 결정**.
+> 결과가 들어오면 sanitization 작업과의 순서를 그때 다시 판단.
+
+### OpenClaw 임베딩 모델 8B 점프 테스트
+
+- **담당**: nixos-config 담당자 (2026-05-08 시작)
+- **변경**: Qwen3-Embedding-**4B → 8B**
+- **차원**: matryoshka representation으로 **2560d truncate 가능** → 양쪽 DB schema 무변경
+- **비용**: OpenRouter query $0.02 → $0.01 (50% 절감)
+- **운영 영향**: 모델 변경은 manifold drift이므로 양쪽 *전체 reindex* 필요 (차원과 무관)
+- **andenken 액션**: OpenClaw 측 sanity / freshness / 한국어 단문 결과 보고 적용 검토
+- **순서 결정**: 결과 들어오면 (a) sanitization 우선 후 8B (corpus 작아진 상태로 reindex 비용 ↓), (b) 8B 우선, (c) 보류 중 하나로 GLG 결정
+- **참고**: ROADMAP §4 가능성 / §변화 기록 5/8 stamp
 
 ## 관련 문서
 
 - [ROADMAP.md](./ROADMAP.md) — 정체성 / 비교표 / 변화 기록 (핵심 문서)
 - [AGENTS.md](./AGENTS.md) — 정체성 / 경계 / 단축 담당 원칙
 - [INVARIANT.md](./INVARIANT.md) — 깨지면 안 되는 규칙
+- 비교 근거 노트: `~/sync/org/llmlog/20260507T193005--openclaw-session-transcript-memory-vs-andenken-session-embedding...org`
