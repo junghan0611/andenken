@@ -495,6 +495,42 @@ async function testExportQmd() {
   }
   assert(leakedMd === 0, "no writes leaked through symlinked --out");
 
+  // Symlink no-follow — an ancestor of --out is a symlink, leaf does not
+  // exist yet. mkdirSync({recursive:true}) would otherwise follow the
+  // ancestor link and create the leaf under the link target.
+  const ancestorReal = path.join(tmpRoot, "real-ancestor");
+  fs.mkdirSync(ancestorReal, { recursive: true });
+  const ancestorLink = path.join(tmpRoot, "link-ancestor");
+  fs.symlinkSync(ancestorReal, ancestorLink);
+  const outViaSymlink = path.join(ancestorLink, "andenken-qmd"); // ENOENT
+  let ancestorSymlinkRefused = false;
+  try {
+    exportOrgToQmd({
+      out: outViaSymlink,
+      orgDir: orgRoot,
+      publicUrlBase: undefined,
+      dryRun: false,
+      verbose: false,
+    });
+  } catch (e) {
+    ancestorSymlinkRefused =
+      e instanceof UnsafeOutError && /symbolic link/i.test(e.message);
+  }
+  assert(
+    ancestorSymlinkRefused,
+    "symlink ancestor of --out is refused (UnsafeOutError)",
+  );
+  // Confirm nothing leaked into the ancestor link's target
+  let leakedAncestor = 0;
+  try {
+    leakedAncestor = fs
+      .readdirSync(ancestorReal, { recursive: true })
+      .filter((n) => typeof n === "string" && n.endsWith(".md")).length;
+  } catch {
+    // ignore
+  }
+  assert(leakedAncestor === 0, "no writes leaked through ancestor symlink");
+
   // Symlink no-follow — <out>/<folder> is a symlink
   const trapTarget = path.join(tmpRoot, "trap-target");
   fs.mkdirSync(trapTarget, { recursive: true });

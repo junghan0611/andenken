@@ -138,14 +138,25 @@ function rejectUnsafeOut(out: string): void {
   if (resolved === "/" || (home && resolved === home)) {
     throw new UnsafeOutError(`refusing --out=${out}: resolves to ${resolved}`);
   }
-  // Symlink no-follow: lexical resolve cannot catch link redirects. If the
-  // path resolves to a symlink, write/sweep would operate on the link target,
-  // which violates the boundary contract regardless of where the link points.
-  const st = lstatOrUndefined(resolved);
-  if (st && st.isSymbolicLink()) {
-    throw new UnsafeOutError(
-      `refusing --out=${out}: ${resolved} is a symbolic link`,
-    );
+  // Symlink no-follow must include ancestor components, not just the leaf.
+  // mkdirSync({recursive:true}) follows ancestor symlinks, so when --out
+  // resolves to a not-yet-existing path under a symlinked ancestor (e.g.
+  // /tmp/link/andenken-qmd where /tmp/link is a symlink), the directory
+  // would be created under the link target. Walk every existing ancestor
+  // and refuse if any is a symlink. ENOENT components are fine — they will
+  // be created as real directories beneath their nearest verified ancestor.
+  let cur = resolved;
+  while (true) {
+    const st = lstatOrUndefined(cur);
+    if (st && st.isSymbolicLink()) {
+      const tag = cur === resolved ? "" : ` (ancestor of ${resolved})`;
+      throw new UnsafeOutError(
+        `refusing --out=${out}: ${cur} is a symbolic link${tag}`,
+      );
+    }
+    const parent = path.dirname(cur);
+    if (parent === cur) break; // filesystem root
+    cur = parent;
   }
 }
 
