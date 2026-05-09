@@ -33,6 +33,13 @@ import {
   groupContentChunks,
   renderHeadingSection,
 } from "./export-qmd-template.ts";
+import {
+  buildBootstrapCommands,
+  commandToShellString,
+  shellQuote as qmdShellQuote,
+} from "./qmd-context.ts";
+import { buildQueryCommand, runQmdQuery } from "./query-qmd.ts";
+import { runBakeoff } from "./qmd-bakeoff.ts";
 import type { OrgChunk } from "./org-chunker.ts";
 import { WriteBuffer, type BufferedRecord } from "./write-buffer.ts";
 import {
@@ -619,6 +626,367 @@ function collectMdTree(root: string): Array<[string, string]> {
   return out;
 }
 
+async function testQmdBootstrap() {
+  section("QMD Bootstrap");
+
+  const cmds = buildBootstrapCommands({
+    cacheDir: "/tmp/andenken-qmd",
+    collectionPrefix: "garden",
+    qmdBin: "qmd",
+    execute: false,
+  });
+
+  // INDEXABLE_ORG_FOLDERS has 5 entries → 2 commands per folder (collection + context)
+  assert(
+    cmds.length === 10,
+    `bootstrap emits 10 commands (5 folders × 2) (got ${cmds.length})`,
+  );
+  const collectionCmds = cmds.filter((c) => c.kind === "collection");
+  const contextCmds = cmds.filter((c) => c.kind === "context");
+  assert(
+    collectionCmds.length === 5 && contextCmds.length === 5,
+    "5 collection cmds + 5 context cmds",
+  );
+
+  // Stable folder ordering — alphabetical
+  const folderOrder = collectionCmds.map((c) => c.folder).join(",");
+  assert(
+    folderOrder === "bib,botlog,journal,meta,notes",
+    `folder order is alphabetical (got ${folderOrder})`,
+  );
+
+  // Collection command shape: collection add /path --name garden-folder
+  const notesColl = collectionCmds.find((c) => c.folder === "notes")!;
+  assert(
+    notesColl.args[0] === "collection" && notesColl.args[1] === "add",
+    "collection cmd starts with `collection add`",
+  );
+  assert(
+    notesColl.args[2] === "/tmp/andenken-qmd/notes",
+    "collection path is <cacheDir>/<folder>",
+  );
+  assert(
+    notesColl.args[3] === "--name" && notesColl.args[4] === "garden-notes",
+    "collection name is <prefix>-<folder>",
+  );
+
+  // Context command shape: context add qmd://garden-folder "blurb"
+  const notesCtx = contextCmds.find((c) => c.folder === "notes")!;
+  assert(
+    notesCtx.args[0] === "context" && notesCtx.args[1] === "add",
+    "context cmd starts with `context add`",
+  );
+  assert(
+    notesCtx.args[2] === "qmd://garden-notes",
+    "context target is qmd://<collection-name>",
+  );
+  assert(
+    typeof notesCtx.args[3] === "string" && notesCtx.args[3].length > 10,
+    "context blurb is non-trivial",
+  );
+
+  // shellQuote handles spaces, quotes, CJK
+  assert(qmdShellQuote("plain") === "plain", "shellQuote leaves plain alnum alone");
+  assert(
+    qmdShellQuote("/abs/path/with-dashes_and.dots") ===
+      "/abs/path/with-dashes_and.dots",
+    "shellQuote leaves path-safe chars alone",
+  );
+  assert(
+    qmdShellQuote("has space").startsWith("'") &&
+      qmdShellQuote("has space").endsWith("'"),
+    "shellQuote wraps args containing spaces",
+  );
+  assert(
+    qmdShellQuote("it's").includes("'\\''"),
+    "shellQuote escapes embedded single quotes",
+  );
+  assert(
+    qmdShellQuote("힣 garden").startsWith("'"),
+    "shellQuote wraps CJK args",
+  );
+
+  // commandToShellString round-trip
+  const line = commandToShellString("qmd", notesCtx);
+  assert(
+    line.startsWith("qmd context add qmd://garden-notes "),
+    "rendered line starts with qmd context add qmd://...",
+  );
+  assert(
+    /'[^']*힣[^']*'/.test(line) || /힣/.test(line),
+    "rendered line contains the Korean blurb",
+  );
+
+  // Custom prefix
+  const customCmds = buildBootstrapCommands({
+    cacheDir: "/x",
+    collectionPrefix: "harness",
+    qmdBin: "qmd",
+    execute: false,
+  });
+  assert(
+    customCmds.some((c) =>
+      c.args.includes("--name") && c.args.includes("harness-notes"),
+    ),
+    "--collection-prefix changes collection name",
+  );
+}
+
+async function testQueryQmd() {
+  section("QMD Query Wrapper");
+
+  // Command shape, no collection
+  const cmd = buildQueryCommand(null, {
+    query: "체화인지",
+    limit: 5,
+    qmdBin: "qmd",
+    extraArgs: [],
+  });
+  assert(cmd.startsWith("qmd query"), "command starts with `qmd query`");
+  assert(cmd.includes("--limit 5"), "limit flag rendered");
+  assert(cmd.includes("--json"), "json flag rendered");
+  assert(/'체화인지'/.test(cmd), "query is shell-quoted");
+
+  // Command shape with collection
+  const cmd2 = buildQueryCommand("garden-notes", {
+    query: "test",
+    limit: 3,
+    qmdBin: "qmd",
+    extraArgs: [],
+  });
+  assert(
+    cmd2.includes("--collection qmd://garden-notes"),
+    "collection prefixed with qmd://",
+  );
+
+  // Extra args pass-through
+  const cmd3 = buildQueryCommand(null, {
+    query: "x",
+    limit: 1,
+    qmdBin: "qmd",
+    extraArgs: ["--rerank"],
+  });
+  assert(cmd3.includes("--rerank"), "extra args pass-through");
+
+  // Custom qmd-bin
+  const cmd4 = buildQueryCommand(null, {
+    query: "x",
+    limit: 1,
+    qmdBin: "/opt/qmd/bin/qmd",
+    extraArgs: [],
+  });
+  assert(cmd4.startsWith("/opt/qmd/bin/qmd query"), "custom qmd-bin prepended");
+
+  // Injected exec — array shape
+  const arrayResp = await runQmdQuery(
+    {
+      query: "q",
+      collections: [],
+      limit: 5,
+      qmdBin: "qmd",
+      extraArgs: [],
+    },
+    () => `[{"path":"a.md","score":0.9,"title":"A"},{"path":"b.md","score":0.5}]`,
+  );
+  assert(arrayResp.length === 1, "single bucket when no collections");
+  assert(arrayResp[0].hits.length === 2, "two hits parsed");
+  assert(arrayResp[0].hits[0].title === "A", "title parsed");
+  assert(arrayResp[0].hits[0].score === 0.9, "score parsed");
+
+  // Injected exec — {results: [...]} shape
+  const objResp = await runQmdQuery(
+    {
+      query: "q",
+      collections: ["garden-notes"],
+      limit: 3,
+      qmdBin: "qmd",
+      extraArgs: [],
+    },
+    () => `{"results":[{"path":"x.md","title":"X","score":0.7}]}`,
+  );
+  assert(objResp[0].hits.length === 1, '{results:[...]} shape parsed');
+  assert(objResp[0].collection === "garden-notes", "collection echoed");
+
+  // Per-collection bucketing
+  const multi = await runQmdQuery(
+    {
+      query: "q",
+      collections: ["garden-notes", "garden-bib"],
+      limit: 1,
+      qmdBin: "qmd",
+      extraArgs: [],
+    },
+    () => `[{"path":"p"}]`,
+  );
+  assert(multi.length === 2, "one bucket per collection");
+  assert(
+    multi[0].collection === "garden-notes" && multi[1].collection === "garden-bib",
+    "buckets ordered by collections arg",
+  );
+
+  // Garbage stdout doesn't throw
+  const bad = await runQmdQuery(
+    { query: "q", collections: [], limit: 1, qmdBin: "qmd", extraArgs: [] },
+    () => `not json at all`,
+  );
+  assert(bad[0].hits.length === 0, "non-JSON stdout yields zero hits");
+
+  // exec failure recorded
+  const errResult = await runQmdQuery(
+    { query: "q", collections: [], limit: 1, qmdBin: "qmd", extraArgs: [] },
+    () => {
+      throw new Error("qmd: command not found");
+    },
+  );
+  assert(
+    errResult[0].rawStdout.startsWith("ERROR:"),
+    "exec failure surfaced as ERROR: prefix",
+  );
+  assert(errResult[0].hits.length === 0, "no hits on exec failure");
+}
+
+async function testQmdBakeoff() {
+  section("QMD Bake-off");
+
+  // Inject exec to fake both andenken and qmd output. Andenken is shelled
+  // out as `... cli.ts search-knowledge ...`; qmd is shelled out as `qmd
+  // query ...`. The injected exec dispatches based on substring.
+  const mockExec = (cmd: string): string => {
+    if (cmd.includes("cli.ts search-knowledge")) {
+      return JSON.stringify({
+        query: "x",
+        count: 1,
+        results: [
+          {
+            id: "id1",
+            text: "andenken hit body",
+            score: 0.42,
+            title: "AnNote",
+            project: "andenken",
+          },
+        ],
+      });
+    }
+    if (cmd.includes("qmd query")) {
+      return JSON.stringify({
+        results: [{ path: "/q/p.md", title: "QmdNote", score: 0.31 }],
+      });
+    }
+    throw new Error("unexpected command in mock: " + cmd);
+  };
+
+  const results = runBakeoff(
+    {
+      query: "test query",
+      limit: 3,
+      qmdBin: "qmd",
+      collectionPrefix: "garden",
+      collections: ["notes"],
+      json: true,
+      skipAndenken: false,
+      skipQmd: false,
+      scriptDir: "/tmp/andenken-fake",
+    },
+    mockExec,
+  );
+
+  assert(results.length === 1, "single-query mode produces 1 probe result");
+  const r = results[0];
+  assert(r.query === "test query", "query echoed");
+  assert(!!r.andenken && r.andenken.ok, "andenken column is ok");
+  assert(!!r.qmd && r.qmd.ok, "qmd column is ok");
+  assert(r.andenken!.hits[0].title === "AnNote", "andenken hit title parsed");
+  assert(r.qmd!.hits[0].title === "QmdNote", "qmd hit title parsed");
+
+  // skip-andenken
+  const qmdOnly = runBakeoff(
+    {
+      query: "x",
+      limit: 1,
+      qmdBin: "qmd",
+      collectionPrefix: "garden",
+      collections: [],
+      json: true,
+      skipAndenken: true,
+      skipQmd: false,
+      scriptDir: "/tmp",
+    },
+    mockExec,
+  );
+  assert(!qmdOnly[0].andenken, "--skip-andenken omits andenken column");
+  assert(!!qmdOnly[0].qmd, "--skip-andenken keeps qmd column");
+
+  // skip-qmd
+  const andOnly = runBakeoff(
+    {
+      query: "x",
+      limit: 1,
+      qmdBin: "qmd",
+      collectionPrefix: "garden",
+      collections: [],
+      json: true,
+      skipAndenken: false,
+      skipQmd: true,
+      scriptDir: "/tmp",
+    },
+    mockExec,
+  );
+  assert(!!andOnly[0].andenken, "--skip-qmd keeps andenken column");
+  assert(!andOnly[0].qmd, "--skip-qmd omits qmd column");
+
+  // Default probes path: 3 sanity queries when no --query
+  const defaultProbes = runBakeoff(
+    {
+      limit: 1,
+      qmdBin: "qmd",
+      collectionPrefix: "garden",
+      collections: [],
+      json: true,
+      skipAndenken: false,
+      skipQmd: false,
+      scriptDir: "/tmp",
+    },
+    mockExec,
+  );
+  assert(
+    defaultProbes.length === 3,
+    `built-in sanity probes count == 3 (got ${defaultProbes.length})`,
+  );
+
+  // qmd command failure path
+  const failingExec = (cmd: string): string => {
+    if (cmd.includes("cli.ts search-knowledge")) {
+      return JSON.stringify({ count: 0, results: [] });
+    }
+    if (cmd.includes("qmd query")) {
+      throw new Error("qmd: not installed");
+    }
+    return "";
+  };
+  const failResults = runBakeoff(
+    {
+      query: "x",
+      limit: 1,
+      qmdBin: "qmd",
+      collectionPrefix: "garden",
+      collections: [],
+      json: true,
+      skipAndenken: false,
+      skipQmd: false,
+      scriptDir: "/tmp",
+    },
+    failingExec,
+  );
+  assert(
+    !!failResults[0].qmd && !failResults[0].qmd.ok,
+    "qmd column reports ok=false when qmd missing",
+  );
+  assert(
+    !!failResults[0].andenken && failResults[0].andenken.ok,
+    "andenken column still ok when qmd missing",
+  );
+}
+
 async function testRetriever() {
   section("Retriever");
 
@@ -1038,6 +1406,9 @@ if (mode === "unit" || mode === "all") {
   await testSessionIndexer();
   await testOrgChunker();
   await testExportQmd();
+  await testQmdBootstrap();
+  await testQueryQmd();
+  await testQmdBakeoff();
   await testRetriever();
   await testWriteBuffer();
   await testVectorStore();

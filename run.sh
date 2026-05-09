@@ -41,6 +41,17 @@ Usage: ./run.sh <command> [args]
                               Flags: --out DIR --org-dir DIR --public-url-base URL
                                      --dry-run --verbose
 
+=== QMD bridge (experimental) ===
+  qmd:bootstrap [flags]       Print (or --execute) qmd collection/context registers
+                              Flags: --cache-dir DIR --collection-prefix STR
+                                     --qmd-bin PATH --execute
+  qmd:query <query> [flags]   Thin wrapper around \`qmd query\`
+                              Flags: --collection NAME --collections a,b,c
+                                     --collection-prefix STR --limit N --qmd-bin PATH
+  qmd:bake-off [flags]        Side-by-side andenken vs qmd top-K
+                              Flags: --query "..." --limit N --collections a,b,c
+                                     --json --skip-andenken --skip-qmd
+
 === Search ===
   search <query> [--limit N]  Search sessions
   knowledge <query> [--limit N]  Search knowledge base
@@ -101,6 +112,14 @@ case "${1:-help}" in
   # === Export ===
   export:org)
     shift; cd "$SCRIPT_DIR" && pnpm exec tsx export-qmd.ts "$@" ;;
+
+  # === QMD bridge (experimental) ===
+  qmd:bootstrap)
+    shift; cd "$SCRIPT_DIR" && pnpm exec tsx qmd-context.ts "$@" ;;
+  qmd:query)
+    shift; cd "$SCRIPT_DIR" && pnpm exec tsx query-qmd.ts "$@" ;;
+  qmd:bake-off)
+    shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx qmd-bakeoff.ts "$@" ;;
 
   # === Search ===
   search)
