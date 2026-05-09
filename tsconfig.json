@@ -19,7 +19,9 @@
     "session-indexer.ts",
     "retriever.ts",
     "org-chunker.ts",
-    "indexer.ts"
+    "indexer.ts",
+    "export-qmd.ts",
+    "export-qmd-template.ts"
   ],
   "exclude": ["test.ts", "benchmark.ts", "node_modules"]
 }
