@@ -1,10 +1,12 @@
 # NEXT — andenken
 
 > 정체성 / 비교표 / 변화 기록 / 운영 신호 / 역할 분담은 [ROADMAP.md](./ROADMAP.md).
-> 이 파일은 **andenken 담당자가 지금 하려는 다음 한 가지**.
-> 끝나면 ROADMAP History에 stamp 박고, 이 파일은 다음 항목으로 덮어씀.
+> 이 파일은 **andenken 담당자가 지금 진행 중인 트랙별 다음 한 가지**.
+> 세션축과 org축은 critical path를 공유하지 않으므로 **각자 독립 트랙**으로
+> 진행한다. 한 트랙 항목이 끝나면 ROADMAP History stamp 후 같은 트랙 다음
+> 항목으로 덮어쓴다.
 
-## 다음: 세션 입력 sanitization을 OpenClaw 수준으로 맞추기
+## 트랙 A — 세션 임베딩: 입력 sanitization을 OpenClaw 수준으로 맞추기
 
 평가 도구(`status --json` / `sanity` / `bake-off`) *전에* **입력 정제**를 먼저 한다.
 
@@ -87,6 +89,67 @@ C가 끝나면 NEXT.md는 다음 항목으로 덮어씀: **평가 도구**
 
 GLG 승인 후 **A → B → C** 순서. A는 read-only라 가장 작은 비용으로 가장 큰
 정보를 준다 — A 결과만 보고도 B 범위를 좁힐 수 있다.
+
+## 트랙 B — org 임베딩: qmd memory-md substrate 검토
+
+andenken을 *memory policy + source translation* 축으로 좁히고, search engine은
+qmd 같은 black-box substrate로 외주화 가능한지를 **증거 기반**으로 결정한다.
+이슈 [#1](https://github.com/junghan0611/andenken/issues/1)의 repositioning을
+단계 PR로 풀어가는 중. **세션축(트랙 A)과는 독립.**
+
+### 현재 상태 (스택 PR 2개)
+
+| PR | 상태 | 범위 |
+|----|------|------|
+| [#2](https://github.com/junghan0611/andenken/pull/2) | OPEN | Stage 1 — `export-qmd.ts` + template. org → memory-md 순수 export. 기존 search 스택 (cli/indexer/store/retriever/lancedb) 0줄 변경 |
+| [#3](https://github.com/junghan0611/andenken/pull/3) | DRAFT | Stage 2+3 — `qmd-context` + `query-qmd` + `qmd-bakeoff`. #2 위에 stacked |
+
+### 단계 — 단계당 한 결정, 끝에 ROADMAP History stamp
+
+**A. PR #2 머지 (forward-compatible)**
+- 코드 리뷰 완료: import boundary 깨끗 (docstring만 매치, 실제 import 0),
+  정책 100% `org-chunker` 재사용 (`shouldIndexOrgFile` / `chunkOrgFile` /
+  `INDEXABLE_ORG_FOLDERS`), `--out` symlink 3중 가드 (leaf / ancestor /
+  `<out>/<folder>` sweep 재검증), 멱등 rewrite + sweep, 23 assertion 통과.
+- qmd 방향이 무산되더라도 export layer 자체는 다른 markdown substrate에 재사용
+  가능 — **decision-deferring 자산**.
+- 머지 후 ROADMAP History stamp.
+
+**B. 실데이터 bake-off (PR #3 promote 조건)**
+- 오라클이든 NUC이든 qmd 1회 설치.
+- `./run.sh export:org --out ~/.cache/andenken-qmd` 풀 export.
+- `./run.sh qmd:bootstrap --execute` collection 5개 + context 5개 등록.
+- `./run.sh qmd:bake-off --json > /tmp/bakeoff.json` — andenken vs qmd 동일
+  query side-by-side. 3 sanity probe (체화인지 / 운영 복구 / self-referential)
+  로 harness shape 먼저 확인.
+- 결과 llmlog 1건 + PR #3 ready-for-review 승격.
+
+**C. Stage 4 — backend 경계 결정**
+- 기준: bake-off에서 qmd가 (i) 같은 query에 의미 있게 다른 hit를 주면서
+  (ii) 메모리 컨텍스트(Denote ID / 시간축 / hierarchy)가 retrieval에 실제로
+  작동하느냐.
+- 결정 옵션: **LanceDB org path 유지** / **org만 qmd로** / **둘 다 유지** /
+  **qmd-backed memory-md export로 수렴**. ROADMAP §4 가능성 항목.
+- **GLG 결정**. andenken 단독 결정 금지.
+
+### 의도적으로 안 하는 것
+
+- **세션 → memory-md export** — 트랙 A의 sanitization이 끝나야 의미. 더러운
+  corpus를 markdown으로 옮겨봐야 같은 noise/signal 그대로.
+- **golden-queries.ts 와이어링** — quality scorer는 별개 axis. 현 3 sanity
+  probe는 harness shape 검증용. 정량 score는 B 끝나고 별도 NEXT 항목.
+- **`andenken search-knowledge` 제거 / LanceDB 정리** — Stage 4 결정 *전*에는
+  손대지 않는다.
+- **published.json allowlist** — Public URL 정확도는 bake-off 우선순위 아님.
+  v1은 flag 없으면 라인 자체를 안 찍음.
+- **qmd CLI 표면 pin** — 현 query wrapper는 4 가지 JSON shape에 robust.
+  실설치 후 정확한 shape으로 좁히는 건 B의 부산물.
+
+### 시작 조건
+
+GLG 승인 후 **A → B → C** 순서. A는 코드 리뷰 끝났으므로 머지 결정만 남음.
+B는 qmd 설치 + 1회 풀 export + bake-off 실행 (외부 의존: qmd 가용성). C는
+B 결과를 GLG가 보고 결정.
 
 ## 외부 의존 — 대기 중
 
