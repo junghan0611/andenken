@@ -21,7 +21,10 @@
     "org-chunker.ts",
     "indexer.ts",
     "export-qmd.ts",
-    "export-qmd-template.ts"
+    "export-qmd-template.ts",
+    "qmd-context.ts",
+    "query-qmd.ts",
+    "qmd-bakeoff.ts"
   ],
   "exclude": ["test.ts", "benchmark.ts", "node_modules"]
 }
