@@ -61,6 +61,10 @@ function renderFileHeader(
 
 export function renderHeadingSection(part: ContentPart): string {
   const { chunk, partIndex, partCount } = part;
+  // Single source of truth so the section title and the Context: Hierarchy
+  // line always agree. A heading-less file produces chunks with empty
+  // hierarchy; leaving the Context line blank breaks memory-md's invariant
+  // that every section is self-describing for retrieval.
   const hierarchy = chunk.hierarchy || "(file body)";
   const partSuffix = partCount > 1 ? ` (part ${partIndex + 1}/${partCount})` : "";
 
@@ -68,7 +72,7 @@ export function renderHeadingSection(part: ContentPart): string {
   lines.push(`## ${hierarchy}${partSuffix}`);
   lines.push("");
   lines.push("Context:");
-  lines.push(`- Hierarchy: ${chunk.hierarchy}`);
+  lines.push(`- Hierarchy: ${hierarchy}`);
   const headingTags = chunk.heading?.tags ?? [];
   lines.push(`- Heading tags: ${headingTags.join(", ")}`);
   lines.push(`- Line: ${chunk.lineNumber}`);

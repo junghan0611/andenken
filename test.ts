@@ -26,8 +26,14 @@ import {
   detectSource,
 } from "./session-indexer.ts";
 import { chunkOrgFile, shouldIndexOrgFile } from "./org-chunker.ts";
-import { exportOrgToQmd } from "./export-qmd.ts";
-import { denoteIdToDate, buildPublicUrl, groupContentChunks } from "./export-qmd-template.ts";
+import { exportOrgToQmd, UnsafeOutError } from "./export-qmd.ts";
+import {
+  denoteIdToDate,
+  buildPublicUrl,
+  groupContentChunks,
+  renderHeadingSection,
+} from "./export-qmd-template.ts";
+import type { OrgChunk } from "./org-chunker.ts";
 import { WriteBuffer, type BufferedRecord } from "./write-buffer.ts";
 import {
   rrfFusion,
@@ -458,6 +464,98 @@ async function testExportQmd() {
   } else {
     skip("multi-part grouping: single chunk emitted (subChunkContent threshold)");
   }
+
+  // Symlink no-follow — outRoot is a symlink to a real directory
+  const realDirForLink = path.join(tmpRoot, "real-out-target");
+  fs.mkdirSync(realDirForLink, { recursive: true });
+  const linkOut = path.join(tmpRoot, "link-out");
+  fs.symlinkSync(realDirForLink, linkOut);
+  let symlinkOutRefused = false;
+  try {
+    exportOrgToQmd({
+      out: linkOut,
+      orgDir: orgRoot,
+      publicUrlBase: undefined,
+      dryRun: false,
+      verbose: false,
+    });
+  } catch (e) {
+    symlinkOutRefused =
+      e instanceof UnsafeOutError && /symbolic link/i.test(e.message);
+  }
+  assert(symlinkOutRefused, "symlink --out is refused (UnsafeOutError)");
+  // Confirm no .md files leaked into the link target
+  let leakedMd = 0;
+  try {
+    leakedMd = fs.readdirSync(realDirForLink, { recursive: true }).filter(
+      (n) => typeof n === "string" && n.endsWith(".md"),
+    ).length;
+  } catch {
+    // ignore
+  }
+  assert(leakedMd === 0, "no writes leaked through symlinked --out");
+
+  // Symlink no-follow — <out>/<folder> is a symlink
+  const trapTarget = path.join(tmpRoot, "trap-target");
+  fs.mkdirSync(trapTarget, { recursive: true });
+  const trappedOut = path.join(tmpRoot, "out-with-trap");
+  fs.mkdirSync(trappedOut, { recursive: true });
+  fs.symlinkSync(trapTarget, path.join(trappedOut, "notes"));
+  let symlinkFolderRefused = false;
+  try {
+    exportOrgToQmd({
+      out: trappedOut,
+      orgDir: orgRoot,
+      publicUrlBase: undefined,
+      dryRun: false,
+      verbose: false,
+    });
+  } catch (e) {
+    symlinkFolderRefused =
+      e instanceof UnsafeOutError && /symbolic link/i.test(e.message);
+  }
+  assert(symlinkFolderRefused, "symlink <out>/<folder> is refused (UnsafeOutError)");
+
+  // (file body) fallback — both section title AND Hierarchy context line
+  // must agree when chunk.hierarchy is empty (heading-less file case).
+  const fileBodyChunk: OrgChunk = {
+    id: "test-fb",
+    text: "raw body",
+    rawText: "raw body",
+    filePath: "/fake/notes/20260102T100000.org",
+    folder: "notes",
+    lineNumber: 1,
+    endLineNumber: 1,
+    chunkType: "content",
+    metadata: {
+      identifier: "20260102T100000",
+      title: "No Headings",
+      filetags: [],
+      date: "",
+      folder: "notes",
+      references: [],
+      titlePrefix: "",
+      hasGptelProps: false,
+    },
+    hierarchy: "",
+  };
+  const fbSection = renderHeadingSection({
+    chunk: fileBodyChunk,
+    partIndex: 0,
+    partCount: 1,
+  });
+  assert(
+    fbSection.includes("## (file body)"),
+    "section title falls back to '(file body)' when hierarchy empty",
+  );
+  assert(
+    fbSection.includes("- Hierarchy: (file body)"),
+    "Hierarchy context line falls back to '(file body)' (matches title)",
+  );
+  assert(
+    !/- Hierarchy:\s*$/m.test(fbSection),
+    "Hierarchy line is never empty",
+  );
 
   // Cleanup
   fs.rmSync(tmpRoot, { recursive: true, force: true });

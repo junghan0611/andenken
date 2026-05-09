@@ -116,12 +116,54 @@ Flags:
  * <out>/<folder>/<name>.md depth, where folder is in INDEXABLE_ORG_FOLDERS.
  * Never follow symlinks, never recurse outside.
  */
+class UnsafeOutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UnsafeOutError";
+  }
+}
+
+function lstatOrUndefined(p: string): fs.Stats | undefined {
+  try {
+    return fs.lstatSync(p);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return undefined;
+    throw e;
+  }
+}
+
 function rejectUnsafeOut(out: string): void {
   const resolved = path.resolve(out);
   const home = path.resolve(process.env.HOME ?? "");
   if (resolved === "/" || (home && resolved === home)) {
-    console.error(`refusing --out=${out}: resolves to ${resolved}`);
-    process.exit(2);
+    throw new UnsafeOutError(`refusing --out=${out}: resolves to ${resolved}`);
+  }
+  // Symlink no-follow: lexical resolve cannot catch link redirects. If the
+  // path resolves to a symlink, write/sweep would operate on the link target,
+  // which violates the boundary contract regardless of where the link points.
+  const st = lstatOrUndefined(resolved);
+  if (st && st.isSymbolicLink()) {
+    throw new UnsafeOutError(
+      `refusing --out=${out}: ${resolved} is a symbolic link`,
+    );
+  }
+}
+
+function assertOutFolderSafety(outRoot: string): void {
+  for (const folder of INDEXABLE_ORG_FOLDERS) {
+    const folderPath = path.join(outRoot, folder);
+    const st = lstatOrUndefined(folderPath);
+    if (!st) continue; // not created yet — mkdirSync below will make a real dir
+    if (st.isSymbolicLink()) {
+      throw new UnsafeOutError(
+        `refusing: ${folderPath} is a symbolic link`,
+      );
+    }
+    if (!st.isDirectory()) {
+      throw new UnsafeOutError(
+        `refusing: ${folderPath} exists but is not a directory`,
+      );
+    }
   }
 }
 
@@ -134,13 +176,26 @@ function sweepStaleFiles(
   let removed = 0;
   for (const folder of INDEXABLE_ORG_FOLDERS) {
     const folderPath = path.join(outRoot, folder);
+    // Defense in depth: re-check the folder before any readdir/unlink, so a
+    // post-pre-flight TOCTOU swap cannot redirect deletes through a symlink.
+    const st = lstatOrUndefined(folderPath);
+    if (!st) continue;
+    if (st.isSymbolicLink()) {
+      throw new UnsafeOutError(
+        `refusing sweep: ${folderPath} is a symbolic link`,
+      );
+    }
+    if (!st.isDirectory()) continue;
+
     let entries: fs.Dirent[];
     try {
       entries = fs.readdirSync(folderPath, { withFileTypes: true });
     } catch {
-      continue; // folder may not exist yet
+      continue;
     }
     for (const entry of entries) {
+      // Dirent.isFile() is false for symlinks (they show as isSymbolicLink()),
+      // so symlinked .md entries are naturally skipped by this guard.
       if (!entry.isFile()) continue;
       if (!entry.name.endsWith(".md")) continue;
       const full = path.join(folderPath, entry.name);
@@ -183,6 +238,7 @@ function buildOutPath(
 
 function exportOrgToQmd(opts: CliOptions): ExportResult {
   rejectUnsafeOut(opts.out);
+  assertOutFolderSafety(opts.out);
 
   const files = findOrgFiles(opts.orgDir).filter(shouldIndexOrgFile);
   const expected = new Set<string>();
@@ -258,7 +314,16 @@ function exportOrgToQmd(opts: CliOptions): ExportResult {
 
 function main(): void {
   const opts = parseArgs(process.argv.slice(2));
-  const r = exportOrgToQmd(opts);
+  let r: ExportResult;
+  try {
+    r = exportOrgToQmd(opts);
+  } catch (e) {
+    if (e instanceof UnsafeOutError) {
+      console.error(e.message);
+      process.exit(2);
+    }
+    throw e;
+  }
   const dryTag = opts.dryRun ? " (dry-run)" : "";
   console.log(
     JSON.stringify({
@@ -278,7 +343,13 @@ function main(): void {
   }
 }
 
-export { exportOrgToQmd, parseArgs, type CliOptions, type ExportResult };
+export {
+  exportOrgToQmd,
+  parseArgs,
+  UnsafeOutError,
+  type CliOptions,
+  type ExportResult,
+};
 
 // Run when invoked directly via tsx (not when imported by tests).
 const isDirectInvocation = (() => {
