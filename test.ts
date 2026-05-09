@@ -26,6 +26,8 @@ import {
   detectSource,
 } from "./session-indexer.ts";
 import { chunkOrgFile, shouldIndexOrgFile } from "./org-chunker.ts";
+import { exportOrgToQmd } from "./export-qmd.ts";
+import { denoteIdToDate, buildPublicUrl, groupContentChunks } from "./export-qmd-template.ts";
 import { WriteBuffer, type BufferedRecord } from "./write-buffer.ts";
 import {
   rrfFusion,
@@ -224,6 +226,263 @@ async function testOrgChunker() {
     !headingTexts.includes("Hidden") && !headingTexts.includes("Speech") && !headingTexts.includes("Archived") && !headingTexts.includes("Trace") && headingTexts.includes("Visible"),
     "excluded headings are omitted from heading tier",
   );
+}
+
+async function testExportQmd() {
+  section("Export QMD (memory-md)");
+
+  // Build a synthetic org tree under a temp dir so findOrgFiles + folder
+  // policy work end-to-end without touching ~/sync/org.
+  const tmpRoot = `/tmp/andenken-export-qmd-test-${Date.now()}`;
+  const orgRoot = path.join(tmpRoot, "org");
+  const outRoot = path.join(tmpRoot, "out");
+
+  // INDEXABLE_ORG_FOLDERS = {meta, bib, notes, journal, botlog}
+  for (const f of ["notes", "journal", "meta"]) {
+    fs.mkdirSync(path.join(orgRoot, f), { recursive: true });
+  }
+
+  const noembedFile = path.join(
+    orgRoot,
+    "notes/20260101T100000--noembed-only__test_noembed.org",
+  );
+  fs.writeFileSync(
+    noembedFile,
+    `#+title: Skipped Noembed\n#+filetags: :test:noembed:\n\n* Heading\nshould never appear`,
+  );
+
+  const visibleFile = path.join(
+    orgRoot,
+    "notes/20260101T110000--visible-note__test.org",
+  );
+  fs.writeFileSync(
+    visibleFile,
+    `#+title: Visible Note Title\n#+filetags: :test:\n\n* Parent\nParent intro text that is long enough to survive content chunking thresholds.\n** Hidden :noembed:\nsecret payload that must never reach memory-md output.\n** Archived :ARCHIVE:\narchived subtree must stay out of memory-md too.\n** Visible\nvisible body that should remain present in memory-md export output.`,
+  );
+
+  const preCutoffFile = path.join(
+    orgRoot,
+    "journal/20241230T000000--pre-cutoff__journal_week01.org",
+  );
+  fs.writeFileSync(
+    preCutoffFile,
+    `#+title: Pre-2025 journal\n#+filetags: :journal:\n\n* Day\nthis pre-cutoff journal must not be exported anywhere`,
+  );
+
+  const postCutoffFile = path.join(
+    orgRoot,
+    "journal/20250106T000000--post-cutoff__journal_week02.org",
+  );
+  fs.writeFileSync(
+    postCutoffFile,
+    `#+title: 2025 journal week\n#+filetags: :journal:\n\n* Mon\nfirst day of post-cutoff journal week, real content here for chunking.`,
+  );
+
+  // Pre-seed a stale .md that should be swept on export.
+  fs.mkdirSync(path.join(outRoot, "notes"), { recursive: true });
+  const staleMd = path.join(outRoot, "notes/19990101T000000.md");
+  fs.writeFileSync(staleMd, "# stale\n");
+
+  const result = exportOrgToQmd({
+    out: outRoot,
+    orgDir: orgRoot,
+    publicUrlBase: undefined,
+    dryRun: false,
+    verbose: false,
+  });
+
+  assert(result.wrote >= 2, `wrote >= 2 files (got ${result.wrote})`);
+
+  const noembedOut = path.join(outRoot, "notes/20260101T100000.md");
+  assert(!fs.existsSync(noembedOut), "filetag :noembed: yields no .md");
+
+  const preCutoffOut = path.join(outRoot, "journal/20241230T000000.md");
+  assert(
+    !fs.existsSync(preCutoffOut),
+    "pre-2025 journal is not exported",
+  );
+
+  const postCutoffOut = path.join(outRoot, "journal/20250106T000000.md");
+  assert(
+    fs.existsSync(postCutoffOut),
+    "post-2025 journal is exported",
+  );
+
+  const visibleOut = path.join(outRoot, "notes/20260101T110000.md");
+  assert(fs.existsSync(visibleOut), "visible note is exported");
+
+  const visibleBody = fs.readFileSync(visibleOut, "utf8");
+  assert(
+    visibleBody.startsWith("# Visible Note Title"),
+    "first line is '# {title}'",
+  );
+  assert(
+    visibleBody.includes("- Denote ID: 20260101T110000"),
+    "Context block has Denote ID",
+  );
+  assert(
+    visibleBody.includes("- Time axis: 2026-01-01"),
+    "Time axis derived from Denote ID",
+  );
+  assert(
+    visibleBody.includes("- Folder: notes"),
+    "Folder line present",
+  );
+  assert(
+    visibleBody.includes("- Original path: " + visibleFile),
+    "Original path line present",
+  );
+  assert(
+    !visibleBody.includes("Public URL:"),
+    "Public URL omitted when --public-url-base unset",
+  );
+  assert(
+    !visibleBody.includes("secret payload"),
+    "noembed subtree text not in memory-md output",
+  );
+  assert(
+    !visibleBody.includes("archived subtree"),
+    ":ARCHIVE: subtree text not in memory-md output",
+  );
+  assert(
+    visibleBody.includes("visible body"),
+    "visible sibling body is preserved",
+  );
+  assert(
+    visibleBody.includes("Hierarchy: Parent"),
+    "Hierarchy line is rendered for content sections",
+  );
+
+  // Stale sweep
+  assert(!fs.existsSync(staleMd), "reconciliation removed stale .md");
+
+  // Idempotence
+  const snapshot1 = collectMdTree(outRoot);
+  const result2 = exportOrgToQmd({
+    out: outRoot,
+    orgDir: orgRoot,
+    publicUrlBase: undefined,
+    dryRun: false,
+    verbose: false,
+  });
+  const snapshot2 = collectMdTree(outRoot);
+  assert(
+    JSON.stringify(snapshot1) === JSON.stringify(snapshot2),
+    "second run is byte-identical (idempotent)",
+  );
+  assert(
+    result2.removedStale === 0,
+    `second run sweeps nothing (got removedStale=${result2.removedStale})`,
+  );
+
+  // Public URL opt-in
+  const result3 = exportOrgToQmd({
+    out: outRoot,
+    orgDir: orgRoot,
+    publicUrlBase: "https://notes.junghanacs.com",
+    dryRun: false,
+    verbose: false,
+  });
+  void result3;
+  const visibleBodyWithUrl = fs.readFileSync(visibleOut, "utf8");
+  assert(
+    visibleBodyWithUrl.includes("- Public URL: https://notes.junghanacs.com/notes/20260101T110000"),
+    "Public URL rendered when --public-url-base set",
+  );
+
+  // Pure helpers
+  assert(
+    denoteIdToDate("20250106T120000") === "2025-01-06",
+    "denoteIdToDate('20250106T120000') === '2025-01-06'",
+  );
+  assert(
+    denoteIdToDate("not-a-denote-id") === "unknown",
+    "denoteIdToDate falls back to 'unknown' on bad input",
+  );
+  assert(
+    buildPublicUrl(
+      {
+        identifier: "20260101T110000",
+        title: "x",
+        filetags: [],
+        date: "",
+        folder: "notes",
+        references: [],
+        titlePrefix: "",
+        hasGptelProps: false,
+      },
+      "https://notes.junghanacs.com/",
+    ) === "https://notes.junghanacs.com/notes/20260101T110000",
+    "buildPublicUrl strips trailing slash and joins folder + id",
+  );
+  assert(
+    buildPublicUrl(
+      {
+        identifier: "20260101T110000",
+        title: "x",
+        filetags: [],
+        date: "",
+        folder: "notes",
+        references: [],
+        titlePrefix: "",
+        hasGptelProps: false,
+      },
+      undefined,
+    ) === undefined,
+    "buildPublicUrl returns undefined when base is unset",
+  );
+
+  // Multi-part grouping shape: when one heading produces multiple content
+  // chunks (subChunkContent split), grouping must mark partCount>1.
+  const longBody = "lorem ipsum ".repeat(800);
+  const longFile = path.join(
+    orgRoot,
+    "notes/20260101T120000--long-body__test.org",
+  );
+  fs.writeFileSync(
+    longFile,
+    `#+title: Long body\n#+filetags: :test:\n\n* Long\n${longBody}`,
+  );
+  const longChunks = chunkOrgFile(fs.readFileSync(longFile, "utf8"), longFile);
+  const grouped = groupContentChunks(longChunks);
+  if (grouped.length > 1) {
+    assert(
+      grouped.every((g) => g.partCount === grouped.length),
+      `multi-part: partCount === group size (${grouped.length})`,
+    );
+    assert(
+      grouped.map((g) => g.partIndex).join(",") ===
+        grouped.map((_, i) => i).join(","),
+      "multi-part: partIndex is 0..N-1 in source order",
+    );
+  } else {
+    skip("multi-part grouping: single chunk emitted (subChunkContent threshold)");
+  }
+
+  // Cleanup
+  fs.rmSync(tmpRoot, { recursive: true, force: true });
+}
+
+function collectMdTree(root: string): Array<[string, string]> {
+  const out: Array<[string, string]> = [];
+  function walk(d: string) {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(d, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (e.isFile() && e.name.endsWith(".md")) {
+        out.push([path.relative(root, p), fs.readFileSync(p, "utf8")]);
+      }
+    }
+  }
+  walk(root);
+  out.sort(([a], [b]) => a.localeCompare(b));
+  return out;
 }
 
 async function testRetriever() {
@@ -644,6 +903,7 @@ console.log("🧠 andenken Test Suite\n");
 if (mode === "unit" || mode === "all") {
   await testSessionIndexer();
   await testOrgChunker();
+  await testExportQmd();
   await testRetriever();
   await testWriteBuffer();
   await testVectorStore();

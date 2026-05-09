@@ -36,6 +36,11 @@ Usage: ./run.sh <command> [args]
   status                      Show index statistics
   estimate [sessions|org|all] Dry-run cost estimate before indexing
 
+=== Export ===
+  export:org [flags]          Export org → memory-md (~/.cache/andenken-qmd)
+                              Flags: --out DIR --org-dir DIR --public-url-base URL
+                                     --dry-run --verbose
+
 === Search ===
   search <query> [--limit N]  Search sessions
   knowledge <query> [--limit N]  Search knowledge base
@@ -92,6 +97,10 @@ case "${1:-help}" in
     shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts verify "${1:-all}" ;;
   status)
     load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts status ;;
+
+  # === Export ===
+  export:org)
+    shift; cd "$SCRIPT_DIR" && pnpm exec tsx export-qmd.ts "$@" ;;
 
   # === Search ===
   search)
