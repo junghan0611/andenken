@@ -16,7 +16,8 @@ import * as path from "node:path";
 import * as fs from "node:fs";
 import { execSync } from "node:child_process";
 import {
-  createProviderFromEnv,
+  createSessionProviderFromEnv,
+  createOrgProviderFromEnv,
   type EmbeddingProvider,
 } from "./embedding-provider.js";
 import { VectorStore, getSessionsDbPath, getOrgDbPath, getDataDir, type SearchResult } from "./store.js";
@@ -43,13 +44,57 @@ function recordRecall(query: string, tool: string, results: SearchResult[]): voi
 
 // --- Config ---
 
-function getProvider(): EmbeddingProvider {
-  const p = createProviderFromEnv();
+/**
+ * Track-aware provider getters.
+ *
+ * searchSessions and searchKnowledge each pick the provider that matches the
+ * corpus they're querying. A sessions vector NEVER goes into org.lance and
+ * vice versa, so the two tracks can carry different dimensions (sessions on
+ * OpenRouter 8B/4096d, org on local 4B/2560d).
+ *
+ * Sessions track is namespaced (ANDENKEN_SESSION_*) with no legacy fallback;
+ * org track keeps ANDENKEN_VLLM_* fallback for backward-compat indexing.
+ */
+function getSessionsProvider(): EmbeddingProvider {
+  // PR-B: legacy fallback removed. Sessions track requires explicit
+  // ANDENKEN_SESSION_PROVIDER namespace. Operators on the old ANDENKEN_VLLM_*
+  // slot must migrate (see ROADMAP.md / NEXT.md for cutover guidance).
+  const p = createSessionProviderFromEnv();
   if (!p) {
-    console.error(JSON.stringify({ error: "No embedding provider available (set GEMINI_API_KEY or ANDENKEN_PROVIDER=vllm)" }));
+    console.error(
+      JSON.stringify({
+        error:
+          "No sessions embedding provider available. Set ANDENKEN_SESSION_PROVIDER " +
+          "(and ANDENKEN_SESSION_ENDPOINT / _MODEL / _API_KEY). " +
+          "PR-A's transitional ANDENKEN_VLLM_* fallback was removed in PR-B.",
+      }),
+    );
     process.exit(1);
   }
   return p;
+}
+
+function getOrgProvider(): EmbeddingProvider {
+  const p = createOrgProviderFromEnv();
+  if (!p) {
+    console.error(
+      JSON.stringify({
+        error: "No org embedding provider available — set ANDENKEN_ORG_PROVIDER " +
+               "(or the legacy ANDENKEN_PROVIDER+ANDENKEN_VLLM_* slot)",
+      }),
+    );
+    process.exit(1);
+  }
+  return p;
+}
+
+/**
+ * Sessions-track alias used by the in-CLI `reindex` command, which only
+ * touches sessions.lance. Kept as a thin alias so the call site stays terse;
+ * the underlying provider is identical to getSessionsProvider().
+ */
+function getProvider(): EmbeddingProvider {
+  return getSessionsProvider();
 }
 
 // --- dictcli expand ---
@@ -95,11 +140,35 @@ const orgDbPath = getOrgDbPath();
 // --- Commands ---
 
 async function searchSessions(query: string, limit: number, source?: string): Promise<void> {
-  const provider = getProvider();
+  const provider = getSessionsProvider();
   const dim = provider.dimensions || 2560;
 
   const store = new VectorStore(sessionDbPath, dim);
   await store.init();
+
+  // PR-D: dim safety MUST run before any embedQuery() call.
+  //
+  // Scenario this prevents: PR-B switches sessions to OpenRouter
+  // qwen/qwen3-embedding-8b (4096d) while data/sessions.lance still holds
+  // the old 2560d index. Without this guard the configured 4096d would
+  // trigger a paid OpenRouter call FIRST, then LanceDB would silently fall
+  // back to FTS-only (store.ts:237). Fail-loud is the right answer:
+  // operator must run rebuild-sessions-full.sh.
+  //
+  // Mirrors searchKnowledge / knowledge_search dim guards. Empty/fresh DB
+  // passes through (checkCompatibleDim returns ok with actual=null).
+  const sessionDimCheck = await store.checkCompatibleDim();
+  if (!sessionDimCheck.ok) {
+    console.error(
+      JSON.stringify({
+        error: `session search refused: ${sessionDimCheck.reason ?? "sessions dim incompatible"}. Run scripts/rebuild-sessions-full.sh first or fix ANDENKEN_SESSION_*.`,
+        configured: sessionDimCheck.configured,
+        actual: sessionDimCheck.actual,
+      }),
+    );
+    await store.close();
+    process.exit(1);
+  }
 
   const expanded = dictcliExpand(query);
   const enrichedQuery =
@@ -158,32 +227,58 @@ async function searchSessions(query: string, limit: number, source?: string): Pr
     results = results.filter((r) => r.source === source);
   }
 
-  // Auto-fallback to knowledge if session results are thin
+  // PR-D cross-track fallback (mirrors index.ts session_search).
+  //
+  // When sessions results are thin, supplement with hits from the org corpus.
+  // Two safety boundaries: re-embed the query through orgProvider (NOT
+  // through `provider` which is the sessions provider — different dim),
+  // and confirm dim compatibility before issuing the search. If either
+  // boundary fails, sessions results are still returned with a diagnostic.
   let fallback = false;
+  let fallbackDiagnostic: string | undefined;
   const topScore = results[0]?.score ?? 0;
-  if (fs.existsSync(orgDbPath) && (results.length < 3 || topScore < 0.005)) {
-    const orgStore = new VectorStore(orgDbPath, dim);
-    await orgStore.init();
-    const orgCandidates = Math.min(limit * 4, 200);
-    const orgQueryVector = await provider.embedQuery(enrichedQuery);
-    const orgVec = await orgStore.search(orgQueryVector, orgCandidates, 0.05);
-    const orgFts = await orgStore.fullTextSearch(bm25Query, orgCandidates);
-    const orgResults = await retrieve(query, orgVec, orgFts, {
-      vectorWeight: 0.7,
-      bm25Weight: 0.3,
-      recencyHalfLifeDays: 90,
-      minScore: 0.05,
-      mmr: { enabled: true, lambda: 0.7 },
-      mergeStrategy: "weighted" as MergeStrategy,
-    });
-    if (orgResults.length > 0) {
-      results = [
-        ...results.slice(0, limit - 3),
-        ...orgResults.slice(0, 3),
-      ];
-      fallback = true;
+  const wantsFallback =
+    fs.existsSync(orgDbPath) && (results.length < 3 || topScore < 0.005);
+  if (wantsFallback) {
+    let orgProvider: EmbeddingProvider | null = null;
+    try {
+      orgProvider = createOrgProviderFromEnv();
+    } catch (err) {
+      fallbackDiagnostic = `knowledge fallback skipped: ${err instanceof Error ? err.message.slice(0, 120) : String(err)}`;
     }
-    await orgStore.close();
+    if (!orgProvider) {
+      fallbackDiagnostic = fallbackDiagnostic ?? "knowledge fallback skipped: no org provider";
+    } else {
+      const orgDim = orgProvider.dimensions || 2560;
+      const orgStore = new VectorStore(orgDbPath, orgDim);
+      await orgStore.init();
+      const dimCheck = await orgStore.checkCompatibleDim();
+      if (!dimCheck.ok) {
+        fallbackDiagnostic = `knowledge fallback skipped: ${dimCheck.reason ?? "org dim incompatible"}`;
+        await orgStore.close();
+      } else {
+        const orgCandidates = Math.min(limit * 4, 200);
+        const orgQueryVector = await orgProvider.embedQuery(enrichedQuery);
+        const orgVec = await orgStore.search(orgQueryVector, orgCandidates, 0.05);
+        const orgFts = await orgStore.fullTextSearch(bm25Query, orgCandidates);
+        const orgResults = await retrieve(query, orgVec, orgFts, {
+          vectorWeight: 0.7,
+          bm25Weight: 0.3,
+          recencyHalfLifeDays: 90,
+          minScore: 0.05,
+          mmr: { enabled: true, lambda: 0.7 },
+          mergeStrategy: "weighted" as MergeStrategy,
+        });
+        if (orgResults.length > 0) {
+          results = [
+            ...results.slice(0, limit - 3),
+            ...orgResults.slice(0, 3),
+          ];
+          fallback = true;
+        }
+        await orgStore.close();
+      }
+    }
   }
 
   const finalResults = results.slice(0, limit);
@@ -193,6 +288,7 @@ async function searchSessions(query: string, limit: number, source?: string): Pr
       query,
       expanded: expanded.length > 0 ? expanded : undefined,
       fallback,
+      diagnostic: fallbackDiagnostic,
       count: finalResults.length,
       results: finalResults.map(formatResult),
     }),
@@ -209,11 +305,26 @@ async function searchKnowledge(query: string, limit: number): Promise<void> {
     process.exit(1);
   }
 
-  const provider = getProvider();
+  // PR-D: knowledge search must use the ORG provider, not the sessions one.
+  const provider = getOrgProvider();
   const dim = provider.dimensions || 2560;
 
   const store = new VectorStore(orgDbPath, dim);
   await store.init();
+
+  // Dim safety: a misconfigured org provider should fail loudly before we
+  // issue a search whose ranking would be silently corrupted.
+  const dimCheck = await store.checkCompatibleDim();
+  if (!dimCheck.ok) {
+    console.error(
+      JSON.stringify({
+        error: `knowledge search refused: ${dimCheck.reason ?? "org dim incompatible"}`,
+        configured: dimCheck.configured,
+        actual: dimCheck.actual,
+      }),
+    );
+    process.exit(1);
+  }
 
   const expanded = dictcliExpand(query);
   const enrichedQuery =

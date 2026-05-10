@@ -438,6 +438,63 @@ export class VectorStore {
     }
   }
 
+  /** Configured vector dimension passed to the constructor. */
+  get configuredDim(): number {
+    return this.vectorDim;
+  }
+
+  /**
+   * Cross-track safety guard for the QUERY path.
+   *
+   * Returns `{ ok: true }` when the table is empty (nothing to corrupt) or
+   * when the actual stored dim matches the configured dim. Returns
+   * `{ ok: false, reason }` otherwise. Callers in the search/fallback paths
+   * should `await store.checkCompatibleDim()` before issuing `search()` /
+   * `fullTextSearch()` against a store that might have been built with a
+   * different provider.
+   *
+   * This NEVER throws. The query path is user-facing — surface the
+   * mismatch as a diagnostic and skip the affected corpus instead of
+   * killing the whole search.
+   */
+  async checkCompatibleDim(): Promise<{ ok: boolean; reason?: string; actual?: number; configured?: number }> {
+    try {
+      const actual = await this.getActualVectorDim();
+      if (actual === null) return { ok: true, configured: this.vectorDim };
+      if (actual === this.vectorDim) return { ok: true, actual, configured: this.vectorDim };
+      return {
+        ok: false,
+        actual,
+        configured: this.vectorDim,
+        reason: `dim mismatch: ${this.dbPath} stored=${actual}d, configured=${this.vectorDim}d`,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        reason: `dim check failed: ${err instanceof Error ? err.message.slice(0, 120) : String(err)}`,
+      };
+    }
+  }
+
+  /**
+   * Cross-track safety guard for the WRITE/INDEX path.
+   *
+   * Same comparison as `checkCompatibleDim` but THROWS on mismatch. Indexers
+   * MUST call this once after `init()` and before any `add()` / `upsert()` so
+   * a wrong provider never corrupts the LanceDB schema. An empty table
+   * (actual === null) is allowed to pass — that's a fresh DB about to be
+   * filled with the configured dim.
+   */
+  async assertCompatibleDim(): Promise<void> {
+    const check = await this.checkCompatibleDim();
+    if (!check.ok) {
+      throw new Error(
+        `Refusing to write to ${this.dbPath}: ${check.reason} — ` +
+        `this would corrupt the index. Run rebuild or check provider config.`,
+      );
+    }
+  }
+
   /**
    * Drop all data and recreate
    */

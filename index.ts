@@ -18,6 +18,8 @@ import * as fs from "node:fs";
 import { execSync } from "node:child_process";
 import {
   createProviderFromEnv,
+  createSessionProviderFromEnv,
+  createOrgProviderFromEnv,
   CachingProvider,
   type EmbeddingProvider,
 } from "./embedding-provider.js";
@@ -128,48 +130,127 @@ function loadEnvLocal(): void {
   }
 }
 
-function getProvider(): EmbeddingProvider | null {
+/**
+ * Wrap an inner provider for query caching (pi extension is long-lived).
+ * Returns null if the inner factory returned null.
+ */
+function wrapForExtension(inner: EmbeddingProvider | null): EmbeddingProvider | null {
+  return inner ? new CachingProvider(inner) : null;
+}
+
+/**
+ * Build the SESSIONS-track provider for the extension.
+ *
+ * PR-B: reads ANDENKEN_SESSION_* exclusively. The transitional legacy
+ * fallback was removed — operators must migrate to the namespaced env.
+ * Returns null when not configured; caller surfaces a status message
+ * rather than throwing during session_start.
+ */
+function getSessionsProviderForExtension(): EmbeddingProvider | null {
   loadEnvLocal();
-  const inner = createProviderFromEnv();
-  if (!inner) return null;
-  return new CachingProvider(inner); // query cache for pi extension (long-lived process)
+  return wrapForExtension(createSessionProviderFromEnv());
+}
+
+/**
+ * Build the ORG-track provider for the extension.
+ * Reads ANDENKEN_ORG_*, with createOrgProviderFromEnv's built-in legacy
+ * fallback. Independent from sessions — failure on one track must not
+ * cascade to the other.
+ */
+function getOrgProviderForExtension(): EmbeddingProvider | null {
+  loadEnvLocal();
+  return wrapForExtension(createOrgProviderFromEnv());
+}
+
+/**
+ * Legacy single-provider entry kept as a back-compat alias so any old call
+ * site (and the /memory reindex sessions path below) doesn't break in this
+ * PR. New code should pick sessions vs org explicitly.
+ */
+function getProvider(): EmbeddingProvider | null {
+  return getSessionsProviderForExtension();
 }
 
 // --- Extension ---
 
 export default function (pi: ExtensionAPI) {
-  // Provider initialized lazily — dimensions determine store compat
-  let provider: EmbeddingProvider | null = null;
-  function ensureProvider(): EmbeddingProvider {
-    if (!provider) {
-      provider = getProvider();
-      if (!provider) throw new Error("No embedding provider available (set ANDENKEN_PROVIDER=vllm)");
+  // PR-D: provider/store split into two independent tracks. Failure on one
+  // track must not cascade to the other (the design boundary that lets
+  // sessions land on OpenRouter 8B/4096d while org stays on local 4B/2560d).
+  //
+  // Each track has its own provider, its own VectorStore, and its own ready
+  // flag. Cross-track query in session_search → knowledge_search re-embeds
+  // through the OTHER provider; sessions vectors are NEVER passed into the
+  // org store and vice versa.
+
+  let sessionsProvider: EmbeddingProvider | null = null;
+  let orgProvider: EmbeddingProvider | null = null;
+
+  /** Sessions-track provider getter — lazy, throws if not available. */
+  function ensureSessionsProvider(): EmbeddingProvider {
+    if (!sessionsProvider) {
+      sessionsProvider = getSessionsProviderForExtension();
+      if (!sessionsProvider) {
+        throw new Error(
+          "No sessions embedding provider available (set ANDENKEN_SESSION_PROVIDER, " +
+          "or use the legacy ANDENKEN_PROVIDER fallback while migrating)",
+        );
+      }
     }
-    return provider;
+    return sessionsProvider;
   }
 
-  // Dimension determined lazily from provider — stores init on first use
+  /** Org-track provider getter — lazy, throws if not available. */
+  function ensureOrgProvider(): EmbeddingProvider {
+    if (!orgProvider) {
+      orgProvider = getOrgProviderForExtension();
+      if (!orgProvider) {
+        throw new Error(
+          "No org embedding provider available (set ANDENKEN_ORG_PROVIDER, " +
+          "or the legacy ANDENKEN_PROVIDER+ANDENKEN_VLLM_* slot)",
+        );
+      }
+    }
+    return orgProvider;
+  }
+
+  /**
+   * Backward-compat alias for the legacy single-provider call site below
+   * (/memory reindex sessions). Uses the sessions track because reindex
+   * targets the sessions DB.
+   */
+  function ensureProvider(): EmbeddingProvider {
+    return ensureSessionsProvider();
+  }
+
   let sessionStore: VectorStore | null = null;
   let orgStore: VectorStore | null = null;
   const orgDbPath = getOrgDbPath();
 
   function getSessionStore(): VectorStore {
     if (!sessionStore) {
-      const dim = provider?.dimensions ?? 2560;
+      // Fallback dim 2560 only fires when sessionsProvider hasn't been
+      // resolved yet (status hover, /memory before search). After
+      // ensureSessionsProvider runs, store gets the real dim.
+      const dim = sessionsProvider?.dimensions ?? 2560;
       sessionStore = new VectorStore(undefined, dim);
     }
     return sessionStore;
   }
   function getOrgStore(): VectorStore {
     if (!orgStore) {
-      const dim = provider?.dimensions ?? 2560;
+      const dim = orgProvider?.dimensions ?? 2560;
       orgStore = new VectorStore(orgDbPath, dim);
     }
     return orgStore;
   }
 
+  // Each track has its own ready flag. session init failure must not block
+  // org-only operations (knowledge_search) and vice versa.
   let sessionReady = false;
   let orgReady = false;
+  let sessionsInitErr: string | null = null;
+  let orgInitErr: string | null = null;
   let sessionInfoInjected = false;
 
   // --- Session naming + context injection ---
@@ -209,39 +290,54 @@ export default function (pi: ExtensionAPI) {
   });
 
   // --- Initialize on session start ---
+  // PR-D: sessions and org init are independent. A failure on one track
+  // surfaces in status but does not disable the other. The two tools
+  // (session_search, knowledge_search) report their own per-track readiness.
   pi.on("session_start", async (_event, ctx) => {
-    provider = getProvider();
-    if (!provider) {
-      ctx.ui.setStatus(
-        "semantic-memory",
-        "⚠ No embedding provider — semantic memory disabled",
-      );
-      return;
-    }
-    ctx.ui.setStatus("semantic-memory", `📡 ${provider.name} (${provider.dimensions}d) loading...`);
+    let sCount: number | null = null;
+    let oCount: number | null = null;
 
+    // ---- Sessions track ----
     try {
-      await getSessionStore().init();
-      sessionReady = true;
-      const sCount = await getSessionStore().getCount();
-
-      // Org store (if indexed)
-      if (fs.existsSync(orgDbPath)) {
-        await getOrgStore().init();
-        orgReady = true;
-        const oCount = await getOrgStore().getCount();
-        ctx.ui.setStatus(
-          "semantic-memory",
-          `🧠 ${sCount} sessions + 📚 ${oCount} org chunks`,
-        );
+      sessionsProvider = getSessionsProviderForExtension();
+      if (sessionsProvider) {
+        await getSessionStore().init();
+        sessionReady = true;
+        sCount = await getSessionStore().getCount();
       } else {
-        ctx.ui.setStatus("semantic-memory", `🧠 ${sCount} session chunks`);
+        sessionsInitErr = "no sessions provider configured";
       }
     } catch (err) {
-      ctx.ui.setStatus(
-        "semantic-memory",
-        `⚠ Memory init failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      sessionsInitErr = err instanceof Error ? err.message.slice(0, 200) : String(err);
+    }
+
+    // ---- Org track (independent) ----
+    try {
+      if (fs.existsSync(orgDbPath)) {
+        orgProvider = getOrgProviderForExtension();
+        if (orgProvider) {
+          await getOrgStore().init();
+          orgReady = true;
+          oCount = await getOrgStore().getCount();
+        } else {
+          orgInitErr = "no org provider configured";
+        }
+      }
+      // Org DB absent → not an error; knowledge_search will report when called.
+    } catch (err) {
+      orgInitErr = err instanceof Error ? err.message.slice(0, 200) : String(err);
+    }
+
+    // ---- Status line summarizes whatever subset came up ----
+    const parts: string[] = [];
+    if (sessionReady && sCount !== null) parts.push(`🧠 ${sCount} sessions`);
+    else if (sessionsInitErr) parts.push(`⚠ sessions: ${sessionsInitErr}`);
+    if (orgReady && oCount !== null) parts.push(`📚 ${oCount} org chunks`);
+    else if (orgInitErr) parts.push(`⚠ org: ${orgInitErr}`);
+    if (parts.length === 0) {
+      ctx.ui.setStatus("semantic-memory", "⚠ no embedding providers — semantic memory disabled");
+    } else {
+      ctx.ui.setStatus("semantic-memory", parts.join(" + "));
     }
   });
 
@@ -279,7 +375,7 @@ export default function (pi: ExtensionAPI) {
     }),
 
     async execute(_toolCallId, params) {
-      const p = ensureProvider();
+      const sessP = ensureSessionsProvider();
 
       // Lazy init
       if (!sessionReady) {
@@ -291,6 +387,24 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
+      // PR-D: dim safety MUST run before any sessP.embedQuery() call.
+      //
+      // Same scenario as cli.ts searchSessions: PR-B will switch sessions to
+      // OpenRouter qwen/qwen3-embedding-8b (4096d). If data/sessions.lance
+      // still holds the old 2560d index, an unguarded path would trigger a
+      // paid OpenRouter call first, then LanceDB would silently fall back to
+      // FTS-only (store.ts:237). Throw early so operators see the rebuild
+      // requirement instead of paying for embeddings against a stale index.
+      // Empty/fresh DB passes through.
+      const sessDimCheck = await getSessionStore().checkCompatibleDim();
+      if (!sessDimCheck.ok) {
+        throw new Error(
+          `session_search refused: ${sessDimCheck.reason ?? "sessions dim incompatible"}. ` +
+          `Configured ${sessDimCheck.configured}d, stored ${sessDimCheck.actual}d. ` +
+          `Run scripts/rebuild-sessions-full.sh first or fix ANDENKEN_SESSION_*.`,
+        );
+      }
+
       const limit = params.limit ?? 10;
 
       // 3층 dictcli expand — 한글 쿼리 확장
@@ -300,7 +414,7 @@ export default function (pi: ExtensionAPI) {
         : params.query;
 
       const candidates = Math.min(limit * 4, 200); // openclaw candidateMultiplier
-      const queryVector = await p.embedQuery(enrichedQuery);
+      const queryVector = await sessP.embedQuery(enrichedQuery);
       const vectorResults = await getSessionStore().search(queryVector, candidates);
       const bm25Query = expandQueryForBM25(enrichedQuery); // include dictcli expand terms in FTS
       const ftsResults = await getSessionStore().fullTextSearch(bm25Query, candidates);
@@ -358,26 +472,59 @@ export default function (pi: ExtensionAPI) {
         results = results.filter((r) => r.source === sourceFilter);
       }
 
-      // 자동 폴백: session 결과가 빈약하면 knowledge_search도 실행
+      // PR-D cross-track fallback (knowledge_search graceful degrade).
+      //
+      // When sessions results are thin, supplement with hits from the org
+      // corpus. Two safety boundaries:
+      //
+      //   1. Re-embed the query through orgProvider, NOT through sessP.
+      //      sessions and org may be on different dims (4096 vs 2560).
+      //      Passing a sessions vector into orgStore.search would corrupt
+      //      ranking or trigger a LanceDB error.
+      //
+      //   2. Confirm dim compatibility between orgStore (DB truth) and
+      //      orgProvider (configured dim). If mismatched, skip the fallback
+      //      and surface a diagnostic — sessions results still return.
+      //
+      // session_search itself NEVER fails because of org-side issues.
       const topScore = results[0]?.score ?? 0;
       let fallbackUsed = false;
-      if (orgReady && (results.length < 3 || topScore < 0.005)) {
-        const orgCandidates = Math.min(limit * 4, 200);
-        const orgQueryVector = await p.embedQuery(enrichedQuery);
-        const orgVec = await getOrgStore().search(orgQueryVector, orgCandidates, 0.05);
-        const orgFts = await getOrgStore().fullTextSearch(expandQueryForBM25(enrichedQuery), orgCandidates);
-          const orgResults = await retrieve(params.query, orgVec, orgFts, {
-            vectorWeight: 0.7,
-            bm25Weight: 0.3,
-            recencyHalfLifeDays: 90,
-            minScore: 0.05,
-            mmr: { enabled: true, lambda: 0.7 },
-            mergeStrategy: "weighted" as const,
-          });
-          if (orgResults.length > 0) {
-            results = [...results.slice(0, limit - 3), ...orgResults.slice(0, 3)];
-            fallbackUsed = true;
+      let fallbackDiagnostic: string | null = null;
+      const wantsFallback = results.length < 3 || topScore < 0.005;
+      if (wantsFallback) {
+        if (!orgReady) {
+          fallbackDiagnostic = "knowledge fallback skipped: org store not ready";
+        } else {
+          let orgP: EmbeddingProvider | null = null;
+          try {
+            orgP = ensureOrgProvider();
+          } catch (err) {
+            fallbackDiagnostic = `knowledge fallback skipped: ${err instanceof Error ? err.message.slice(0, 120) : String(err)}`;
           }
+          if (orgP) {
+            const dimCheck = await getOrgStore().checkCompatibleDim();
+            if (!dimCheck.ok) {
+              fallbackDiagnostic = `knowledge fallback skipped: ${dimCheck.reason ?? "org dim incompatible"}`;
+            } else {
+              const orgCandidates = Math.min(limit * 4, 200);
+              const orgQueryVector = await orgP.embedQuery(enrichedQuery);
+              const orgVec = await getOrgStore().search(orgQueryVector, orgCandidates, 0.05);
+              const orgFts = await getOrgStore().fullTextSearch(expandQueryForBM25(enrichedQuery), orgCandidates);
+              const orgResults = await retrieve(params.query, orgVec, orgFts, {
+                vectorWeight: 0.7,
+                bm25Weight: 0.3,
+                recencyHalfLifeDays: 90,
+                minScore: 0.05,
+                mmr: { enabled: true, lambda: 0.7 },
+                mergeStrategy: "weighted" as const,
+              });
+              if (orgResults.length > 0) {
+                results = [...results.slice(0, limit - 3), ...orgResults.slice(0, 3)];
+                fallbackUsed = true;
+              }
+            }
+          }
+        }
       }
 
       const finalResults = results.slice(0, limit);
@@ -388,6 +535,8 @@ export default function (pi: ExtensionAPI) {
       );
       if (fallbackUsed) {
         output.content[0].text += "\n\n(⚡ session 결과 부족 → knowledge_search 폴백 포함)";
+      } else if (fallbackDiagnostic) {
+        output.content[0].text += `\n\n(ℹ ${fallbackDiagnostic})`;
       }
       return output;
     },
@@ -422,7 +571,10 @@ export default function (pi: ExtensionAPI) {
     }),
 
     async execute(_toolCallId, params) {
-      const p = ensureProvider();
+      // PR-D: knowledge_search uses the ORG provider exclusively. Even if
+      // sessionsProvider/sessionsStore are entirely broken, knowledge_search
+      // must still work — that is the independent-init invariant.
+      const orgP = ensureOrgProvider();
 
       // Lazy init — org DB may exist but session_start lost the race with env-loader
       if (!orgReady) {
@@ -437,6 +589,20 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
+      // Dim safety: an embedding-provider misconfiguration should produce a
+      // clear error rather than silently fall back to FTS-only via the
+      // VectorStore's existing dim-mismatch warning. checkCompatibleDim
+      // returns ok for empty tables (fresh DB), so this guard does not block
+      // first-run scenarios.
+      const dimCheck = await getOrgStore().checkCompatibleDim();
+      if (!dimCheck.ok) {
+        throw new Error(
+          `knowledge_search refused: ${dimCheck.reason ?? "org dim incompatible"}. ` +
+          `Configured ${dimCheck.configured}d, stored ${dimCheck.actual}d. ` +
+          `Run rebuild or fix ANDENKEN_ORG_*.`,
+        );
+      }
+
       const limit = params.limit ?? 10;
 
       // 3층 dictcli expand — 한글 쿼리 확장
@@ -446,7 +612,7 @@ export default function (pi: ExtensionAPI) {
         : params.query;
 
       const candidates = Math.min(limit * 4, 200); // openclaw candidateMultiplier
-      const queryVector = await p.embedQuery(enrichedQuery);
+      const queryVector = await orgP.embedQuery(enrichedQuery);
       const vectorResults = await getOrgStore().search(queryVector, candidates, 0.05);
       const bm25Query = expandQueryForBM25(enrichedQuery); // include dictcli expand terms in FTS
       const ftsResults = await getOrgStore().fullTextSearch(bm25Query, candidates);
@@ -639,6 +805,10 @@ async function indexSessions(
   const files = findSessionFiles();
   if (force) await store.reset();
   await store.ensureTable();
+
+  // PR-D safety: refuse to write to a store whose actual dim doesn't match
+  // the configured provider dim. Mirrors indexer.ts (CLI write path).
+  await store.assertCompatibleDim();
 
   const indexed = force ? new Set<string>() : await store.getIndexedFiles();
   const toIndex = files.filter((f) => !indexed.has(f));

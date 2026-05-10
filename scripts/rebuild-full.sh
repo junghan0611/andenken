@@ -1,48 +1,31 @@
 #!/usr/bin/env bash
-# Full single-GPU rebuild — MUST run on or with tunnel to the GPU server.
-# Intentionally overrides ANDENKEN_VLLM_* from ~/.env.local so query-time
-# OpenRouter defaults don't leak into the indexing path (cost + rate-limit risk).
-# Per ~/AGENTS.md: "GPU 서버 인덱싱 의무".
+# DEPRECATED — mixed sessions+org rebuild.
 #
-# NOTE (2026-04-30): gpu2i was repurposed as VOS chat-completion node.
-# Embedding now runs on gpu1i alone. See scripts/rebuild-incremental.sh
-# for the dim safety probe; full rebuild assumes operator has verified
-# the endpoint manually before destroying the index.
+# Sessions and Org now use separate provider namespaces (ANDENKEN_SESSION_*
+# vs ANDENKEN_ORG_*) and may run on different dims (sessions 4096d via
+# OpenRouter, org 2560d via local gpu1i). A single mixed-rebuild script
+# can no longer apply one set of env vars to both tracks safely, and would
+# either leak paid endpoints into org or stale endpoints into sessions.
+#
+# Replacements:
+#   scripts/rebuild-sessions-full.sh   — sessions full rebuild (4096d)
+#   (org full rebuild)                 — manual:
+#                                        export ANDENKEN_ORG_PROVIDER=vllm
+#                                        export ANDENKEN_ORG_ENDPOINT=...
+#                                        pnpm exec tsx indexer.ts org --force
+#                                        (or set legacy ANDENKEN_VLLM_* and run the same)
+#
+# This script intentionally aborts. See ROADMAP.md "변화 기록" / AGENTS.md
+# for cutover context.
 set -euo pipefail
-
-cd /home/junghan/repos/gh/andenken
-
-export ANDENKEN_PROVIDER=vllm
-export ANDENKEN_VLLM_ENDPOINT=http://localhost:18000
-export ANDENKEN_VLLM_MODEL=/storage/models/vllm/default
-export ANDENKEN_VLLM_PRESET=Qwen/Qwen3-Embedding-4B
-unset ANDENKEN_VLLM_API_KEY
-export INDEX_CONCURRENCY=4
-export ANDENKEN_EMBED_BATCH=500
-
-# Pre-flight dim check before destroying the existing index.
-DIM=$(curl -sf -m 10 "http://localhost:18000/v1/embeddings" \
-        -H "Content-Type: application/json" \
-        -d '{"model":"/storage/models/vllm/default","input":"safety probe"}' \
-      | python3 -c 'import sys,json; print(len(json.load(sys.stdin)["data"][0]["embedding"]))' 2>/dev/null \
-      || echo "0")
-if [ "$DIM" != "2560" ]; then
-  echo "❌ ABORT: endpoint returned dim=$DIM (expected 2560)"
-  echo "   Refusing to destroy LanceDB index against an unknown model."
-  exit 1
-fi
-echo "✅ embedding dim=$DIM — safe to rebuild"
-
-echo "== $(date --iso-8601=seconds) full rebuild start =="
-
-echo "== sessions reset =="
-rm -rf data/sessions.lance
-pnpm exec tsx indexer.ts sessions --force
-pnpm exec tsx indexer.ts verify sessions
-
-echo "== org reset =="
-rm -rf data/org.lance data/org-manifest.json
-pnpm exec tsx indexer.ts org --force
-pnpm exec tsx indexer.ts verify org
-
-echo "== $(date --iso-8601=seconds) full rebuild done =="
+echo "❌ scripts/rebuild-full.sh is deprecated."
+echo
+echo "  Sessions and Org now use separate provider namespaces; a single"
+echo "  mixed-rebuild script is no longer safe."
+echo
+echo "  Use:"
+echo "    scripts/rebuild-sessions-full.sh   # sessions 4096d (OpenRouter 8B)"
+echo "    # org full rebuild: export ANDENKEN_ORG_* + pnpm exec tsx indexer.ts org --force"
+echo
+echo "  See AGENTS.md and ROADMAP.md for context."
+exit 1

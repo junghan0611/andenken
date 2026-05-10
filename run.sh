@@ -33,8 +33,24 @@ Usage: ./run.sh <command> [args]
   cleanup [sessions|org]      Dedup + orphan removal + manifest repair + compact
   cleanup [target] --dry-run  Dry-run (report only)
   verify [sessions|org|all]   Post-indexing integrity check
-  status                      Show index statistics
-  estimate [sessions|org|all] Dry-run cost estimate before indexing
+  status                      Show index statistics (text)
+  status:json                 Show index statistics (machine-readable JSON)
+  estimate [sessions|org|all] Dry-run cost estimate (Gemini-priced, legacy)
+  estimate:sessions [--full]  PR-B: sessions OpenRouter 8B estimate (API 0)
+                              default = INCREMENTAL (manifest-driven)
+                              --full  = whole corpus
+                              price: ANDENKEN_SESSION_PRICE_PER_M_TOKENS
+                                  > OPENROUTER_QWEN_8B_PRICE > 0.01
+
+=== Sessions full rebuild / sync (PR-B) ===
+  rebuild:sessions[:dry]      scripts/rebuild-sessions-full.sh [--dry-run]
+                              estimate → confirm → preflight → destroy → rebuild
+  sync:sessions [--push]      scripts/sync-sessions.sh
+                              wrong-dim → API0 abort
+                              to_index=0 → API0 exit
+                              else → preflight 1 + incremental
+  rebuild:full                ❌ DEPRECATED (mixed sessions+org)
+  rebuild:incremental         ❌ DEPRECATED (mixed sessions+org)
 
 === Export ===
   export:org [flags]          Export org → memory-md (~/.cache/andenken-qmd)
@@ -108,6 +124,8 @@ case "${1:-help}" in
     shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts verify "${1:-all}" ;;
   status)
     load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts status ;;
+  status:json)
+    load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts status --json ;;
 
   # === Export ===
   export:org)
@@ -160,10 +178,44 @@ case "${1:-help}" in
     echo "  JINA:    ${JINA_API_KEY:+SET (${#JINA_API_KEY}ch)}"
     echo "  Dir:     $SCRIPT_DIR"
     echo ""
+    echo "  --- PR-B sessions track (ANDENKEN_SESSION_*) ---"
+    echo "  PROVIDER:    ${ANDENKEN_SESSION_PROVIDER:-(unset — sessions search will fail)}"
+    echo "  ENDPOINT:    ${ANDENKEN_SESSION_ENDPOINT:-(unset)}"
+    echo "  MODEL:       ${ANDENKEN_SESSION_MODEL:-(unset)}"
+    echo "  DIMENSIONS:  ${ANDENKEN_SESSION_DIMENSIONS:-(unset)}"
+    echo "  API_KEY:     ${ANDENKEN_SESSION_API_KEY:+SET (${#ANDENKEN_SESSION_API_KEY}ch)}"
+    echo "  PAID_REMOTE: ${ANDENKEN_SESSION_PAID_REMOTE:-0}"
+    echo "  PRICE/M:     \$${ANDENKEN_SESSION_PRICE_PER_M_TOKENS:-(unset, default 0.01)}"
+    echo ""
+    echo "  --- legacy / org track (ANDENKEN_VLLM_* + ANDENKEN_ORG_*) ---"
+    echo "  ANDENKEN_PROVIDER (legacy):     ${ANDENKEN_PROVIDER:-(unset)}"
+    echo "  ANDENKEN_VLLM_ENDPOINT (legacy): ${ANDENKEN_VLLM_ENDPOINT:-(unset)}"
+    echo "  ANDENKEN_ORG_PROVIDER:          ${ANDENKEN_ORG_PROVIDER:-(unset — falls back to legacy ANDENKEN_VLLM_*)}"
+    echo ""
+    echo "  ↳ Sessions search (pi extension, cli.ts search-sessions) requires"
+    echo "    ANDENKEN_SESSION_* in ~/.env.local. PR-B removed the legacy"
+    echo "    ANDENKEN_VLLM_* fallback for sessions track."
+    echo "  ↳ Org indexing/search still accepts legacy ANDENKEN_VLLM_* for"
+    echo "    backward-compat."
+    echo ""
     cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts status 2>/dev/null || echo "  (indexer not available)"
     ;;
   estimate)
     shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx estimate.ts "${1:-all}" ;;
+  estimate:sessions)
+    shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts estimate sessions "$@" ;;
+
+  # === PR-B sessions sync / rebuild ===
+  rebuild:sessions)
+    shift; load_env; cd "$SCRIPT_DIR" && bash scripts/rebuild-sessions-full.sh "$@" ;;
+  rebuild:sessions:dry)
+    load_env; cd "$SCRIPT_DIR" && bash scripts/rebuild-sessions-full.sh --dry-run ;;
+  sync:sessions)
+    shift; load_env; cd "$SCRIPT_DIR" && bash scripts/sync-sessions.sh "$@" ;;
+  rebuild:full)
+    cd "$SCRIPT_DIR" && bash scripts/rebuild-full.sh ;;
+  rebuild:incremental)
+    cd "$SCRIPT_DIR" && bash scripts/rebuild-incremental.sh ;;
 
   *)
     echo "Unknown: $1"; help; exit 1 ;;

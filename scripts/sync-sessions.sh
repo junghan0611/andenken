@@ -1,108 +1,131 @@
 #!/usr/bin/env bash
-# sync-sessions.sh — fast sessions-only incremental for 30min/1h cron.
+# sync-sessions.sh — sessions-only incremental, OpenRouter Qwen3-Embedding-8B 4096d.
 #
-# Auto-selects embedding backend in this order:
-#   1. localhost:11434 (ollama) — preferred when laptop is offline / on battery
-#   2. ssh gpu1i tunnel (vLLM RTX 5080) — preferred when at desk / wired
+# Operating cadence: hourly cron (30min~1h). Manifest-driven; never destroys
+# the index. Full rebuilds go through scripts/rebuild-sessions-full.sh.
 #
-# Both backends emit Qwen3-Embedding-4B 2560d. Index is cross-compatible.
+# Safety boundaries (PR-B):
+#   - Wrong sessions DB dim → API 0 abort. (operator must run rebuild-sessions-full.sh first)
+#   - to_index == 0          → API 0 exit.  (no work, no probe)
+#   - to_index >= 1          → preflight 1 API call, then incremental embed.
+#   - org track              → never touched. This script never reads/writes
+#                              ANDENKEN_ORG_*, ANDENKEN_VLLM_*, or org.lance.
+#
+# Env scope notice:
+#   This script exports ANDENKEN_SESSION_* in its own process so indexing
+#   succeeds. Long-lived SEARCH consumers (pi extension, cli.ts) load env at
+#   their own startup — they need ANDENKEN_SESSION_* in ~/.env.local (or the
+#   parent shell) to use session_search after a track switch. See
+#   scripts/rebuild-sessions-full.sh completion notice for details.
 #
 # Usage:
-#   ./scripts/sync-sessions.sh             # sessions-only, no oracle push
-#   ./scripts/sync-sessions.sh --push      # also rsync to oracle
-#   ./scripts/sync-sessions.sh --backend ollama   # force ollama
-#   ./scripts/sync-sessions.sh --backend gpu1i    # force gpu1i tunnel
+#   ./scripts/sync-sessions.sh             # incremental, no oracle push
+#   ./scripts/sync-sessions.sh --push      # also rsync sessions.lance → oracle
 set -euo pipefail
-
 cd "$(dirname "$0")/.."   # repo root
 
 # --- args ---
 PUSH=0
-BACKEND="auto"
 while [ $# -gt 0 ]; do
   case "$1" in
     --push) PUSH=1; shift ;;
-    --backend) BACKEND="$2"; shift 2 ;;
-    --help|-h) sed -n '2,15p' "$0"; exit 0 ;;
+    --help|-h) sed -n '2,18p' "$0"; exit 0 ;;
     *) echo "unknown arg: $1"; exit 2 ;;
   esac
 done
 
-# --- backend selection ---
-ollama_up() { curl -sf -m 2 http://localhost:11434/api/version > /dev/null; }
-gpu1i_up()  { curl -sf -m 2 http://localhost:18000/health > /dev/null; }
+# --- env: SESSIONS namespace ONLY ---
+# Org / legacy env: never set, never unset, never read by this script.
+# Price precedence: explicit session env > OpenRouter alias > 0.01 default.
+#
+# API KEY TIMING (PR-B v2 boundary):
+#   - The key is *not* required for the API0 paths below (status:json read,
+#     wrong-dim abort, to_index=0 exit). We weak-set it here so those paths
+#     work key-less.
+#   - The strict `:?` check happens just before Step 4 (preflight). Indexing
+#     in Step 5 reuses the same exported value.
+export ANDENKEN_SESSION_PROVIDER=openrouter
+export ANDENKEN_SESSION_ENDPOINT=https://openrouter.ai/api
+export ANDENKEN_SESSION_MODEL=qwen/qwen3-embedding-8b
+export ANDENKEN_SESSION_PRESET=Qwen/Qwen3-Embedding-8B
+export ANDENKEN_SESSION_DIMENSIONS=4096
+export ANDENKEN_SESSION_API_KEY="${OPENROUTER_API_KEY:-}"   # weak: empty allowed for API0 paths
+export ANDENKEN_SESSION_MAX_BATCH_SIZE=64
+export ANDENKEN_SESSION_TIMEOUT_MS=60000
+export ANDENKEN_SESSION_PAID_REMOTE=1
+export ANDENKEN_SESSION_PRICE_PER_M_TOKENS="${ANDENKEN_SESSION_PRICE_PER_M_TOKENS:-${OPENROUTER_QWEN_8B_PRICE:-0.01}}"
 
-ensure_gpu1i() {
-  gpu1i_up && return 0
-  ssh -fN -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
-      -o ExitOnForwardFailure=yes \
-      -L 18000:localhost:8000 gpu1i
-  gpu1i_up
-}
+# --- Step 1: status --json (API 0 — read DB schema + manifest) ---
+# One JSON read gives us actual_dim and to_index. We never spawn `tsx -e`
+# with top-level await here; the env's tsx CJS output has bitten us before.
+STATUS_JSON=$(pnpm exec tsx indexer.ts status --json 2>/dev/null)
 
-probe_dim() {
-  local url="$1"; local model="$2"
-  curl -sf -m 10 "$url/v1/embeddings" \
-    -H "Content-Type: application/json" \
-    -d "{\"model\":\"$model\",\"input\":\"safety probe\"}" \
-    | python3 -c 'import sys,json; print(len(json.load(sys.stdin)["data"][0]["embedding"]))' \
-    2>/dev/null || echo "0"
-}
+ACTUAL_DIM=$(printf '%s' "$STATUS_JSON" | python3 -c '
+import sys, json
+d = json.loads(sys.stdin.read())
+v = d.get("sessions", {}).get("actual_dim")
+print("" if v is None else v)
+')
 
-case "$BACKEND" in
-  auto)
-    if ollama_up; then BACKEND=ollama
-    elif ensure_gpu1i; then BACKEND=gpu1i
-    else echo "❌ no backend available (ollama down, gpu1i unreachable)"; exit 1
-    fi
-    ;;
-  ollama) ollama_up || { echo "❌ ollama not running on :11434"; exit 1; } ;;
-  gpu1i)  ensure_gpu1i || { echo "❌ gpu1i tunnel failed"; exit 1; } ;;
-  *) echo "unknown backend: $BACKEND"; exit 2 ;;
-esac
+TO_INDEX=$(printf '%s' "$STATUS_JSON" | python3 -c '
+import sys, json
+d = json.loads(sys.stdin.read())
+print(d.get("sessions", {}).get("to_index", 0))
+')
 
-# --- env per backend ---
-export ANDENKEN_PROVIDER=vllm
-export ANDENKEN_VLLM_PRESET=Qwen/Qwen3-Embedding-4B
-unset ANDENKEN_VLLM_API_KEY
-export INDEX_CONCURRENCY=4
-export ANDENKEN_EMBED_BATCH=200
-
-case "$BACKEND" in
-  ollama)
-    export ANDENKEN_VLLM_ENDPOINT=http://localhost:11434
-    export ANDENKEN_VLLM_MODEL=qwen3-embedding:4b
-    # ollama on laptop is slower per request; allow up to 5min per batch
-    # so a single large session (hundreds of messages) doesn't time out.
-    export ANDENKEN_VLLM_TIMEOUT_MS=300000
-    # smaller batch cuts both per-request memory and worst-case wait
-    export ANDENKEN_EMBED_BATCH=64
-    ;;
-  gpu1i)
-    export ANDENKEN_VLLM_ENDPOINT=http://localhost:18000
-    export ANDENKEN_VLLM_MODEL=/storage/models/vllm/default
-    ;;
-esac
-
-DIM=$(probe_dim "$ANDENKEN_VLLM_ENDPOINT" "$ANDENKEN_VLLM_MODEL")
-if [ "$DIM" != "2560" ]; then
-  echo "❌ ABORT: $BACKEND returned dim=$DIM (expected 2560)"
+# --- Step 2: wrong-dim guard (API 0 abort) ---
+# DB exists with non-4096d → operator must do a destroy + full rebuild.
+# This is the most important safety boundary in PR-B sessions cutover.
+if [ -n "$ACTUAL_DIM" ] && [ "$ACTUAL_DIM" != "4096" ]; then
+  echo "❌ sessions DB is ${ACTUAL_DIM}d; run scripts/rebuild-sessions-full.sh first"
+  echo "   (no API call was made)"
   exit 1
 fi
 
+# --- Step 3: no-work guard (API 0 exit) ---
+if [ "$TO_INDEX" = "0" ]; then
+  echo "✅ sessions: to-index=0 — no work, no API call"
+  exit 0
+fi
+
+# --- Step 4: preflight dim probe (API 1 — only when there is work) ---
+# API key strictly required from this point. No earlier failure for API0 paths.
+: "${OPENROUTER_API_KEY:?OPENROUTER_API_KEY required for preflight / indexing}"
+export ANDENKEN_SESSION_API_KEY="$OPENROUTER_API_KEY"
+
+echo "preflight probe: 1 API call"
+DIM=$(curl -sf -m 30 "$ANDENKEN_SESSION_ENDPOINT/v1/embeddings" \
+  -H "Authorization: Bearer $ANDENKEN_SESSION_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{\"model\":\"$ANDENKEN_SESSION_MODEL\",\"input\":\"safety probe\"}" \
+  | python3 -c 'import sys,json; print(len(json.load(sys.stdin)["data"][0]["embedding"]))' 2>/dev/null \
+  || echo "0")
+if [ "$DIM" != "4096" ]; then
+  echo "❌ preflight dim=$DIM (expected 4096) — aborting"
+  exit 1
+fi
+echo "✅ preflight dim=4096"
+
+# --- Step 5: incremental indexing (manifest-driven; no --force) ---
 START=$(date --iso-8601=seconds)
-echo "== $START sync-sessions backend=$BACKEND =="
+echo "== $START sync-sessions: incremental embedding (to_index=$TO_INDEX) =="
+INDEX_OK=0
+if pnpm exec tsx indexer.ts sessions; then
+  INDEX_OK=1
+fi
 
-# --- index sessions only (manifest-driven incremental) ---
-pnpm exec tsx indexer.ts sessions
-
-# --- optional oracle push ---
+# --- Step 6: optional oracle push (only on successful index) ---
 if [ "$PUSH" = "1" ]; then
-  echo "== rsync sessions.lance → oracle =="
-  rsync -az --delete \
-    data/sessions.lance/ \
-    oracle:/home/junghan/repos/gh/andenken/data/sessions.lance/ \
-    2>&1 | tail -3
+  if [ "$INDEX_OK" = "1" ]; then
+    echo "== rsync sessions.lance → oracle =="
+    rsync -az --delete \
+      data/sessions.lance/ \
+      oracle:/home/junghan/repos/gh/andenken/data/sessions.lance/ \
+      2>&1 | tail -3
+  else
+    echo "⚠ skipping --push: index step did not complete cleanly"
+  fi
 fi
 
 echo "== $(date --iso-8601=seconds) done =="
+[ "$INDEX_OK" = "1" ]
