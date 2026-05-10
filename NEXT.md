@@ -4,91 +4,88 @@
 > 이 파일은 **andenken 담당자가 지금 진행 중인 트랙별 다음 한 가지**를 잡는다.
 > 현재 우선순위는 **sessions embedding**이다. org/qmd는 별도 트랙이며 지금 섞지 않는다.
 
-## 트랙 A — sessions embedding: 8B/4096 cutover 먼저, 그 다음 sanitization
+## 트랙 A — sessions embedding: 다음은 OpenClaw sanitization
 
-### 현재 결정
+### A1 완료 — 8B/4096 cutover
 
-1. **먼저 현재 인프라 변경을 commit/push한다.**
-2. **A1 — sessions 8B/4096 full rebuild를 진행하고 검토한다.**
-3. **A2 — 그 다음 OpenClaw식 sanitization을 이식한다.**
+**완료일**: 2026-05-10
 
-이 순서의 이유: 현재 `ANDENKEN_SESSION_*`는 OpenRouter Qwen3-Embedding-8B
-4096d로 전환됐고, 기존 `data/sessions.lance`는 2560d라 검색/증분이 의도적으로
-막힌 상태다. 먼저 8B로 sessions 검색을 복구하고, 비용이 작으므로 sanitization
-이후 한 번 더 rebuild하는 쪽이 운영상 안전하다.
+Sessions track을 OpenRouter Qwen3-Embedding-8B 4096d로 전환했다.
 
-### 완료된 구현/검수
+결과:
 
-**PR-A v3 — provider namespace split**
-- `ANDENKEN_SESSION_*` / `ANDENKEN_ORG_*` 분리.
-- sessions는 legacy `ANDENKEN_VLLM_*` fallback 제거.
-- org는 2560d backward-compat fallback 유지.
-- `openrouter` alias는 namespaced surface에서만 허용.
-- `$VAR` placeholder 처리와 invalid provider fail-fast 보강.
+| 항목 | 값 |
+|------|----|
+| commit | `c618a73 feat(sessions): add OpenRouter 8B cutover path` |
+| model | `qwen/qwen3-embedding-8b` |
+| dim | 4096d |
+| chunks | 28,206 (sync 후) |
+| full rebuild cost | ~$0.063 |
+| full rebuild duration | 31.7분 |
+| errors | 0 |
+| org | 2560d 유지, 무접촉 |
 
-**PR-D — dim guard / cross-track safety**
-- sessions/org store dim mismatch 시 main search는 embed 전 fail-loud.
-- `session_search → knowledge_search` fallback은 org provider로 재-embed.
-- fallback org mismatch/unavailable은 sessions 결과를 죽이지 않고 diagnostic 처리.
-- write/index path는 `assertCompatibleDim()`으로 잘못된 dim 쓰기 방지.
+검증:
 
-**PR-B.1~B.3 — OpenRouter 8B sessions path**
-- `rebuild-sessions-full.sh`: estimate(API0) → `yes` → preflight(API1) → sessions-only destroy → paid full rebuild → verify.
-- `sync-sessions.sh`: OpenRouter 8B incremental-only. wrong dim API0 abort, to-index=0 API0 exit.
-- `estimate:sessions`: API0 cost estimate. 현재 full estimate 약 **$0.063**.
-- direct `indexer.ts sessions --force`는 paidRemote guard로 차단.
-- mixed `rebuild-full.sh` / `rebuild-incremental.sh`는 deprecated abort.
-- `verify`는 target-aware dim 사용.
+- `sessions.actual_dim = 4096`
+- `org.actual_dim = 2560`
+- `session_search` smoke: `openclaw session embedding` top 5 모두 직접 관련
+- `sync-sessions.sh` incremental: rebuild 중 생긴 stale/new 처리, 비용 ~$0.0005
+- `to_index`는 live session drift 때문에 0이 아닐 수 있음. 운영상 다음 sync가 처리.
 
-### 현재 env / DB 상태
+운영 경로:
 
-`~/.env.local`:
+- full rebuild: `./scripts/rebuild-sessions-full.sh`
+- incremental: `./scripts/sync-sessions.sh`
+- estimate: `./run.sh estimate:sessions [--full]`
+- status: `./run.sh status:json`
 
-- sessions: `ANDENKEN_SESSION_PROVIDER=openrouter`, `qwen/qwen3-embedding-8b`, `4096d`, `$0.01/M`.
-- org: `ANDENKEN_ORG_PROVIDER=vllm`, `qwen/qwen3-embedding-4b`, `2560d`, `$0.02/M`.
-- legacy `ANDENKEN_VLLM_*`: backward-compat only, 4B/2560.
+안전 경계:
 
-DB:
+- sessions legacy `ANDENKEN_VLLM_*` fallback 제거.
+- sessions/org provider 분리.
+- dim mismatch면 main search/index가 embed 전에 refuse.
+- paid full rebuild는 `ANDENKEN_ALLOW_PAID_FULL_REBUILD=1` guard 필요.
 
-- sessions DB actual dim: **2560d** → provider 4096d와 mismatch. search/index는 rebuild 전 refuse.
-- org DB actual dim: **2560d** → org provider와 match.
+### 지금 할 일 — A2 read-only mapping
 
-### A1 — 지금 할 일: 8B full rebuild + 검토
+OpenClaw식 sanitization 이식 전에 **read-only mapping**을 먼저 한다.
 
-1. Commit/push current infra changes.
-2. Full rebuild dry-run 확인:
-   ```bash
-   ./scripts/rebuild-sessions-full.sh --dry-run
-   ```
-3. GLG가 비용/범위 확인 후 실제 실행:
-   ```bash
-   ./scripts/rebuild-sessions-full.sh
-   # prompt에서 정확히: yes
-   ```
-4. rebuild 후 확인:
-   ```bash
-   ./run.sh status:json
-   ```
-   기대: `sessions.actual_dim = 4096`, org는 2560 유지.
-5. `session_search` smoke query 몇 개로 검색 복구 확인.
+목표: andenken `session-indexer.ts`와 OpenClaw session memory export sanitization을 1:1로 비교하고,
+무엇을 이식할지 범위를 좁힌다. 코드 변경은 아직 하지 않는다.
 
-### A1 검토 기준
-
-- full rebuild 비용이 estimate와 같은 범위인지 (`~$0.06~0.08`).
-- `sessions.actual_dim`이 4096인지.
-- org DB/manifest가 변하지 않았는지.
-- 기존 주요 쿼리에서 검색 결과가 정상적으로 나오는지.
-- 30분/1시간 운영 경로는 `sync-sessions.sh` incremental-only인지.
-
-### A2 — 다음: OpenClaw sanitization 이식
-
-A1 검토가 끝난 뒤 진행한다. 이 단계가 **입력 품질 개선**이다.
-
-참고 본체는 `transcript-rewrite.ts`가 아니라 OpenClaw memory export 쪽:
+핵심 참고 파일:
 
 - `/home/junghan/repos/3rd/openclaw/packages/memory-host-sdk/src/host/session-files.ts`
 
-이식 후보:
+보조 참고:
+
+- `/home/junghan/repos/3rd/openclaw/packages/memory-host-sdk/src/host/openclaw-runtime-session.ts`
+- `/home/junghan/repos/3rd/openclaw/src/agents/internal-runtime-context.ts`
+- `/home/junghan/repos/3rd/openclaw/src/auto-reply/reply/strip-inbound-meta.ts`
+- `/home/junghan/repos/3rd/openclaw/src/agents/pi-embedded-runner/tool-result-truncation.ts`
+- `/home/junghan/repos/3rd/openclaw/src/agents/pi-embedded-runner/transcript-rewrite.ts`
+
+주의: `transcript-rewrite.ts` / `tool-result-truncation.ts`는 live transcript maintenance 쪽이다.
+andenken indexing에 직접 이식할 본체는 `session-files.ts`의 `sanitizeSessionText` / `extractSessionText` 흐름이다.
+
+### A2 read-only 산출물
+
+llmlog 1건 또는 이 repo 내 임시 검토 문서로 다음을 남긴다.
+
+| 항목 | 내용 |
+|------|------|
+| OpenClaw 단계 | `stripInboundMetadata`, `stripInternalRuntimeContext`, generated wrapper drop 등 |
+| andenken 현 상태 | `extractTextContent`, `isNoise`, length threshold, `truncateText(2000)` |
+| gap | 어떤 strip/drop/redact가 빠졌는지 |
+| 이식 우선순위 | C1에 넣을 것 / 보류할 것 / C2로 뺄 것 |
+| risk | 사용자 의도 손실 가능성, Claude/pi 포맷 차이, tool 결과 과삭제 위험 |
+
+### A3 예정 — sanitization C1 구현
+
+A2 mapping 검토 후 GLG 승인 시 진행한다.
+
+C1 후보:
 
 - inbound metadata strip
 - internal runtime context strip
@@ -97,16 +94,17 @@ A1 검토가 끝난 뒤 진행한다. 이 단계가 **입력 품질 개선**이�
 - tool-sensitive redaction
 - tool log / tool result noise 정리
 - before/after chunk count
-- spot-check 50개
+- random 50 spot-check
 
-의도적으로 분리:
+의도적으로 C1에서 안 하는 것:
 
-- 800자 wrap/split은 별도 후속(A3). `truncateText(2000)` 유지한 C1부터.
-- OpenClaw-specific dreaming/provenance file-level filter는 샘플 기반 전까지 보류.
+- 800자 wrap/split. `truncateText(2000)` 유지 후 별도 C2.
+- OpenClaw-specific dreaming/provenance file-level filter 무차별 이식.
+- org/qmd 변경.
 
 ## 트랙 B — org/qmd: 보류
 
-org/qmd는 지금 진행하지 않는다. sessions 안정화 후 별도 판단한다.
+org/qmd는 지금 진행하지 않는다. sessions 안정화와 A2/A3 이후 별도 판단한다.
 
 현재 상태:
 
@@ -115,14 +113,11 @@ org/qmd는 지금 진행하지 않는다. sessions 안정화 후 별도 판단�
 - org DB는 2560d 유지.
 - `knowledge_search`는 org 4B/2560 provider와 DB dim이 맞는 상태로만 운영한다.
 
-다음 org/qmd 판단은 sessions A1/A2 이후 GLG가 별도 지시할 때 재개한다.
-
 ## 외부 의존 / 주의
 
 - OpenRouter Qwen3-Embedding-8B 가격은 현재 `$0.01/M` 기준.
 - org full rebuild는 지금 하지 않는다. org 쪽은 qmd 결정 전까지 별도 트랙.
 - long-lived pi/extension은 `.env.local` 변경 후 재시작해야 `ANDENKEN_SESSION_*`를 읽는다.
-- commit/push 후에는 agenda stamp를 남긴다.
 
 ## 관련 문서
 
