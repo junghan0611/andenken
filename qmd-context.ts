@@ -30,6 +30,7 @@ export interface BootstrapOptions {
   collectionPrefix: string;
   qmdBin: string;
   execute: boolean;
+  only: string[];
 }
 
 export interface QmdCommand {
@@ -51,7 +52,10 @@ const DEFAULT_CONTEXT_BLURBS: Record<string, string> = {
 export function buildBootstrapCommands(opts: BootstrapOptions): QmdCommand[] {
   const cmds: QmdCommand[] = [];
   // Iterate folders in a stable order so print output is deterministic.
-  const folders = Array.from(INDEXABLE_ORG_FOLDERS).sort();
+  const requested = opts.only.length > 0 ? new Set(opts.only) : null;
+  const folders = Array.from(INDEXABLE_ORG_FOLDERS)
+    .filter((folder) => !requested || requested.has(folder) || requested.has(`${opts.collectionPrefix}-${folder}`))
+    .sort();
   for (const folder of folders) {
     const collectionPath = path.join(opts.cacheDir, folder);
     const collectionName = `${opts.collectionPrefix}-${folder}`;
@@ -100,6 +104,7 @@ function parseArgs(argv: string[]): BootstrapOptions {
     collectionPrefix: "garden",
     qmdBin: process.env.ANDENKEN_QMD_BIN ?? "qmd",
     execute: false,
+    only: [],
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -115,6 +120,12 @@ function parseArgs(argv: string[]): BootstrapOptions {
         break;
       case "--execute":
         opts.execute = true;
+        break;
+      case "--only":
+        opts.only = requireValue(argv, ++i, a)
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
         break;
       case "-h":
       case "--help":
@@ -147,6 +158,8 @@ Flags:
   --cache-dir DIR          Memory-md root (default: ~/.cache/andenken-qmd)
   --collection-prefix STR  Prefix for qmd collection names (default: garden)
   --qmd-bin PATH           qmd executable (default: qmd; env ANDENKEN_QMD_BIN)
+  --only LIST              Comma-separated folders or collection names to emit
+                           (e.g. meta or garden-meta)
   --execute                Actually run commands (default: print only)
 
 Without --execute, this prints shell-quoted lines to stdout. Pipe into

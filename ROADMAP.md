@@ -60,6 +60,7 @@
 
 새 변화는 위에 추가. 시간 역순.
 
+- **2026-05-11** — qmd garden runner 도입. `scripts/qmd-garden.sh` / `./run.sh qmd:garden`가 GLG public garden qmd 작업의 operator surface가 됨. Env는 Qwen3-Embedding-0.6B GGUF + Vulkan + NixOS `LD_LIBRARY_PATH=$NIX_LD_LIBRARY_PATH`로 고정. thinkpad AMD Radeon 780M Vulkan offload verified. B1a-1 model/serving gate 통과, 다음은 `garden-meta` smoke embed 후 전체 5 collection.
 - **2026-05-11** — qmd 방향 전환. GLG 결정: “이제 org 하자”가 아니라, 먼저 qmd로 당장 쓸 수 있는 검색축을 뽑는다. `~/repos/3rd/qmd`를 clone/build하고 `~/.local/bin/qmd`로 연결. qmd DB는 `~/.cache/qmd/index.sqlite`, 첫 corpus는 exported public garden Markdown `~/repos/gh/notes/content`(2,218 md / ~27.2MB). org doctor WARN triage는 qmd baseline 이후로 보류.
 - **2026-05-11** — sessions track 안정화 종료. C2.1a excerpt readback(`16e6abf`), 전체 sessions rebuild(28,537 chunks, 4096d, ~6.48M tokens, ~$0.065, verify pass), C2.1c `session_search.withExcerpt` opt-in(`3cafb36`) 완료. transcript-window production / toolResult indexing / source weight / score threshold 조정은 보류.
 - **2026-05-10** — andenken sessions track을 OpenRouter `qwen/qwen3-embedding-8b` 4096d로 전환. commit `c618a73`. Provider namespace 분리(`ANDENKEN_SESSION_*` / `ANDENKEN_ORG_*`), dim guard, paid full-rebuild guard, `rebuild-sessions-full.sh`, OpenRouter incremental `sync-sessions.sh` 도입. 첫 full rebuild: 28,188 chunks, ~6.34M tokens, ~$0.063, 31.7분, errors 0. Smoke query `openclaw session embedding` top 5 모두 관련. Org는 2560d 유지.

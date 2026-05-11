@@ -58,6 +58,9 @@ Usage: ./run.sh <command> [args]
                                      --dry-run --verbose
 
 === QMD bridge (experimental) ===
+  qmd:garden <cmd> [args]     GLG garden qmd runner with Qwen3 embed + Vulkan env
+                              cmds: env, preflight, status, bootstrap, embed,
+                                    query, search, vsearch, mcp-http, raw
   qmd:bootstrap [flags]       Print (or --execute) qmd collection/context registers
                               Flags: --cache-dir DIR --collection-prefix STR
                                      --qmd-bin PATH --execute
@@ -143,6 +146,8 @@ case "${1:-help}" in
     shift; cd "$SCRIPT_DIR" && pnpm exec tsx export-qmd.ts "$@" ;;
 
   # === QMD bridge (experimental) ===
+  qmd:garden)
+    shift; cd "$SCRIPT_DIR" && scripts/qmd-garden.sh "$@" ;;
   qmd:bootstrap)
     shift; cd "$SCRIPT_DIR" && pnpm exec tsx qmd-context.ts "$@" ;;
   qmd:query)

@@ -70,6 +70,62 @@ qmd upstream notes:
 
 산출물: qmd 실행 가능 / 불가능, 현재 DB 상태, 실행 전 리스크.
 
+#### B1a-1 — model / serving gate before first embed — passed
+
+목표: 첫 qmd embed 전에 GLG 가든에 맞는 embedding model과 노트북 serving 방식을 고정한다. 기본 `embeddinggemma-300M`로 embed하지 않는다.
+
+판단:
+
+- qmd는 Ollama/vLLM/OpenRouter를 호출하지 않는다. `node-llama-cpp`가 GGUF 모델을 로컬 프로세스 안에서 로드한다.
+- 기본 embedding model `embeddinggemma-300M`은 영어 중심이라 한국어/CJK + English proper noun 혼합 가든에는 부적합하다.
+- first baseline embedding은 qmd README가 CJK용으로 권장하는 `Qwen3-Embedding-0.6B-GGUF`로 고정한다.
+
+운영 env 후보:
+
+```bash
+export QMD_EMBED_MODEL="hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf"
+export QMD_LLAMA_GPU=vulkan
+```
+
+thinkpad AMD Phoenix 확인 결과:
+
+- `/dev/dri/renderD128` 있음 — AMD iGPU/Vulkan 사용 가능성이 있음.
+- `vulkaninfo`는 현재 PATH에 없음.
+- first probe: `QMD_STATUS_DEVICE_PROBE=1 QMD_LLAMA_GPU=vulkan qmd status` 결과 `node-llama-cpp` Vulkan prebuilt incompatible → CPU fallback도 prebuilt incompatible.
+- 원인: qmd는 Nix `node` 프로세스가 `.node` addon/`.so`를 `dlopen`한다. 이 경우 `nix-ld`의 `NIX_LD_LIBRARY_PATH`만으로는 부족하고, addon dependency lookup에 `LD_LIBRARY_PATH=$NIX_LD_LIBRARY_PATH`가 필요하다.
+- NixOS thinkpad fix confirmed: `programs.nix-ld.libraries = [ stdenv.cc.cc.lib vulkan-loader ];` exposes `libstdc++.so.6` and `libvulkan.so.1` under `$NIX_LD_LIBRARY_PATH`.
+- Verified command: `LD_LIBRARY_PATH="$NIX_LD_LIBRARY_PATH${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" QMD_LLAMA_GPU=vulkan bun -e 'import("node-llama-cpp").then(m=>m.getLlama({gpu:"vulkan"})).then(async l=>console.log(l.gpu, await l.getGpuDeviceNames()))'` → `vulkan [ "AMD Radeon 780M Graphics (RADV PHOENIX)" ]`.
+- `qmd status` with `QMD_STATUS_DEVICE_PROBE=1 QMD_LLAMA_GPU=vulkan` now reports GPU offloading yes and VRAM. Note: qmd status currently prints default model URIs from constants, not env overrides; trust embed command/env for the actual embedding model.
+- Trap: if qmd/node-llama-cpp runs once without `LD_LIBRARY_PATH`, it may create a CPU-only source fallback under `~/repos/3rd/qmd/node_modules/node-llama-cpp/llama/localBuilds`, which can take precedence over the prebuilt Vulkan addon. Before baseline embed, remove it.
+
+qmd 실행 env:
+
+```bash
+export QMD_EMBED_MODEL="hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf"
+export QMD_LLAMA_GPU=vulkan
+export LD_LIBRARY_PATH="${NIX_LD_LIBRARY_PATH}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+```
+
+Operator wrapper:
+
+- `scripts/qmd-garden.sh` pins the env above, injects `LD_LIBRARY_PATH`, and exposes `env`, `preflight`, `status`, `bootstrap`, `embed`, `query`, `search`, `vsearch`, `mcp-http`, `raw`.
+- `./run.sh qmd:garden <cmd>` is the supported entrypoint for GLG public garden qmd work.
+- Use `./run.sh qmd:garden preflight` before collection registration / embed.
+- Use `./run.sh qmd:garden bootstrap` for dry-run command review, then `./run.sh qmd:garden bootstrap --execute` after GLG approval.
+
+서빙 선택지:
+
+1. **local Vulkan** — 추천 목표. NixOS에서 node-llama-cpp가 Vulkan backend를 build/load하게 만든 뒤 qmd CLI/MCP를 사용.
+2. **local CPU** — 기능 검증은 가능하나 embed/rerank/query expansion이 느릴 수 있음. prebuilt CPU도 현재 probe 실패했으므로 build 문제 해결은 필요.
+3. **remote/ollama** — qmd 기본 구조가 외부 Ollama embedding 서버를 쓰지 않으므로 바로 선택 불가. 쓰려면 qmd adapter/code change가 필요해서 B1 baseline 범위를 넘는다.
+
+Gate result:
+
+- `./run.sh qmd:garden preflight` passed.
+- `node-llama-cpp` reports `vulkan [ "AMD Radeon 780M Graphics (RADV PHOENIX)" ]`.
+- `qmd status` reports `GPU: vulkan (offloading: yes)`, VRAM about `16.4 GB free / 17.5 GB total`.
+- 모델 캐시 예상: default 3종 합계 약 2GB + Qwen3-Embedding-0.6B 추가. 실행 전 디스크/시간 보고.
+
 #### B1b — GLG garden 특이점 반영한 collection 설계
 
 목표: 단순 폴더 인덱싱이 아니라 GLG 가든의 역할 차이를 qmd collection/context에 반영한다.
@@ -92,17 +148,28 @@ qmd upstream notes:
 
 산출물: collection/context naming, 포함/제외 규칙, qmd query 시 어느 collection을 우선 볼지 기준.
 
-#### B1c — collection/context 등록 + indexing/embed smoke
+#### B1c — collection/context 등록 + indexing/embed smoke — current
 
-목표: public garden Markdown을 qmd에 실제 등록하고, 색인/임베딩까지 최소 동작을 확인한다.
+목표: public garden Markdown을 qmd에 실제 등록하고, 색인/임베딩까지 최소 동작을 확인한다. 전체 5개 collection 전에 `garden-meta` 하나로 GPU/model/download smoke를 먼저 본다.
 
-- `./run.sh qmd:bootstrap --cache-dir ~/repos/gh/notes/content --collection-prefix garden`로 명령 확인
-- 필요 시 `--execute` 또는 explicit `qmd collection add`, `qmd context add`
-- `qmd collection list`
-- `qmd status`
-- `qmd embed` 필요 여부 확인 후 실행
+1. `garden-meta` smoke
+   - `./run.sh qmd:garden bootstrap --only meta` dry-run 확인
+   - `./run.sh qmd:garden bootstrap --only meta --execute`
+   - `./run.sh qmd:garden embed -c garden-meta`
+   - 기록: 모델 다운로드 시간, embed duration, VRAM/CPU, indexed docs/vectors, 실패 파일
+2. smoke query
+   - `./run.sh qmd:garden query "보편 학문" -c garden-meta -n 5`
+   - `./run.sh qmd:garden search "어쏠로지" -c garden-meta -n 5`
+   - `./run.sh qmd:garden vsearch "디지털 가든" -c garden-meta -n 5`
+3. 전체 5개 collection 등록
+   - `./run.sh qmd:garden bootstrap` dry-run
+   - `./run.sh qmd:garden bootstrap --execute`
+   - `./run.sh qmd:garden embed`
+4. 상태 확인
+   - `./run.sh qmd:garden raw collection list`
+   - `./run.sh qmd:garden status`
 
-산출물: 등록된 collection/context 목록, indexed docs 수, embed 상태, 실패 파일/대용량 파일 목록.
+산출물: 등록된 collection/context 목록, indexed docs 수, embed 상태, smoke timing, 실패 파일/대용량 파일 목록.
 
 #### B1d — garden-specific 품질 검수 baseline
 
