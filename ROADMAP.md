@@ -42,7 +42,7 @@
 | 축 | 규모 | 의의 |
 |----|-----|------|
 | **org corpus** | ~45,000 chunks / 2,198 files | qmd가 아닌 org-mode KB. **이게 차별점의 본체.** |
-| pi sessions + Claude Code 통합 | 1,573+ sessions / 27,252 chunks | OpenClaw는 봇별 transcript. 우리는 *나*의 모든 세션. |
+| pi sessions + Claude Code 통합 | 1,600+ sessions / 28,537 chunks | OpenClaw는 봇별 transcript. 우리는 *나*의 모든 세션. 2026-05-11 sessions track 안정화 종료. |
 | **denote graph** | denotecli sidecar | back-link / 카테고리 / 시간축 |
 | 한국어 형태소 | dictcli sidecar | Kiwi stem + 한↔영 expand |
 | bibliography | bibcli sidecar | citation graph (`#+reference:` + `[cite:@key]`) |
@@ -54,13 +54,14 @@
 - **org × sessions 교차 retrieval** — 같은 query에 두 corpus 결과가 동시에 뜨는 경험. OpenClaw는 자체 corpus가 없어 불가.
 - **org-native 구조 활용** — 카테고리(journal / botlog / llmlog / notes / bib / meta)별 가중치, heading hierarchy, citation/back-link graph 통합.
 - **agent-as-author signal** — llmlog / botlog가 sessions의 "결정 인덱스"로 작동.
-- **임베딩 모델 8B 점프** — sessions track은 2026-05-10에 Qwen3-Embedding-8B 4096d로 전환 완료. org track은 qmd 결정 전까지 4B/2560d 유지. 모델 변경은 manifold drift라 해당 corpus *전체 reindex* 필요.
+- **org/qmd 전환** — sessions track은 2026-05-11에 8B/4096d + excerpt readback + `withExcerpt`까지 안정화 종료. 다음 차별점은 org/qmd track이다. org track은 qmd 결정 전까지 4B/2560d 유지. 모델 변경은 manifold drift라 해당 corpus *전체 reindex* 필요.
 
 ## 변화 기록 (History)
 
 새 변화는 위에 추가. 시간 역순.
 
-- **2026-05-10** — andenken sessions track을 OpenRouter `qwen/qwen3-embedding-8b` 4096d로 전환. commit `c618a73`. Provider namespace 분리(`ANDENKEN_SESSION_*` / `ANDENKEN_ORG_*`), dim guard, paid full-rebuild guard, `rebuild-sessions-full.sh`, OpenRouter incremental `sync-sessions.sh` 도입. Full rebuild: 28,188 chunks, ~6.34M tokens, ~$0.063, 31.7분, errors 0. Smoke query `openclaw session embedding` top 5 모두 관련. Org는 2560d 유지.
+- **2026-05-11** — sessions track 안정화 종료. C2.1a excerpt readback(`16e6abf`), 전체 sessions rebuild(28,537 chunks, 4096d, ~6.48M tokens, ~$0.065, verify pass), C2.1c `session_search.withExcerpt` opt-in(`3cafb36`) 완료. transcript-window production / toolResult indexing / source weight / score threshold 조정은 보류. 다음 작업은 org/qmd baseline triage.
+- **2026-05-10** — andenken sessions track을 OpenRouter `qwen/qwen3-embedding-8b` 4096d로 전환. commit `c618a73`. Provider namespace 분리(`ANDENKEN_SESSION_*` / `ANDENKEN_ORG_*`), dim guard, paid full-rebuild guard, `rebuild-sessions-full.sh`, OpenRouter incremental `sync-sessions.sh` 도입. 첫 full rebuild: 28,188 chunks, ~6.34M tokens, ~$0.063, 31.7분, errors 0. Smoke query `openclaw session embedding` top 5 모두 관련. Org는 2560d 유지.
 - **2026-05-08** — OpenClaw 측 Qwen3-Embedding-8B 변경 테스트 시작 (nixos-config 담당자). andenken은 결과 보고 적용 여부 검토 — NEXT.md *외부 의존 대기* 항목으로 등록. matryoshka 2560d truncate 옵션이 있어 schema 무변경 가능.
 - **2026-05-08** — andenken 문서 정리. MEMORY.md 폐기. ROADMAP.md(한글, 비교표 중심) 신설을 핵심 문서로. NEXT.md는 *지금 하려는 한 가지*만 담는 좁은 surface로 재정의 (라운드 큐 폐기). 임베딩 단축 담당 명시.
 - **2026-05-08** — NEXT.md를 sanitization-first로 갈아끼움 (이전 안: 평가 도구). 같은 pi JSONL을 OpenClaw가 0.45–57%까지 정제하는데 andenken은 line-based로 거의 전부 통과시킨다는 5/8 baseline 발견 반영. 평가 도구는 sanitization 끝난 후 다음 NEXT로.

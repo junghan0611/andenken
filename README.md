@@ -141,19 +141,21 @@ sessions / entwurf messages. Valid source filters are `pi`, `claude`, and
 - Hard guard skips oversize org chunks before they can kill the run
 - Policy changes are treated as **full rebuild events**, not incremental syncs
 
-## Rebuild
+## Rebuild / sync
 
 ```bash
 cd ~/repos/gh/andenken
-scripts/sync-sessions.sh           # sessions-only incremental (~30s, $0, ollama or gpu1i)
-scripts/rebuild-incremental.sh     # sessions + org incremental via gpu1i
-scripts/rebuild-full.sh            # full rebuild (sessions + org + verify, gpu1i)
-./run.sh golden                    # search quality baseline (26/26 PASS target)
+scripts/sync-sessions.sh              # sessions-only incremental (8B/4096d)
+scripts/rebuild-sessions-full.sh      # sessions-only full rebuild (estimate + confirm)
+./run.sh doctor --org --no-smoke      # org read-only triage, API 0
+./run.sh golden                       # search quality baseline (API required)
 ```
 
 `sync-sessions.sh` is the operating heartbeat for the sessions track and what
-the agent-config `memory-sync` skill calls under the hood. The two `rebuild-*`
-scripts are for human-driven larger work.
+the agent-config `memory-sync` skill calls under the hood. Mixed
+`scripts/rebuild-incremental.sh` / `scripts/rebuild-full.sh` paths are
+deprecated for normal operations; sessions and org are dimension-separated
+tracks and should be handled deliberately.
 
 ## Why the name
 
@@ -175,14 +177,17 @@ In Heidegger, *Geworfenheit* and *Andenken* form a pair. 이기상 rendered
 
 ## Recent milestones
 
+- **2026-05-11** — Sessions track stabilized and closed: OpenRouter
+  Qwen3-Embedding-8B / 4096d full rebuild (28,537 chunks, ~$0.065, verify
+  pass), C2.1a excerpt readback, and C2.1c `session_search.withExcerpt`
+  opt-in. Next work moves to org/qmd.
 - **2026-05-07** — Sessions promoted to live memory tier. `session-manifest.json`
   with mtime/size stale detection picks up appended-to active conversations.
   CJK substring fallback recovers 1–2 char Hangul queries that LanceDB FTS
   drops, with an ASCII-boundary guard to keep `를`/`사` particle noise out.
-  `doctor --org` verdict now carries `reasons[]`. `scripts/sync-sessions.sh`
-  auto-selects laptop ollama or gpu1i tunnel for the hourly fast path.
-- **2026-04-30** — gpu2i moved to VOS chat-completion. gpu1i is the sole
-  GPU-side embedding endpoint until further notice.
+  `doctor --org` verdict now carries `reasons[]`.
+- **2026-04-30** — gpu2i moved to VOS chat-completion. It must not be used
+  for embedding; org remains on the 4B/2560d embedding path until org/qmd changes.
 - **2026-04-22** — doctor `--org` stage 1: retrieval / chunk / structure triage
 - **2026-04-17** — OpenRouter query path + provider split. Indexing stays on
   local GPU; queries run from any host.

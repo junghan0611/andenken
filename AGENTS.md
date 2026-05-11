@@ -125,10 +125,8 @@ only `pi`, `claude`, and `all` (`pi + claude`). No `overlay` source.
 > gpu2i was repurposed as VOS chat-completion node (Qwen2.5-7B-Instruct-AWQ).
 > It now serves `/v1/chat/completions` and **must not be used for embedding** —
 > calling `/v1/embeddings` against it returns 3584d (last hidden state) and
-> would corrupt the 2560d index. gpu1i is the sole GPU embedding endpoint
-> until further notice; this remains a single point of failure for the org/full
-> path. The sessions fast path now has ollama as a second engine, but org
-> rebuild does not.
+> would corrupt a 2560d org index. Sessions now use OpenRouter 8B/4096d via
+> `ANDENKEN_SESSION_*`; org remains 4B/2560d until the org/qmd track changes.
 
 ## Cross-repo responsibility
 
@@ -166,13 +164,15 @@ shown there is a real command against real code; no documentation gap.
 
 Specific operations worth knowing by name:
 
-- `scripts/sync-sessions.sh` — sessions-only fast path (auto-selects ollama/gpu1i,
-  dim probe, optional `--push` to oracle). Hourly cadence target. Used by the
-  agent-config `memory-sync` skill.
-- `scripts/rebuild-incremental.sh` — incremental sessions + org through gpu1i
-  (manifest-driven, with dim safety probe). Human-driven.
-- `scripts/rebuild-full.sh` — reproducible full rebuild (sessions + org + verify,
-  with dim safety probe). Human-driven, full-cost.
+- `scripts/sync-sessions.sh` — sessions-only incremental path through
+  OpenRouter Qwen3-Embedding-8B 4096d. Wrong-dim aborts before API; no-work
+  exits with API 0; optional `--push` to oracle. Used by the agent-config
+  `memory-sync` skill.
+- `scripts/rebuild-sessions-full.sh` — sessions-only full rebuild. Estimate →
+  explicit confirmation → 4096d preflight → destroy sessions index → rebuild
+  → verify. Human-driven and paid-remote gated.
+- `scripts/rebuild-incremental.sh` / `scripts/rebuild-full.sh` — deprecated
+  mixed sessions+org paths. Do not use for normal operations.
 - `./run.sh verify all` — integrity check after indexing
 - `./run.sh doctor --org` — operator triage (read-only, local-only). Verdict
   comes with `reasons[]` so the operator sees *why* it WARNed.
