@@ -45,7 +45,7 @@ covers all three.
 | Track | Quality bar | Scope |
 |-------|------------|-------|
 | **sessions** | Parity with openclaw session memory | Core. pi + Claude Code JSONL. Closed/stable as of 2026-05-11. |
-| **qmd over public garden MD** | Immediately usable knowledge retrieval | Current active track. Uses exported Markdown in `~/repos/gh/notes/content`. |
+| **qmd over public garden MD** | Immediately usable knowledge retrieval | Current active track. Uses exported Markdown in `~/repos/gh/notes/content`; see [QMD.md](./QMD.md). |
 | **org** | Optional, high-signal only | 3,000+ Denote notes. Conservative source track; doctor/chunker work is next-after-qmd. |
 
 Sessions is load-bearing for agent continuity. The immediate knowledge path is
@@ -115,7 +115,7 @@ embeddings. See `index.ts` (pi) and `cli.ts` (CLI harnesses).
 | Track | Model / dim | Endpoint | Why |
 |-------|-------------|----------|-----|
 | **Sessions** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `ANDENKEN_SESSION_*` | Live agent continuity. Incremental sync is small; full rebuild is explicitly gated. |
-| **qmd public garden MD** | qmd local models | `qmd` / `~/.cache/qmd/index.sqlite` | Current practical knowledge path over exported Markdown. |
+| **qmd public garden MD** | qmd local GGUF models; baseline `Qwen3-Embedding-0.6B` + Vulkan | `./run.sh qmd:garden` / `~/.cache/qmd/index.sqlite` | Current practical knowledge path over exported Markdown. See [QMD.md](./QMD.md). |
 | **Org** | Qwen3-Embedding-4B / 2560d | `ANDENKEN_ORG_*` / vLLM-compatible path | Conservative source indexing; deferred until qmd baseline is useful. |
 
 The two LanceDB stores are dimension-separated. Sessions search must use a

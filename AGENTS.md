@@ -32,7 +32,7 @@ andenken agent-in-charge.
 | Track | Quality bar | Notes |
 |-------|------------|-------|
 | **sessions** | Parity with openclaw session memory | Load-bearing for agent continuity. Regression here is a real incident. |
-| **qmd over public garden MD** | Immediately usable knowledge retrieval | Current next track. Uses exported Markdown in `~/repos/gh/notes/content` first, because this is what GLG can use now. |
+| **qmd over public garden MD** | Immediately usable knowledge retrieval | Current next track. Uses exported Markdown in `~/repos/gh/notes/content` first, because this is what GLG can use now. Model/serving contract: [QMD.md](./QMD.md). |
 | **org** | Optional, high-signal only | Conservative source track. Doctor/chunker work is deferred until qmd over public garden MD has a usable baseline. |
 
 When a change affects multiple tracks, sessions gets the stricter review. After
@@ -173,6 +173,8 @@ Specific operations worth knowing by name:
 
 - `qmd` — installed from `~/repos/3rd/qmd` and linked at `~/.local/bin/qmd` for
   the current qmd public garden MD baseline. DB: `~/.cache/qmd/index.sqlite`.
+  Use `./run.sh qmd:garden ...`; model/serving/testing details live in
+  [QMD.md](./QMD.md).
 - `./run.sh qmd:bootstrap --cache-dir ~/repos/gh/notes/content --collection-prefix garden` — prints qmd collection/context commands for the exported garden Markdown tree.
 - `scripts/sync-sessions.sh` — sessions-only incremental path through
   OpenRouter Qwen3-Embedding-8B 4096d. Wrong-dim aborts before API; no-work

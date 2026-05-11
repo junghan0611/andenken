@@ -54,7 +54,7 @@
 - **org × sessions 교차 retrieval** — 같은 query에 두 corpus 결과가 동시에 뜨는 경험. OpenClaw는 자체 corpus가 없어 불가.
 - **org-native 구조 활용** — 카테고리(journal / botlog / llmlog / notes / bib / meta)별 가중치, heading hierarchy, citation/back-link graph 통합.
 - **agent-as-author signal** — llmlog / botlog가 sessions의 "결정 인덱스"로 작동.
-- **qmd public garden MD → org/qmd** — sessions track은 2026-05-11에 8B/4096d + excerpt readback + `withExcerpt`까지 안정화 종료. 다음 차별점은 곧장 raw org가 아니라, 먼저 `~/repos/gh/notes/content` public garden Markdown을 qmd로 연결해 당장 쓰는 검색축을 세우는 것이다. org track은 qmd public baseline 이후 doctor/chunker 정리 대상으로 유지한다. 모델 변경은 manifold drift라 해당 corpus *전체 reindex* 필요.
+- **qmd public garden MD → org/qmd** — sessions track은 2026-05-11에 8B/4096d + excerpt readback + `withExcerpt`까지 안정화 종료. 다음 차별점은 곧장 raw org가 아니라, 먼저 `~/repos/gh/notes/content` public garden Markdown을 qmd로 연결해 당장 쓰는 검색축을 세우는 것이다. org track은 qmd public baseline 이후 doctor/chunker 정리 대상으로 유지한다. 모델 변경은 manifold drift라 해당 corpus *전체 reindex* 필요. Model/serving recipe: [QMD.md](./QMD.md).
 
 ## 변화 기록 (History)
 
