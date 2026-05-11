@@ -40,16 +40,18 @@ If you want to know about the whole memory stack of the harness, andenken is
 the right place to ask. The implementation here is one axis; the documentation
 covers all three.
 
-### Two tracks inside andenken
+### Tracks inside andenken
 
 | Track | Quality bar | Scope |
 |-------|------------|-------|
-| **sessions** | Parity with openclaw session memory | Core. pi + Claude Code JSONL. |
-| **org** | Optional, high-signal only | 3,000+ Denote notes. Conservative scope — block first, open selectively. |
+| **sessions** | Parity with openclaw session memory | Core. pi + Claude Code JSONL. Closed/stable as of 2026-05-11. |
+| **qmd over public garden MD** | Immediately usable knowledge retrieval | Current active track. Uses exported Markdown in `~/repos/gh/notes/content`. |
+| **org** | Optional, high-signal only | 3,000+ Denote notes. Conservative source track; doctor/chunker work is next-after-qmd. |
 
-Sessions is load-bearing for agent continuity. Org is a live experiment in
-curating a personal knowledge base for retrieval — still improving, not a
-commitment.
+Sessions is load-bearing for agent continuity. The immediate knowledge path is
+qmd over the public garden Markdown, because that is the surface GLG can use
+now. Org remains the richer source track, but org incremental/chunker work is
+not the current next step.
 
 ## What It Does
 
@@ -108,15 +110,17 @@ embeddings. See `index.ts` (pi) and `cli.ts` (CLI harnesses).
 - **Query expansion** dictcli personal vocabulary graph
 - **Runtime** TypeScript (tsx)
 
-## Provider split — sessions vs org
+## Provider split — sessions, qmd, org
 
 | Track | Model / dim | Endpoint | Why |
 |-------|-------------|----------|-----|
 | **Sessions** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `ANDENKEN_SESSION_*` | Live agent continuity. Incremental sync is small; full rebuild is explicitly gated. |
-| **Org** | Qwen3-Embedding-4B / 2560d | `ANDENKEN_ORG_*` / vLLM-compatible path | Conservative knowledge-base indexing; separate from sessions. |
+| **qmd public garden MD** | qmd local models | `qmd` / `~/.cache/qmd/index.sqlite` | Current practical knowledge path over exported Markdown. |
+| **Org** | Qwen3-Embedding-4B / 2560d | `ANDENKEN_ORG_*` / vLLM-compatible path | Conservative source indexing; deferred until qmd baseline is useful. |
 
 The two LanceDB stores are dimension-separated. Sessions search must use a
-4096d sessions provider; knowledge search must use a 2560d org provider.
+4096d sessions provider; knowledge search must use a 2560d org provider. qmd is
+separate: it indexes Markdown collections into its own SQLite database.
 
 ### Session sources
 
@@ -145,6 +149,23 @@ query level so the candidate pool is source-specific. Explicit `pi` or `claude`
 also suppresses the org knowledge fallback — if the caller named a session
 source, they asked for sessions, not org notes.
 
+## qmd public garden MD path
+
+Current qmd work intentionally starts from the exported public garden rather
+than raw org:
+
+| Surface | Path | Notes |
+|---------|------|-------|
+| qmd source | `~/repos/3rd/qmd` | upstream clone, built with Bun |
+| qmd binary | `~/.local/bin/qmd` | symlink to `~/repos/3rd/qmd/bin/qmd` |
+| qmd DB | `~/.cache/qmd/index.sqlite` | qmd-owned SQLite index |
+| public garden Markdown | `~/repos/gh/notes/content` | first qmd corpus; ~2.2K md files / ~27MB |
+| org→qmd export | `~/.cache/andenken-qmd` | deferred; depends on org doctor/chunker cleanup |
+
+First baseline collections are expected to be `garden-bib`, `garden-botlog`,
+`garden-journal`, `garden-meta`, and `garden-notes`. Images, talks, test, and
+tmp stay out of the first baseline unless GLG explicitly asks.
+
 ## Scope and safety policy
 
 - `journal`: only files with identifier `>= 20250101T000000`
@@ -160,7 +181,9 @@ source, they asked for sessions, not org notes.
 cd ~/repos/gh/andenken
 scripts/sync-sessions.sh              # sessions-only incremental (8B/4096d)
 scripts/rebuild-sessions-full.sh      # sessions-only full rebuild (estimate + confirm)
-./run.sh doctor --org --no-smoke      # org read-only triage, API 0
+./run.sh qmd:bootstrap --cache-dir ~/repos/gh/notes/content --collection-prefix garden
+                                      # print qmd collection/context commands for public garden MD
+./run.sh doctor --org --no-smoke      # org read-only triage, API 0 (deferred after qmd baseline)
 ./run.sh golden                       # search quality baseline (API required)
 ```
 
@@ -190,10 +213,14 @@ In Heidegger, *Geworfenheit* and *Andenken* form a pair. 이기상 rendered
 
 ## Recent milestones
 
+- **2026-05-11** — Direction switch after sessions closure: qmd over public
+  garden Markdown becomes the active knowledge path. qmd is installed from
+  `~/repos/3rd/qmd`, linked at `~/.local/bin/qmd`, and will index
+  `~/repos/gh/notes/content` before raw org/org→qmd work resumes.
 - **2026-05-11** — Sessions track stabilized and closed: OpenRouter
   Qwen3-Embedding-8B / 4096d full rebuild (28,537 chunks, ~$0.065, verify
   pass), C2.1a excerpt readback, and C2.1c `session_search.withExcerpt`
-  opt-in. Next work moves to org/qmd.
+  opt-in.
 - **2026-05-07** — Sessions promoted to live memory tier. `session-manifest.json`
   with mtime/size stale detection picks up appended-to active conversations.
   CJK substring fallback recovers 1–2 char Hangul queries that LanceDB FTS

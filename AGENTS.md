@@ -27,14 +27,17 @@ andenken agent-in-charge.
 - **dictcli** — personal vocabulary (ko↔en expand, Kiwi stem). Layer 3. Not mine.
 - **denotecli** — structural dblock / graph over org. Layer 2. Not mine.
 
-## Two tracks inside andenken
+## Tracks inside andenken
 
 | Track | Quality bar | Notes |
 |-------|------------|-------|
 | **sessions** | Parity with openclaw session memory | Load-bearing for agent continuity. Regression here is a real incident. |
-| **org** | Optional, high-signal only | Conservative scope. Live experiment in curating a personal KB. Not a commitment. |
+| **qmd over public garden MD** | Immediately usable knowledge retrieval | Current next track. Uses exported Markdown in `~/repos/gh/notes/content` first, because this is what GLG can use now. |
+| **org** | Optional, high-signal only | Conservative source track. Doctor/chunker work is deferred until qmd over public garden MD has a usable baseline. |
 
-When a change affects both tracks, sessions gets the stricter review.
+When a change affects multiple tracks, sessions gets the stricter review. After
+sessions closed on 2026-05-11, the next active track is **qmd over public
+garden Markdown**, not org incremental indexing.
 
 ## What I own
 
@@ -79,13 +82,13 @@ Kiwi morphology lives in dictcli.
 
 ## Indexing endpoints
 
-andenken now has two dimension-separated tracks. A vector DB is queryable only
-by a provider that emits the same dimension.
+andenken has dimension-separated embedding stores and a separate qmd bridge.
+A vector DB is queryable only by a provider that emits the same dimension.
 
 | Track | Model / dim | Endpoint | When |
 |-------|-------------|----------|------|
 | **Sessions** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `https://openrouter.ai/api` via `ANDENKEN_SESSION_*` | hourly incremental driven by `scripts/sync-sessions.sh` / agent-config `memory-sync` skill; full rebuild via `scripts/rebuild-sessions-full.sh` |
-| **Org** | Qwen3-Embedding-4B / 2560d | `ANDENKEN_ORG_*` / legacy vLLM path | human-initiated org indexing; org/qmd track is separate and currently conservative |
+| **Org** | Qwen3-Embedding-4B / 2560d | `ANDENKEN_ORG_*` / legacy vLLM path | human-initiated org indexing; deferred while qmd public garden MD baseline is established |
 
 ### Session corpus sources
 
@@ -107,7 +110,11 @@ only `pi`, `claude`, and `all` (`pi + claude`). No `overlay` source.
 - **Sessions** are load-bearing for live agent continuity and now use 8B/4096d.
   Incremental sync is paid-remote but low cost; wrong-dim and paid full-rebuild
   guards are mandatory.
-- **Org** stays 4B/2560d until the org/qmd track is explicitly changed.
+- **qmd over public garden MD** is the current practical knowledge path. It
+  uses `~/repos/gh/notes/content` Markdown directly through qmd collections,
+  separate from LanceDB/org chunker quality work.
+- **Org** stays 4B/2560d until the org/qmd track is explicitly changed. Org
+  doctor WARN cleanup is next-after-qmd, not the current active step.
 - Query providers are track-specific. Never use a sessions vector against the
   org DB or an org vector against the sessions DB.
 
@@ -164,6 +171,9 @@ shown there is a real command against real code; no documentation gap.
 
 Specific operations worth knowing by name:
 
+- `qmd` — installed from `~/repos/3rd/qmd` and linked at `~/.local/bin/qmd` for
+  the current qmd public garden MD baseline. DB: `~/.cache/qmd/index.sqlite`.
+- `./run.sh qmd:bootstrap --cache-dir ~/repos/gh/notes/content --collection-prefix garden` — prints qmd collection/context commands for the exported garden Markdown tree.
 - `scripts/sync-sessions.sh` — sessions-only incremental path through
   OpenRouter Qwen3-Embedding-8B 4096d. Wrong-dim aborts before API; no-work
   exits with API 0; optional `--push` to oracle. Used by the agent-config
