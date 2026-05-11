@@ -159,27 +159,97 @@ C2.0 산출:
 | 600/100 | 21,542 | -24.06% | 2.44 | 2 / 6 | 12.11M | ~$0.1211 |
 | 800/120 | 15,787 | -44.35% | 2.93 | 2 / 8 | 11.71M | ~$0.1171 |
 
-### 지금 할 일 — C2.1 방향 결정
+### 지금 할 일 — C2.1a lineMap/excerpt first (구현 착수)
 
-C2.0 결과만으로 "OpenClaw식 400/80 window로 가면 품질이 좋아진다"고 단정할 수 없다. 다음 단일 항목을 GLG가 골라야 한다.
+**결정일**: 2026-05-11
+**큰 방향**: lineMap/excerpt first 승인. 현재 message-per-chunk 구조 유지, DB/embedding/full rebuild 무접촉. 검색 hit `sessionFile + lineNumber`를 입력으로 주변 JSONL을 read-only로 렌더링하는 helper/CLI를 만든다.
 
-**권장: lineMap/excerpt first**
+#### 우리 corpus 실측 (codex 1.2MB / 272-line entwurf 세션 기준)
 
-- 현재 message chunk 구조를 유지하면서 readback UX를 먼저 개선.
-- 검색 hit 이후 주변 JSONL line range를 빠르게 펼치는 도구/CLI를 만든다.
-- full rebuild 없이도 일부 효과를 얻을 수 있고, compact 없는 전략의 rediscovery에 직접 기여한다.
+| 카테고리 | 라인 비율 | 현재 indexer 처리 |
+|---|---:|---|
+| `type=message` assistant | 38% | 인덱싱 ✓ (단 tool-only turn은 텍스트 0으로 drop, p50=0) |
+| `type=message` toolResult | **54%** | **silent skip** |
+| `type=message` user | 4% | 인덱싱 ✓ |
+| `type=custom_message` `entwurf-message` (display=true) | ~2% | **silent skip** ← 분신 통신 전문 |
+| `type=custom` skill_loaded 등 (display=false) | ~3% | skip — 정당 |
 
-대안:
+OpenClaw 가정과 다른 점: 한 turn이 매우 길고(user p50≈1.5K chars / max 6.8K), tool-rich, 분신 통신은 별도 channel.
 
-1. **window chunking revised** — 600/100 또는 800/120 후보로 sample quality를 더 본 뒤 C2.1 구현.
-2. **hybrid message+window dual index** — recall은 좋아질 수 있으나 DB/비용이 커져 보류.
+#### 파라미터 default
+
+| 항목 | 값 | 근거 |
+|---|---|---|
+| `beforeLines` | 3 | turn당 1.5KB+, raw 6 lines가 ~3-4 turn 컨텍스트로 적정 |
+| `afterLines` | 3 | 동일 |
+| `maxChars` | 4000 | LLM 컨텍스트 추가 cost cap |
+| `includeToolResults` | true | assistant 결정의 인과 보존 |
+| `includeSessionMessages` | true | entwurf-message 등 inter-agent 통신 노출 |
+
+CLI는 명시적 override 허용 (`--before 8 --after 8 --max 8000 --no-tool --no-session`).
+
+#### 렌더링 룰 (라인 종류별)
+
+| 라인 종류 | 렌더 |
+|---|---|
+| `message` user | `User: <sanitized text>` (A3 C1 sanitizer 재사용) |
+| `message` assistant 텍스트 | `Assistant: <sanitized text>` |
+| `message` assistant tool-only (pi `toolCall` / claude `tool_use`) | `Assistant: [tool: <name>(<short args>)] [tool: ...]` (여러 toolCall 한 줄) |
+| `message` toolResult | `→ tool result [<toolName><" ERROR" if isError>]: <첫 200자>... [N chars total]` |
+| `custom_message` `display=true` 중 `entwurf-message` / `session-message` / `delegate-complete` | `Entwurf[<sender-prefix>→<receiver-prefix>]: <full text>` |
+| `custom_message` `display=false` (예: `session-info`) | skip |
+| `custom_message` `entwurf-sessions` | skip (default) |
+| `compaction` | `[Compaction summary] <text>` |
+| `custom` (skill_loaded, model_change 등) | skip |
+| invalid JSON | skip + count |
+
+#### 5가지 추가 규칙 (GLG/지피티 검토 반영)
+
+1. **center-preserving truncation**: maxChars 초과 시 centerLine 무조건 보존, 가장 먼 line부터 양쪽 균형으로 제거. 단순 head/tail truncate 금지.
+2. **includeSessionMessages 범위**: `entwurf-message` / `session-message` / `delegate-complete` (display=true). `session-info` 같은 display=false는 skip. `entwurf-sessions`는 default skip.
+3. **toolResult 렌더에 toolName/isError 포함**: `→ tool result [bash ERROR]: ...`. pi 스키마 확인 — `.message.toolName` + `.message.isError` 존재.
+4. **assistant tool-only는 여러 toolCall 짧게**: `Assistant: [tool: read(path=...)] [tool: bash(command=...)]`. pi block schema는 `{type:"toolCall", name, arguments}`, claude는 `{type:"tool_use", name, input}`.
+5. **skipped 라인은 text에 섞지 말 것**: `skippedCounts: Record<string, number>` 로 별도 반환. invalid JSON / display=false 등.
+
+#### 산출물 계획
+
+| # | 파일 | 내용 |
+|---|---|---|
+| 1 | `session-excerpt.ts` | `readSessionExcerpt(sessionFile, centerLine, opts)` + 라인별 renderer + center-preserving truncation |
+| 2 | `session-excerpt.test.ts` | fixture JSONL (pi/claude/entwurf/toolResult/invalid/maxChars/boundary/center-preserve) |
+| 3 | `scripts/session-excerpt.ts` | CLI: `<file> <line> [--before N --after N --max N --no-tool --no-session --json]` |
+| 4 | `run.sh` | `excerpt:session <file> <line>`, `test:excerpt` |
+| 5 | sample 3건 manual | claude session, codex entwurf-heavy 세션, 오래된 pi 세션 각 1 |
+
+#### 검증 게이트
+
+- `pnpm exec tsc --noEmit` clean
+- `pnpm exec tsx session-excerpt.test.ts` 모두 pass
+- sample 3건 출력에서 entwurf-message 1건 이상, toolResult 요약 1건 이상, center 보존 확인
+- API 0 / DB 0 / network 0 명시
+
+#### 금지 (재확인)
+
+- DB write
+- embedding API call
+- sessions full rebuild
+- search/sync 실행
+- store schema 변경
+- org/qmd 변경
+- transcript-window production 적용
+
+#### 후속 (C2.1b 후보, 보류)
+
+- `session_search` tool에 `withExcerpt: boolean` 옵션 추가
+- `entwurf-message` / `toolResult` 인덱싱 dry-run (chunk 수 폭증 가능)
+- assistant tool-only turn을 `[tool: read /path]` 텍스트로 인덱싱
 
 보조 참고:
 
-- `/home/junghan/repos/3rd/openclaw/packages/memory-host-sdk/src/host/session-files.ts` — `buildSessionEntry()` / `lineMap`
-- `/home/junghan/repos/3rd/openclaw/packages/memory-host-sdk/src/host/internal.ts` — `chunkMarkdown()` / `remapChunkLines()`
-- `/home/junghan/repos/3rd/openclaw/packages/memory-host-sdk/src/host/session-files.test.ts` — lineMap / archive / invalid JSON / inbound metadata fixture
-- `/home/junghan/repos/3rd/openclaw/packages/memory-host-sdk/src/host/internal.test.ts` — chunking / surrogate pair / line remap fixture
+- `session-indexer.ts` — `extractSessionChunks` (centerLine = 결과 `lineNumber`)
+- `session-sanitize.ts` — A3 C1 sanitizer (그대로 재사용)
+- `session-window.ts` — C2.0 prototype의 `extractTextContent`/`pushTranscriptLine` 패턴 일부 참고
+- `/home/junghan/repos/3rd/openclaw/packages/memory-host-sdk/src/host/session-files.ts` — buildSessionEntry, lineMap 개념
 
 ## 트랙 B — org/qmd: 보류
 
