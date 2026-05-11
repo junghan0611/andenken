@@ -57,27 +57,92 @@ qmd upstream notes:
 - We are operating under explicit GLG instruction to install and prepare qmd.
 - Commands available: `qmd collection add`, `qmd context add`, `qmd embed`, `qmd search`, `qmd vsearch`, `qmd query`, `qmd mcp --http`.
 
-해야 할 것 (이번 단일 항목):
+작업 분할 (관리자 관점의 하위 단계):
 
-1. qmd installation smoke
-   - `qmd status`
-   - confirm `~/.local/bin/qmd` path and source repo build state
-2. public garden collection plan 확정
-   - start with five collections: `garden-bib`, `garden-botlog`, `garden-journal`, `garden-meta`, `garden-notes`
-   - exclude `images`, `talks`, `test`, `tmp` for first baseline unless GLG asks
-   - use source path `~/repos/gh/notes/content/<folder>` directly, not `~/.cache/andenken-qmd`
-3. collection/context registration
-   - either use existing `./run.sh qmd:bootstrap --cache-dir ~/repos/gh/notes/content --collection-prefix garden --execute`
-   - or run explicit qmd commands if bootstrap needs adjustment
-4. index/embed/query smoke
-   - `qmd collection list` / `qmd status`
-   - `qmd embed` if collection add does not embed automatically
-   - smoke queries: `보편 학문`, `피투성`, `어쏠로지`, `바네바 부시`, `qmd 연결고리`
-   - compare with `./run.sh qmd:bake-off --skip-andenken` or direct `qmd query/search/vsearch`
-5. decide next single step
-   - qmd collection quality tuning (contexts, masks, folder split)
-   - qmd MCP/http integration
-   - or return to org doctor WARN triage
+#### B1a — qmd 설치 / 실행 표면 확인
+
+목표: qmd 자체가 operator surface로 재현 가능하게 동작하는지 확인한다.
+
+- `which qmd`, `qmd status`
+- `~/.local/bin/qmd -> ~/repos/3rd/qmd/bin/qmd` 링크 확인
+- `~/repos/3rd/qmd` build state 확인
+- qmd DB 위치 `~/.cache/qmd/index.sqlite` 확인
+
+산출물: qmd 실행 가능 / 불가능, 현재 DB 상태, 실행 전 리스크.
+
+#### B1b — GLG garden 특이점 반영한 collection 설계
+
+목표: 단순 폴더 인덱싱이 아니라 GLG 가든의 역할 차이를 qmd collection/context에 반영한다.
+
+초기 5개 collection:
+
+| collection | source | 역할 / 검수 관점 |
+|---|---|---|
+| `garden-notes` | `~/repos/gh/notes/content/notes` | 개념 노트. 보편/존재/어쏠로지 같은 장기 개념 recall |
+| `garden-bib` | `~/repos/gh/notes/content/bib` | bibliography/citation 축. 인명/저작/키워드 recall |
+| `garden-meta` | `~/repos/gh/notes/content/meta` | 사이트/태그/분류/가든 운영 메타 |
+| `garden-journal` | `~/repos/gh/notes/content/journal` | 시간축. 날짜/일일일생/작업 흐름 recall |
+| `garden-botlog` | `~/repos/gh/notes/content/botlog` | agent-authored public synthesis. 세션 chatter보다 conscious marker에 가까움 |
+
+보류/제외:
+
+- `images` symlink 제외
+- `talks`, `test`, `tmp`는 첫 baseline에서 제외 unless GLG asks
+- `~/.cache/andenken-qmd` org export는 사용하지 않음
+
+산출물: collection/context naming, 포함/제외 규칙, qmd query 시 어느 collection을 우선 볼지 기준.
+
+#### B1c — collection/context 등록 + indexing/embed smoke
+
+목표: public garden Markdown을 qmd에 실제 등록하고, 색인/임베딩까지 최소 동작을 확인한다.
+
+- `./run.sh qmd:bootstrap --cache-dir ~/repos/gh/notes/content --collection-prefix garden`로 명령 확인
+- 필요 시 `--execute` 또는 explicit `qmd collection add`, `qmd context add`
+- `qmd collection list`
+- `qmd status`
+- `qmd embed` 필요 여부 확인 후 실행
+
+산출물: 등록된 collection/context 목록, indexed docs 수, embed 상태, 실패 파일/대용량 파일 목록.
+
+#### B1d — garden-specific 품질 검수 baseline
+
+목표: qmd가 GLG 가든의 실제 검색 경험을 살리는지 검수한다. 단순 pass/fail이 아니라 “어떤 축이 강하고 약한가”를 본다.
+
+대표 쿼리 묶음:
+
+| 축 | 쿼리 예시 | 기대 |
+|---|---|---|
+| 한국어 개념 | `보편 학문`, `피투성`, `어쏠로지` | notes/meta/botlog 개념 노트가 상위에 떠야 함 |
+| 인명/저작 | `바네바 부시`, `제프 베이조스`, citation key 일부 | bib + 관련 notes 연결 확인 |
+| agent/history | `qmd 연결고리`, `andenken`, `entwurf`, `openclaw` | botlog/meta/notes의 conscious synthesis 확인 |
+| 시간축 | `2026-05-11 andenken`, `일일일생` | journal이 과도하게 지배하지 않는지 확인 |
+| 혼합언어 | Korean + English proper noun mixed query | exported Markdown title/body 검색 품질 확인 |
+
+비교 방식:
+
+- qmd `query/search/vsearch` 직접 비교
+- 가능하면 `./run.sh qmd:bake-off --skip-andenken`
+- 필요 시 `knowledge_search`와 spot-check하되, qmd baseline이 목적이므로 andenken org 문제로 확대하지 않는다.
+
+산출물: query별 top results, miss 사례, collection split/contexts 조정 필요 여부.
+
+#### B1e — 운영/통합 판단
+
+목표: qmd를 “설치됨”이 아니라 “쓸 수 있는 검색축”으로 관리할 다음 결정을 내린다.
+
+결정 후보:
+
+1. qmd collection quality tuning
+   - context 문구 개선
+   - collection split/merge
+   - large file handling
+2. qmd MCP/http integration
+   - `qmd mcp --http`
+   - OpenClaw / agent-config surface 연결 검토
+3. org doctor WARN triage 복귀
+   - qmd baseline이 충분히 서면 org 원천 정리로 돌아감
+
+산출물: NEXT.md의 다음 단일 항목으로 승격할 하나의 결정.
 
 금지 / 보류:
 
