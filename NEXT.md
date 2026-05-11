@@ -110,29 +110,51 @@ dry-run 기준 full rebuild 기대효과 (만약 한다면):
 
 **검색 품질 대폭 개선 목적이라면 full rebuild는 정당화되지 않는다.** 일관성 목적이면 GLG가 선택지로 가져갈 수 있다.
 
-### 지금 할 일 — 다음 한 가지 결정
+### 지금 할 일 — C2.0 transcript-window + line range read-only prototype
 
-A3 C1 commit/push 이후, 다음 **단일** 항목은 GLG 우선순위에 따라 두 갈래 중 하나:
+**결정일**: 2026-05-11
+**산출물**: `~/org/llmlog/20260511T104934--§andenken-c2-transcript-window-line-range-prep...org`
 
-**갈래 (a) — 일관성 우선**: full sessions rebuild로 새 sanitizer를 historical chunk에 적용. ~$0.063 / 31분. ROADMAP에 cutover 기록.
+A3 C1 직후 full sessions rebuild는 **일관성 정리**일 뿐 검색 품질 대폭 개선이 아니다. 따라서 지금은 rebuild하지 않고, 검색 품질을 직접 올릴 가능성이 큰 C2 본류로 간다.
 
-**갈래 (b) — 검색 품질 우선 (권장)**: C2 본류로 진입. 후보 두 가지 중 하나 선택:
+C2.0 목표:
 
-1. **transcript-window chunking** — OpenClaw식 multi-turn window. 가장 큰 recall 개선 가능성. DB schema 변경 필요. 풀 재인덱싱 동반.
-2. **lineMap / excerpt model** — chunk-to-source 정확도 개선. read-back UX 향상. DB schema에 line range 추가.
+> DB/API 없이 현재 session corpus에 OpenClaw식 transcript-window model을 적용해 chunk count, line range, sample, cost estimate를 검증한다. 결과가 좋을 때만 C2.1 implementation과 full rebuild를 판단한다.
 
-→ NEXT.md single-item 원칙에 따라 GLG가 갈래를 정해주면 그 항목 하나로 본 섹션을 갈아끼운다.
+C2.0에서 할 것:
 
-보조 참고 (C1 구현 시 참조 완료):
+- JSONL user/assistant messages를 `User:` / `Assistant:` transcript lines로 평탄화.
+- A3 C1 sanitizer를 그대로 사용.
+- rendered transcript line → original JSONL line `lineMap` 생성.
+- window chunks 생성: 기본 목표 400 tokens / 80 overlap.
+- 각 chunk에 `startLine`, `endLine`, `messageCount`, `roles`, `windowIndex` 산출.
+- old message-chunk vs new window-chunk count 비교.
+- sample 30~50개로 source line range 검증.
+- estimated tokens/cost 산출.
 
-- `/home/junghan/repos/3rd/openclaw/packages/memory-host-sdk/src/host/openclaw-runtime-session.ts`
-- `/home/junghan/repos/3rd/openclaw/src/agents/internal-runtime-context.ts`
-- `/home/junghan/repos/3rd/openclaw/src/auto-reply/reply/strip-inbound-meta.ts`
-- `/home/junghan/repos/3rd/openclaw/src/agents/pi-embedded-runner/tool-result-truncation.ts`
-- `/home/junghan/repos/3rd/openclaw/src/agents/pi-embedded-runner/transcript-rewrite.ts`
+C2.0에서 하지 말 것:
 
-주의: `transcript-rewrite.ts` / `tool-result-truncation.ts`는 live transcript maintenance 쪽이다.
-andenken indexing에 직접 참조한 본체는 `session-files.ts`의 `sanitizeSessionText` / `extractSessionText` 흐름이며, 그 중 strip helper 부분집합을 C1에 verbatim port 완료. 나머지는 본 문서의 "C1에서 의도적으로 뺀 것" 섹션 참조.
+- DB write
+- embedding API call
+- sessions full rebuild
+- search/sync 실행
+- store schema 변경
+- org/qmd 변경
+
+C2.1 후보 구현 방향 (C2.0 검토 후):
+
+- `SessionChunk.lineNumber = startLine` 으로 기존 result format 유지.
+- line range는 우선 `metadata.startLine` / `metadata.endLine` / `metadata.messageCount` / `metadata.windowIndex` 에 저장해 store schema 변경을 피한다.
+- chunk id는 `sessionFile:startLine-endLine:windowIndex` 형태.
+- excerpt/read helper는 별도 후속으로 붙인다.
+- 이 단계가 승인될 때만 full sessions rebuild를 품질 목적 비용으로 판단한다.
+
+보조 참고:
+
+- `/home/junghan/repos/3rd/openclaw/packages/memory-host-sdk/src/host/session-files.ts` — `buildSessionEntry()` / `lineMap`
+- `/home/junghan/repos/3rd/openclaw/packages/memory-host-sdk/src/host/internal.ts` — `chunkMarkdown()` / `remapChunkLines()`
+- `/home/junghan/repos/3rd/openclaw/packages/memory-host-sdk/src/host/session-files.test.ts` — lineMap / archive / invalid JSON / inbound metadata fixture
+- `/home/junghan/repos/3rd/openclaw/packages/memory-host-sdk/src/host/internal.test.ts` — chunking / surrogate pair / line remap fixture
 
 ## 트랙 B — org/qmd: 보류
 
