@@ -24,8 +24,36 @@ import { sanitizeSessionChunkText } from "./session-sanitize.js";
 export type SessionSource = "pi" | "claude";
 export type SourceFilter = SessionSource | "all";
 
+/**
+ * Normalize a `--source` argument for SEARCH paths.
+ *
+ * Search treats `"all"` and an omitted value as "no filter" — both collapse to
+ * `undefined`, which downstream callers pass to LanceDB push-down (no WHERE
+ * clause). Invalid values throw with a usable error message.
+ *
+ * @example
+ *   normalizeSourceFilter("pi")      // "pi"
+ *   normalizeSourceFilter("all")     // undefined (no filter)
+ *   normalizeSourceFilter(undefined) // undefined (no filter)
+ *   normalizeSourceFilter("PI")      // throws
+ */
 export function normalizeSourceFilter(raw: string | undefined): SessionSource | undefined {
   if (raw === undefined || raw === "all") return undefined;
+  if (raw === "pi" || raw === "claude") return raw;
+  throw new Error(`invalid source: ${raw}. Valid: pi | claude | all`);
+}
+
+/**
+ * Parse a `--source` argument for INDEXING / DRYRUN paths.
+ *
+ * Indexing-side scripts (sanitize-dryrun, window-dryrun) treat `"all"` as a
+ * concrete value — it means "iterate both pi and claude session files",
+ * which is distinct from "filter to pi or claude only". This variant keeps
+ * the `"all"` literal in the return type. Invalid values throw the same
+ * message family as `normalizeSourceFilter`.
+ */
+export function parseSourceArg(raw: string | undefined): SourceFilter {
+  if (raw === undefined || raw === "all") return "all";
   if (raw === "pi" || raw === "claude") return raw;
   throw new Error(`invalid source: ${raw}. Valid: pi | claude | all`);
 }

@@ -16,7 +16,8 @@ import {
   extractSessionChunks,
   findSessionFiles,
   findSessionFilesBySource,
-  type SessionSource,
+  parseSourceArg,
+  type SourceFilter,
 } from "../session-indexer.ts";
 import {
   buildSessionTranscriptEntry,
@@ -27,7 +28,7 @@ import {
 } from "../session-window.ts";
 
 interface CliArgs {
-  source: SessionSource | "all";
+  source: SourceFilter;
   limit: number | null;
   json: boolean;
   tokens: number;
@@ -47,9 +48,7 @@ function parseArgs(argv: string[]): CliArgs {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--source") {
-      const v = argv[++i];
-      if (v !== "pi" && v !== "claude" && v !== "all") throw new Error("--source must be pi|claude|all");
-      args.source = v;
+      args.source = parseSourceArg(argv[++i]);
     } else if (a === "--limit") {
       args.limit = Number(argv[++i]);
       if (!Number.isFinite(args.limit) || args.limit <= 0) throw new Error("--limit must be positive int");

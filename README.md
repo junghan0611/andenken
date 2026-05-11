@@ -130,7 +130,20 @@ andenken indexes two session sources:
 Do **not** index `~/.pi/agent/claude-config-overlay/projects`. It is the
 pi-shell-acp Claude overlay and would duplicate work already represented in pi
 sessions / entwurf messages. Valid source filters are `pi`, `claude`, and
-`all` (`pi + claude`) only.
+`all` (`pi + claude`) only. Invalid values are rejected with an explicit error.
+
+`session_search` / `search-sessions` source semantics:
+
+| `source` value      | Candidate pool        | Org cross-track fallback |
+|---------------------|-----------------------|--------------------------|
+| omitted / `all`     | pi + claude (mixed)   | enabled when results are thin |
+| `pi`                | pi only (LanceDB-side filter) | disabled (sessions-only intent) |
+| `claude`            | claude only (LanceDB-side filter) | disabled (sessions-only intent) |
+
+The source filter is pushed down into LanceDB at the vector / FTS / substring
+query level so the candidate pool is source-specific. Explicit `pi` or `claude`
+also suppresses the org knowledge fallback — if the caller named a session
+source, they asked for sessions, not org notes.
 
 ## Scope and safety policy
 

@@ -372,7 +372,10 @@ export default function (pi: ExtensionAPI) {
       source: Type.Optional(
         Type.Union(
           [Type.Literal("pi"), Type.Literal("claude"), Type.Literal("all")],
-          { description: "Filter by source. Default: all (no filter)." },
+          {
+            description:
+              "Filter by session source. Default 'all' = pi + claude, with org knowledge cross-track fallback when sessions results are thin. Explicit 'pi' or 'claude' restricts the candidate pool to that source AND disables the org fallback (sessions-only intent).",
+          },
         ),
       ),
       withExcerpt: Type.Optional(

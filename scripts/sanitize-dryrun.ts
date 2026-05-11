@@ -35,12 +35,14 @@ import {
   detectSource,
   isNoise,
   passesLengthFilter,
+  parseSourceArg,
   type SessionSource,
+  type SourceFilter,
 } from "../session-indexer.ts";
 import { sanitizeSessionChunkText } from "../session-sanitize.ts";
 
 interface CliArgs {
-  source: SessionSource | "all";
+  source: SourceFilter;
   limit: number | null;
   json: boolean;
 }
@@ -52,11 +54,7 @@ function parseArgs(argv: string[]): CliArgs {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--source") {
-      const v = argv[++i];
-      if (v !== "pi" && v !== "claude" && v !== "all") {
-        throw new Error(`--source must be pi|claude|all, got ${v}`);
-      }
-      source = v;
+      source = parseSourceArg(argv[++i]);
     } else if (a === "--limit") {
       limit = Number(argv[++i]);
       if (!Number.isFinite(limit) || limit <= 0) throw new Error("--limit must be positive int");
