@@ -27,6 +27,7 @@ import { VectorStore, getOrgDbPath, getDataDir } from "./store.js";
 import {
   findSessionFiles,
   extractSessionChunks,
+  normalizeSourceFilter,
 } from "./session-indexer.js";
 import { retrieve, expandQueryForBM25, getShortCJKTokens } from "./retriever.js";
 import { readSessionExcerpt, type SessionExcerpt } from "./session-excerpt.js";
@@ -369,9 +370,10 @@ export default function (pi: ExtensionAPI) {
         }),
       ),
       source: Type.Optional(
-        Type.String({
-          description: "Filter by source: 'pi' or 'claude' (default: all)",
-        }),
+        Type.Union(
+          [Type.Literal("pi"), Type.Literal("claude"), Type.Literal("all")],
+          { description: "Filter by source. Default: all (no filter)." },
+        ),
       ),
       withExcerpt: Type.Optional(
         Type.Boolean({
@@ -430,9 +432,10 @@ export default function (pi: ExtensionAPI) {
 
       const candidates = Math.min(limit * 4, 200); // openclaw candidateMultiplier
       const queryVector = await sessP.embedQuery(enrichedQuery);
-      const vectorResults = await getSessionStore().search(queryVector, candidates);
+      const sourceFilter = normalizeSourceFilter(params.source);
+      const vectorResults = await getSessionStore().search(queryVector, candidates, 0.1, sourceFilter);
       const bm25Query = expandQueryForBM25(enrichedQuery); // include dictcli expand terms in FTS
-      const ftsResults = await getSessionStore().fullTextSearch(bm25Query, candidates);
+      const ftsResults = await getSessionStore().fullTextSearch(bm25Query, candidates, sourceFilter);
 
       // Track 1 — CJK substring fallback for tokens LanceDB FTS drops
       // (1-2 char Hangul like "맘", "갑", "쟈", "맘마"). Augments the FTS
@@ -449,7 +452,7 @@ export default function (pi: ExtensionAPI) {
       if (shortTokens.length > 0) {
         const ftsIds = new Set(ftsResults.map((r) => r.id));
         const subLists = await Promise.all(
-          shortTokens.map((t) => getSessionStore().substringSearch(t, candidates)),
+          shortTokens.map((t) => getSessionStore().substringSearch(t, candidates, sourceFilter)),
         );
         const subFlat: typeof ftsResults = [];
         const subSeen = new Set<string>();
@@ -481,8 +484,8 @@ export default function (pi: ExtensionAPI) {
         mmr: { enabled: false, lambda: 0.7 },
       });
 
-      // Source filter (pi | claude)
-      const sourceFilter = params.source;
+      // Source filter is pushed down to LanceDB before retrieval so the candidate
+      // pool is source-specific. Keep this defensive filter for older DB rows.
       if (sourceFilter) {
         results = results.filter((r) => r.source === sourceFilter);
       }
@@ -505,7 +508,7 @@ export default function (pi: ExtensionAPI) {
       const topScore = results[0]?.score ?? 0;
       let fallbackUsed = false;
       let fallbackDiagnostic: string | null = null;
-      const wantsFallback = results.length < 3 || topScore < 0.005;
+      const wantsFallback = !sourceFilter && (results.length < 3 || topScore < 0.005);
       if (wantsFallback) {
         if (!orgReady) {
           fallbackDiagnostic = "knowledge fallback skipped: org store not ready";
@@ -786,6 +789,7 @@ async function fetchExcerptsForResults(
 ): Promise<Map<string, SessionExcerpt>> {
   const out = new Map<string, SessionExcerpt>();
   for (const r of results) {
+    if ((r.source !== "pi" && r.source !== "claude") || !r.sessionFile.endsWith(".jsonl")) continue;
     try {
       const ex = await readSessionExcerpt(r.sessionFile, r.lineNumber);
       out.set(r.id, ex);

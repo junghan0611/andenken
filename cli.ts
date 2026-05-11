@@ -21,7 +21,7 @@ import {
   type EmbeddingProvider,
 } from "./embedding-provider.js";
 import { VectorStore, getSessionsDbPath, getOrgDbPath, getDataDir, type SearchResult } from "./store.js";
-import { findSessionFiles, extractSessionChunks } from "./session-indexer.js";
+import { findSessionFiles, extractSessionChunks, normalizeSourceFilter } from "./session-indexer.js";
 import { retrieve, expandQueryForBM25, getShortCJKTokens, type MergeStrategy } from "./retriever.js";
 import { readSessionExcerpt, type SessionExcerpt } from "./session-excerpt.js";
 
@@ -151,7 +151,7 @@ async function searchSessions(
   limit: number,
   opts: SessionSearchOpts = {},
 ): Promise<void> {
-  const source = opts.source;
+  const source = normalizeSourceFilter(opts.source);
   const provider = getSessionsProvider();
   const dim = provider.dimensions || 2560;
 
@@ -189,8 +189,8 @@ async function searchSessions(
   const candidates = Math.min(limit * 4, 200); // openclaw candidateMultiplier pattern
   const queryVector = await provider.embedQuery(enrichedQuery);
   const bm25Query = expandQueryForBM25(enrichedQuery); // include dictcli expand terms in FTS
-  const vectorResults = await store.search(queryVector, candidates);
-  const ftsResults = await store.fullTextSearch(bm25Query, candidates);
+  const vectorResults = await store.search(queryVector, candidates, 0.1, source);
+  const ftsResults = await store.fullTextSearch(bm25Query, candidates, source);
 
   // Track 1 — CJK substring fallback (mirrors index.ts session_search path).
   // Short Hangul tokens like "맘", "갑", "쟈" return 0 hits via LanceDB FTS;
@@ -202,7 +202,7 @@ async function searchSessions(
   if (shortTokens.length > 0) {
     const ftsIds = new Set(ftsResults.map((r) => r.id));
     const subLists = await Promise.all(
-      shortTokens.map((t) => store.substringSearch(t, candidates)),
+      shortTokens.map((t) => store.substringSearch(t, candidates, source)),
     );
     const subFlat: typeof ftsResults = [];
     const subSeen = new Set<string>();
@@ -234,7 +234,8 @@ async function searchSessions(
     mmr: { enabled: false, lambda: 0.7 },
   });
 
-  // Source filter (pi | claude)
+  // Source filter is pushed down to LanceDB before retrieval so the candidate
+  // pool is source-specific. Keep this defensive filter for older DB rows.
   if (source) {
     results = results.filter((r) => r.source === source);
   }
@@ -250,7 +251,7 @@ async function searchSessions(
   let fallbackDiagnostic: string | undefined;
   const topScore = results[0]?.score ?? 0;
   const wantsFallback =
-    fs.existsSync(orgDbPath) && (results.length < 3 || topScore < 0.005);
+    !source && fs.existsSync(orgDbPath) && (results.length < 3 || topScore < 0.005);
   if (wantsFallback) {
     let orgProvider: EmbeddingProvider | null = null;
     try {
@@ -302,6 +303,7 @@ async function searchSessions(
     const n = Math.max(0, Math.min(opts.excerptLimit ?? 3, finalResults.length));
     excerpts = new Map();
     for (const r of finalResults.slice(0, n)) {
+      if ((r.source !== "pi" && r.source !== "claude") || !r.sessionFile.endsWith(".jsonl")) continue;
       try {
         excerpts.set(r.id, await readSessionExcerpt(r.sessionFile, r.lineNumber));
       } catch {
@@ -546,7 +548,7 @@ async function main() {
         console.error(
           JSON.stringify({
             error:
-              "Usage: search-sessions <query> [--limit N] [--source pi|claude] [--with-excerpt] [--excerpt-limit N]",
+              "Usage: search-sessions <query> [--limit N] [--source pi|claude|all] [--with-excerpt] [--excerpt-limit N]",
           }),
         );
         process.exit(1);

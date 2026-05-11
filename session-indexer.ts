@@ -22,6 +22,13 @@ import * as readline from "node:readline";
 import { sanitizeSessionChunkText } from "./session-sanitize.js";
 
 export type SessionSource = "pi" | "claude";
+export type SourceFilter = SessionSource | "all";
+
+export function normalizeSourceFilter(raw: string | undefined): SessionSource | undefined {
+  if (raw === undefined || raw === "all") return undefined;
+  if (raw === "pi" || raw === "claude") return raw;
+  throw new Error(`invalid source: ${raw}. Valid: pi | claude | all`);
+}
 
 export interface SessionChunk {
   id: string; // unique: sessionFile:lineNumber

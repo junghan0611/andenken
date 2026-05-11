@@ -11,6 +11,7 @@
 import type * as LanceDB from "@lancedb/lancedb";
 import * as path from "node:path";
 import * as fs from "node:fs";
+import type { SessionSource } from "./session-indexer.js";
 
 // Lazy import to avoid startup cost
 let lancedbImportPromise: Promise<typeof import("@lancedb/lancedb")> | null =
@@ -221,16 +222,16 @@ export class VectorStore {
     queryVector: number[],
     limit: number = 10,
     minScore: number = 0.1,
+    sourceFilter?: SessionSource,
   ): Promise<SearchResult[]> {
     await this.ensureInitialized();
     if (!this.table) return [];
 
     let results;
     try {
-      results = await this.table
-        .vectorSearch(queryVector)
-        .limit(limit)
-        .toArray();
+      let query = this.table.vectorSearch(queryVector);
+      if (sourceFilter) query = query.where(`source = '${sourceFilter}'`);
+      results = await query.limit(limit).toArray();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       // Dimension mismatch: index built with different provider
@@ -266,14 +267,17 @@ export class VectorStore {
   async fullTextSearch(
     query: string,
     limit: number = 10,
+    sourceFilter?: SessionSource,
   ): Promise<SearchResult[]> {
     await this.ensureInitialized();
     if (!this.table) return [];
 
     try {
-      const results = await this.table
+      let lanceQuery = this.table
         .query()
-        .fullTextSearch(query)
+        .fullTextSearch(query);
+      if (sourceFilter) lanceQuery = lanceQuery.where(`source = '${sourceFilter}'`);
+      const results = await lanceQuery
         .select([
           "id",
           "text",
@@ -322,6 +326,7 @@ export class VectorStore {
   async substringSearch(
     term: string,
     limit: number = 10,
+    sourceFilter?: SessionSource,
   ): Promise<SearchResult[]> {
     await this.ensureInitialized();
     if (!this.table) return [];
@@ -329,9 +334,12 @@ export class VectorStore {
     // Escape single quotes for SQL string literal
     const safe = term.replace(/'/g, "''");
     try {
+      const where = sourceFilter
+        ? `contains(text, '${safe}') AND source = '${sourceFilter}'`
+        : `contains(text, '${safe}')`;
       const results = await this.table
         .query()
-        .where(`contains(text, '${safe}')`)
+        .where(where)
         .select([
           "id",
           "text",
