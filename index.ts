@@ -29,6 +29,7 @@ import {
   extractSessionChunks,
 } from "./session-indexer.js";
 import { retrieve, expandQueryForBM25, getShortCJKTokens } from "./retriever.js";
+import { readSessionExcerpt, type SessionExcerpt } from "./session-excerpt.js";
 
 // Re-declare minimal SearchResult to avoid jiti-incompatible import() type syntax
 interface SearchResult {
@@ -372,6 +373,20 @@ export default function (pi: ExtensionAPI) {
           description: "Filter by source: 'pi' or 'claude' (default: all)",
         }),
       ),
+      withExcerpt: Type.Optional(
+        Type.Boolean({
+          description:
+            "If true, attach a read-only excerpt around each top result's lineNumber, expanding User/Assistant/toolResult/entwurf flow from the original JSONL. No API/DB writes. Default false.",
+          default: false,
+        }),
+      ),
+      excerptLimit: Type.Optional(
+        Type.Number({
+          description:
+            "How many top hits get an attached excerpt when withExcerpt=true. Default 3.",
+          default: 3,
+        }),
+      ),
     }),
 
     async execute(_toolCallId, params) {
@@ -529,9 +544,21 @@ export default function (pi: ExtensionAPI) {
 
       const finalResults = results.slice(0, limit);
       recordRecall(params.query, "session_search", finalResults);
+
+      // C2.1c — opt-in excerpt attachment for top hits.
+      // Pure read-only: no API, no DB write. We tolerate per-file errors
+      // (e.g. JSONL deleted since indexing) and just skip excerpt for that
+      // hit rather than failing the whole search.
+      let excerpts: Map<string, SessionExcerpt> | undefined;
+      if (params.withExcerpt) {
+        const excerptLimit = Math.max(0, Math.min(params.excerptLimit ?? 3, finalResults.length));
+        excerpts = await fetchExcerptsForResults(finalResults.slice(0, excerptLimit));
+      }
+
       const output = formatResults(
         expanded.length > 0 ? `${params.query} (+expand: ${expanded.join(", ")})` : params.query,
         finalResults,
+        excerpts,
       );
       if (fallbackUsed) {
         output.content[0].text += "\n\n(⚡ session 결과 부족 → knowledge_search 폴백 포함)";
@@ -748,7 +775,32 @@ export default function (pi: ExtensionAPI) {
 
 // --- Helpers ---
 
-function formatResults(query: string, results: SearchResult[]) {
+/**
+ * Read excerpts for the top-N hits. Returns a Map keyed by `sessionFile:line`
+ * (matching `SearchResult.id` shape from session-indexer.ts) → SessionExcerpt.
+ * Errors per file are swallowed so a single missing JSONL never breaks the
+ * whole search.
+ */
+async function fetchExcerptsForResults(
+  results: SearchResult[],
+): Promise<Map<string, SessionExcerpt>> {
+  const out = new Map<string, SessionExcerpt>();
+  for (const r of results) {
+    try {
+      const ex = await readSessionExcerpt(r.sessionFile, r.lineNumber);
+      out.set(r.id, ex);
+    } catch {
+      // file may have been deleted/rotated since indexing — skip silently
+    }
+  }
+  return out;
+}
+
+function formatResults(
+  query: string,
+  results: SearchResult[],
+  excerpts?: Map<string, SessionExcerpt>,
+) {
   if (results.length === 0) {
     return {
       content: [{ type: "text" as const, text: `No results for: "${query}"` }],
@@ -769,6 +821,14 @@ function formatResults(query: string, results: SearchResult[]) {
         `- Time: ${r.timestamp}`,
         `- Text:\n${r.text.slice(0, 500)}${r.text.length > 500 ? "..." : ""}`,
       ];
+      const ex = excerpts?.get(r.id);
+      if (ex) {
+        const truncTag = ex.truncated ? " (truncated)" : "";
+        lines.push(
+          `- Excerpt L${ex.startLine}-L${ex.endLine}${truncTag}:`,
+          ex.text,
+        );
+      }
       return lines.join("\n");
     })
     .join("\n\n---\n\n");
@@ -783,15 +843,27 @@ function formatResults(query: string, results: SearchResult[]) {
     details: {
       query,
       resultCount: results.length,
-      results: results.map((r) => ({
-        id: r.id,
-        project: r.project,
-        role: r.role,
-        source: r.source,
-        score: r.score,
-        sessionFile: r.sessionFile,
-        lineNumber: r.lineNumber,
-      })) as Array<Record<string, unknown>>,
+      results: results.map((r) => {
+        const ex = excerpts?.get(r.id);
+        const base: Record<string, unknown> = {
+          id: r.id,
+          project: r.project,
+          role: r.role,
+          source: r.source,
+          score: r.score,
+          sessionFile: r.sessionFile,
+          lineNumber: r.lineNumber,
+        };
+        if (ex) {
+          base.excerpt = {
+            startLine: ex.startLine,
+            endLine: ex.endLine,
+            truncated: ex.truncated,
+            text: ex.text,
+          };
+        }
+        return base;
+      }) as Array<Record<string, unknown>>,
     },
   };
 }

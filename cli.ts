@@ -23,6 +23,7 @@ import {
 import { VectorStore, getSessionsDbPath, getOrgDbPath, getDataDir, type SearchResult } from "./store.js";
 import { findSessionFiles, extractSessionChunks } from "./session-indexer.js";
 import { retrieve, expandQueryForBM25, getShortCJKTokens, type MergeStrategy } from "./retriever.js";
+import { readSessionExcerpt, type SessionExcerpt } from "./session-excerpt.js";
 
 // --- Recall Tracking (memory consolidation stage 2) ---
 
@@ -139,7 +140,18 @@ const orgDbPath = getOrgDbPath();
 
 // --- Commands ---
 
-async function searchSessions(query: string, limit: number, source?: string): Promise<void> {
+interface SessionSearchOpts {
+  source?: string;
+  withExcerpt?: boolean;
+  excerptLimit?: number;
+}
+
+async function searchSessions(
+  query: string,
+  limit: number,
+  opts: SessionSearchOpts = {},
+): Promise<void> {
+  const source = opts.source;
   const provider = getSessionsProvider();
   const dim = provider.dimensions || 2560;
 
@@ -283,6 +295,21 @@ async function searchSessions(query: string, limit: number, source?: string): Pr
 
   const finalResults = results.slice(0, limit);
   recordRecall(query, "search-sessions", finalResults);
+
+  // C2.1c — opt-in excerpt attachment for top hits.
+  let excerpts: Map<string, SessionExcerpt> | undefined;
+  if (opts.withExcerpt) {
+    const n = Math.max(0, Math.min(opts.excerptLimit ?? 3, finalResults.length));
+    excerpts = new Map();
+    for (const r of finalResults.slice(0, n)) {
+      try {
+        excerpts.set(r.id, await readSessionExcerpt(r.sessionFile, r.lineNumber));
+      } catch {
+        /* skip silently — file may have rotated since indexing */
+      }
+    }
+  }
+
   console.log(
     JSON.stringify({
       query,
@@ -290,7 +317,7 @@ async function searchSessions(query: string, limit: number, source?: string): Pr
       fallback,
       diagnostic: fallbackDiagnostic,
       count: finalResults.length,
-      results: finalResults.map(formatResult),
+      results: finalResults.map((r) => formatResult(r, excerpts?.get(r.id))),
     }),
   );
 
@@ -352,7 +379,7 @@ async function searchKnowledge(query: string, limit: number): Promise<void> {
       query,
       expanded: expanded.length > 0 ? expanded : undefined,
       count: finalResults.length,
-      results: finalResults.map(formatResult),
+      results: finalResults.map((r) => formatResult(r)),
     }),
   );
 
@@ -462,8 +489,8 @@ async function reindex(force: boolean): Promise<void> {
 
 // --- Helpers ---
 
-function formatResult(r: SearchResult) {
-  return {
+function formatResult(r: SearchResult, excerpt?: SessionExcerpt) {
+  const base: Record<string, unknown> = {
     project: r.project,
     role: r.role,
     source: r.source || undefined,
@@ -473,6 +500,15 @@ function formatResult(r: SearchResult) {
     timestamp: r.timestamp,
     text: r.text.slice(0, 800) + (r.text.length > 800 ? "..." : ""),
   };
+  if (excerpt) {
+    base.excerpt = {
+      startLine: excerpt.startLine,
+      endLine: excerpt.endLine,
+      truncated: excerpt.truncated,
+      text: excerpt.text,
+    };
+  }
+  return base;
 }
 
 // --- Arg parsing ---
@@ -507,10 +543,26 @@ async function main() {
     case "search": {
       const query = positional.join(" ");
       if (!query) {
-        console.error(JSON.stringify({ error: "Usage: search-sessions <query> [--limit N]" }));
+        console.error(
+          JSON.stringify({
+            error:
+              "Usage: search-sessions <query> [--limit N] [--source pi|claude] [--with-excerpt] [--excerpt-limit N]",
+          }),
+        );
         process.exit(1);
       }
-      await searchSessions(query, limit, flags.source);
+      // parseArgs is presence-based for boolean flags: any of `--with-excerpt`,
+      // `--with-excerpt true`, or `--with-excerpt --next-flag` should enable it.
+      const withExcerpt = "with-excerpt" in flags && flags["with-excerpt"] !== "false";
+      const excerptLimit =
+        "excerpt-limit" in flags && flags["excerpt-limit"] && !flags["excerpt-limit"].startsWith("--")
+          ? parseInt(flags["excerpt-limit"], 10)
+          : undefined;
+      await searchSessions(query, limit, {
+        source: flags.source,
+        withExcerpt,
+        excerptLimit,
+      });
       break;
     }
     case "search-knowledge":

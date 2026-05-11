@@ -245,27 +245,65 @@ Claude 검수 10-query matrix 기준 PASS.
 - dictcli expansion 이슈는 별도. 예: `초기`가 `initial/early`가 아니라 `enactment/establishment/institution` 쪽으로 확장됨.
 - cross-source ranking weight는 **source별 가중치로 pi를 더 세게 밀자는 뜻이 아니다**. corpus가 pi 중심이면 pi가 자연스럽게 더 자주 나온다. 별도 weight는 오히려 Claude Code의 희소하지만 중요한 hit를 묻을 수 있다. 필요하면 source prior보다 `source` 필터(`pi`/`claude`/`all`)와 source별 진단 지표를 먼저 다룬다.
 
-### 지금 할 일 — C2.1c `session_search.withExcerpt` 옵션
+### C2.1c 완료 — `session_search.withExcerpt` 옵션
 
-다음 단일 항목은 C2.1c다.
+**완료일**: 2026-05-11
 
-목표: 검색 결과에 C2.1a excerpt를 선택적으로 붙여, “찾기 → 주변 원문맥 펼치기”를 한 번에 한다. full rebuild 없이 품질 체감이 가장 큰 다음 단계다.
+C2.1a `readSessionExcerpt`를 검색 경로에 opt-in으로 연결. 검색 결과 top N개에 주변 JSONL 원문맥(toolResult/assistant/entwurf/Claude tool_result)을 그대로 붙여 "찾기 → 펼침"을 한 번에 한다.
 
-범위:
+#### 산출물
 
-- pi extension `session_search` parameter에 `withExcerpt?: boolean` 추가.
-- CLI `search-sessions`에도 `--with-excerpt` 추가 여부 검토.
-- 기본값은 `false`. 토큰/출력 폭증을 막기 위해 명시 opt-in.
-- excerpt 기본 옵션은 C2.1a 기본값(`before=3`, `after=3`, `maxChars=4000`)보다 작게 시작하는 것도 검토 (`before=1`, `after=1`, `maxChars=2000`).
-- result당 excerpt는 top N에만 붙인다. 후보: `excerptLimit=3` 기본.
+| 파일 | 변경 |
+|---|---|
+| `index.ts` | `session_search` tool에 `withExcerpt?: boolean`(default false) + `excerptLimit?: number`(default 3). `formatResults()` 가 excerpts Map을 받아 텍스트와 details에 모두 포함. `fetchExcerptsForResults()` helper. |
+| `cli.ts` | `searchSessions(query, limit, opts)`로 시그니처 변경. `--with-excerpt` / `--excerpt-limit N` 플래그 추가. `formatResult(r, excerpt?)`로 확장. |
+
+#### 안전 경계
+
+- 기본값은 `false` — 기존 `session_search` 출력 완전 호환.
+- excerpt 옵션은 `readSessionExcerpt` 기본값(before=3 / after=3 / maxChars=4000) 그대로. 추가 튜닝 안 함.
+- 파일이 indexing 후 회전/삭제된 경우 per-hit `try/catch`로 silent skip — 검색 자체는 성공.
 - DB write / embedding API / rebuild 없음.
 
-검증:
+#### 검증
 
-- 기존 `session_search` 출력 완전 호환 (`withExcerpt=false`).
-- `withExcerpt=true`에서 pi toolResult, entwurf-message, Claude tool_result가 적어도 하나씩 sample로 확인.
-- score/fallback 동작 변화 없음.
-- 8B/4096d score range 관찰을 함께 기록한다. 현재 검수 범위는 `~0.004–0.066`; `retriever.ts`/fallback의 임계값이 이 분포와 맞는지 read-only로 확인하고, 조정은 별도 승인 후 진행한다.
+- `pnpm exec tsc --noEmit`: clean
+- baseline: `./run.sh search "C2.1a excerpt 구현" --limit 3` → 모든 결과 `has_excerpt: false` (기존 동작 유지)
+- opt-in: `--with-excerpt --excerpt-limit 2` → top 2개에 `excerpt.startLine/endLine/truncated/text` 첨부, 3번째는 미첨부 (excerptLimit 정확히 적용)
+- claude tool_result 펼침 확인: doomemacs-config L268 hit가 17 line 펼쳐짐 (`Bash toolCall + tool result + assistant 본문`)
+- pi entwurf-heavy 펼침 확인: andenken L279 → "User: 응 알았어. 우리 recap하자." 직전 사용자 발화까지 자연 복원
+
+#### Score range 메모 (조정은 별도)
+
+- 8B/4096d top-K score 분포: 약 `0.004–0.066` (Q1–Q10 검수 평균)
+- `retriever.ts` `minScore: 0.05` (org-side default), `index.ts` `wantsFallback = topScore < 0.005` (sessions fallback trigger) — 8B 분포에 비추면 `minScore`는 너무 높을 수 있고 `0.005`는 합리적. 조정은 추후 실측 + 별도 승인.
+
+### Sessions 트랙 close — org/qmd 트랙으로 이동
+
+**선언일**: 2026-05-11
+
+다음 항목들은 안정화로 판단. 추가 작업은 새 결정 단위(commit/llmlog/NEXT.md 갱신)로 들어와야 한다:
+
+- A1 8B/4096 cutover, A2 read-only mapping, A3 C1 sanitization port, sessions full rebuild, C2.0 transcript-window dry-run, C2.1a excerpt readback, C2.1c session_search.withExcerpt 모두 완료.
+- session manifest는 mtime+size+chunks 기반 정상 동작.
+- search 품질 검수 PASS.
+
+#### Sessions 트랙에서 **지금** 안 하는 것 (보류 명시)
+
+| 항목 | 사유 |
+|---|---|
+| transcript-window production 적용 | C2.0 결과 400/80은 +21.79% chunk 폭증, 비용/품질 정당화 부족. 더 큰 window 후보(600/100, 800/120)는 별도 dry-run 후 판단. |
+| toolResult / entwurf-message indexing | chunk 폭증/노이즈 위험. C2.1a excerpt가 readback 측면에서 이 데이터를 이미 surface함. dry-run 후보지만 지금 필수 아님. |
+| cross-source ranking weight | pi가 corpus 우세하면 pi가 자연히 더 자주 hit. 인위적 weight는 claude의 희소하지만 중요한 hit를 묻을 수 있음. |
+| score threshold 조정 | 관찰 항목. 랭킹이 맞으면 지금 조정하지 않음. |
+| source policy guard (overlay 거부 명시화) | 작은 chore로 별도 처리. 현재는 `findSessionFiles*()`가 자연 제외하므로 차단 가드는 없음. |
+| dictcli vocab 보정 (`초기` 등 약한 expansion) | dictcli 측 별도 작업. andenken 트랙 외. |
+
+#### 다음 트랙 = org/qmd
+
+다음 단일 항목은 GLG가 org/qmd 트랙에서 새로 잡는다. NEXT.md는 그 시점에 새 트랙 헤더로 재구성한다.
+
+(이 NEXT.md 본문은 sessions 트랙 history로 보존; org/qmd 작업은 `### 트랙 B — org/qmd` 섹션을 새로 열어 진행)
 
 #### 별도 이슈 — dictcli expansion 보정
 
