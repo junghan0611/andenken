@@ -202,108 +202,85 @@ C2.0 산출:
 
 session sources는 정확히 둘만 지원: `pi` = `~/.pi/agent/sessions`, `claude` = `~/.claude/projects`. `~/.pi/agent/claude-config-overlay/projects`는 절대 인덱싱 금지 (pi/entwurf 중복). excerpt는 path-based read이므로 source enumeration을 강제하지 않지만, `detectSource()`(session-indexer.ts)는 `/.claude/` substring 기준으로 동작하므로 overlay 경로는 자동으로 `pi`로 분류됨. 이는 정책과 어긋나지 않음 (excerpt는 indexer가 발견한 파일만 받는 게 정상 흐름).
 
-### 지금 할 일 — 다음 단일 항목 결정 대기
+### Sessions full rebuild 완료 — 8B/4096d 전체 재임베딩
 
-C2.1a 완료. 다음 후보:
+**완료일**: 2026-05-11
 
-1. **C2.1b — source policy optionalization 검토**: indexer가 `pi` / `claude` / `all`만 받도록 명시적 enum 확립, overlay 경로 거부 단정. 현재는 `findSessionFiles*()` 로직상 overlay가 자연스럽게 빠져있지만 가드는 없음.
-2. **C2.1c — `session_search` tool에 `withExcerpt: boolean` 옵션 추가**: 검색 결과에 자동으로 excerpt 첨부. 활용도가 직접 검증되는 단계.
-3. **C2.2 — entwurf-message / toolResult 인덱싱 dry-run**: 현재 silent skip되는 데이터 인덱싱 시 chunk 수 폭증 / 비용 영향 추정.
-4. **window chunking revised dry-run** (C2.0의 600/100, 800/120 등 재시도): C2.1a 도입 후에도 windowing 가치 있는지 재평가.
+GLG 승인으로 sessions corpus를 OpenRouter Qwen3-Embedding-8B 4096d 기준으로 전체 재임베딩했다. org track은 무접촉.
 
-GLG가 단일 항목 골라주면 이어간다. 그 전까지는 C2.1a 완료 상태로 정지.
+| 항목 | 값 |
+|---|---:|
+| files | 1,653 |
+| chunks | 28,537 |
+| indexed files | 1,611 |
+| dim | 4096d |
+| duration | 2,574.8s (~42.9분) |
+| API calls | 1,773 |
+| tokens | ~6.48M |
+| cost | ~$0.065 |
+| errors | 0 |
 
-#### C2.1a 폐기 — 작업 지시 원문 (참고 보존)
+검증:
 
-**결정일(원래)**: 2026-05-11
-**큰 방향**: lineMap/excerpt first 승인. 현재 message-per-chunk 구조 유지, DB/embedding/full rebuild 무접촉. 검색 hit `sessionFile + lineNumber`를 입력으로 주변 JSONL을 read-only로 렌더링하는 helper/CLI를 만든다.
+- `verify sessions`: pass
+- duplicate IDs 없음 (`28,537 unique`)
+- orphan files 없음 (`1,611 files all exist`)
+- row count consistent (`28,537`)
+- Lance fragments: 23, size 542M
 
-#### 우리 corpus 실측 (codex 1.2MB / 272-line entwurf 세션 기준)
+#### 품질 검수 요약
 
-| 카테고리 | 라인 비율 | 현재 indexer 처리 |
-|---|---:|---|
-| `type=message` assistant | 38% | 인덱싱 ✓ (단 tool-only turn은 텍스트 0으로 drop, p50=0) |
-| `type=message` toolResult | **54%** | **silent skip** |
-| `type=message` user | 4% | 인덱싱 ✓ |
-| `type=custom_message` `entwurf-message` (display=true) | ~2% | **silent skip** ← 분신 통신 전문 |
-| `type=custom` skill_loaded 등 (display=false) | ~3% | skip — 정당 |
+Claude 검수 10-query matrix 기준 PASS.
 
-OpenClaw 가정과 다른 점: 한 turn이 매우 길고(user p50≈1.5K chars / max 6.8K), tool-rich, 분신 통신은 별도 channel.
+- 최신성: 2026-05-11 C2.1a running session까지 hit.
+- 시간 폭: 3월~5월 분포 정상.
+- 언어: Korean / English / mixed 모두 동작.
+- source: `pi` 우세, `claude`도 cross-source 검색에 노출. overlay 미포함 정책 위반 없음.
+- sanitization: A3 C1 회귀 없음. 옛 envelope leakage 없음.
+- excerpt: search hit `file:L#` → 앞뒤 toolResult + assistant 흐름으로 펼쳐지는 C2.1a 가치 실증.
 
-#### 파라미터 default
+알아둘 점:
 
-| 항목 | 값 | 근거 |
-|---|---|---|
-| `beforeLines` | 3 | turn당 1.5KB+, raw 6 lines가 ~3-4 turn 컨텍스트로 적정 |
-| `afterLines` | 3 | 동일 |
-| `maxChars` | 4000 | LLM 컨텍스트 추가 cost cap |
-| `includeToolResults` | true | assistant 결정의 인과 보존 |
-| `includeSessionMessages` | true | entwurf-message 등 inter-agent 통신 노출 |
+- Score range가 8B/4096d에서 매우 압축됨 (`~0.004–0.066`). 랭킹은 맞지만 `minScore`/fallback threshold는 추후 실측 기반으로 조정해야 한다.
+- dictcli expansion 이슈는 별도. 예: `초기`가 `initial/early`가 아니라 `enactment/establishment/institution` 쪽으로 확장됨.
+- cross-source ranking weight는 **source별 가중치로 pi를 더 세게 밀자는 뜻이 아니다**. corpus가 pi 중심이면 pi가 자연스럽게 더 자주 나온다. 별도 weight는 오히려 Claude Code의 희소하지만 중요한 hit를 묻을 수 있다. 필요하면 source prior보다 `source` 필터(`pi`/`claude`/`all`)와 source별 진단 지표를 먼저 다룬다.
 
-CLI는 명시적 override 허용 (`--before 8 --after 8 --max 8000 --no-tool --no-session`).
+### 지금 할 일 — C2.1c `session_search.withExcerpt` 옵션
 
-#### 렌더링 룰 (라인 종류별)
+다음 단일 항목은 C2.1c다.
 
-| 라인 종류 | 렌더 |
-|---|---|
-| `message` user | `User: <sanitized text>` (A3 C1 sanitizer 재사용) |
-| `message` assistant 텍스트 | `Assistant: <sanitized text>` |
-| `message` assistant tool-only (pi `toolCall` / claude `tool_use`) | `Assistant: [tool: <name>(<short args>)] [tool: ...]` (여러 toolCall 한 줄) |
-| `message` toolResult | `→ tool result [<toolName><" ERROR" if isError>]: <첫 200자>... [N chars total]` |
-| `custom_message` `display=true` 중 `entwurf-message` / `session-message` / `delegate-complete` | `Entwurf[<sender-prefix>→<receiver-prefix>]: <full text>` |
-| `custom_message` `display=false` (예: `session-info`) | skip |
-| `custom_message` `entwurf-sessions` | skip (default) |
-| `compaction` | `[Compaction summary] <text>` |
-| `custom` (skill_loaded, model_change 등) | skip |
-| invalid JSON | skip + count |
+목표: 검색 결과에 C2.1a excerpt를 선택적으로 붙여, “찾기 → 주변 원문맥 펼치기”를 한 번에 한다. full rebuild 없이 품질 체감이 가장 큰 다음 단계다.
 
-#### 5가지 추가 규칙 (GLG/지피티 검토 반영)
+범위:
 
-1. **center-preserving truncation**: maxChars 초과 시 centerLine 무조건 보존, 가장 먼 line부터 양쪽 균형으로 제거. 단순 head/tail truncate 금지.
-2. **includeSessionMessages 범위**: `entwurf-message` / `session-message` / `delegate-complete` (display=true). `session-info` 같은 display=false는 skip. `entwurf-sessions`는 default skip.
-3. **toolResult 렌더에 toolName/isError 포함**: `→ tool result [bash ERROR]: ...`. pi 스키마 확인 — `.message.toolName` + `.message.isError` 존재.
-4. **assistant tool-only는 여러 toolCall 짧게**: `Assistant: [tool: read(path=...)] [tool: bash(command=...)]`. pi block schema는 `{type:"toolCall", name, arguments}`, claude는 `{type:"tool_use", name, input}`.
-5. **skipped 라인은 text에 섞지 말 것**: `skippedCounts: Record<string, number>` 로 별도 반환. invalid JSON / display=false 등.
+- pi extension `session_search` parameter에 `withExcerpt?: boolean` 추가.
+- CLI `search-sessions`에도 `--with-excerpt` 추가 여부 검토.
+- 기본값은 `false`. 토큰/출력 폭증을 막기 위해 명시 opt-in.
+- excerpt 기본 옵션은 C2.1a 기본값(`before=3`, `after=3`, `maxChars=4000`)보다 작게 시작하는 것도 검토 (`before=1`, `after=1`, `maxChars=2000`).
+- result당 excerpt는 top N에만 붙인다. 후보: `excerptLimit=3` 기본.
+- DB write / embedding API / rebuild 없음.
 
-#### 산출물 계획
+검증:
 
-| # | 파일 | 내용 |
-|---|---|---|
-| 1 | `session-excerpt.ts` | `readSessionExcerpt(sessionFile, centerLine, opts)` + 라인별 renderer + center-preserving truncation |
-| 2 | `session-excerpt.test.ts` | fixture JSONL (pi/claude/entwurf/toolResult/invalid/maxChars/boundary/center-preserve) |
-| 3 | `scripts/session-excerpt.ts` | CLI: `<file> <line> [--before N --after N --max N --no-tool --no-session --json]` |
-| 4 | `run.sh` | `excerpt:session <file> <line>`, `test:excerpt` |
-| 5 | sample 3건 manual | claude session, codex entwurf-heavy 세션, 오래된 pi 세션 각 1 |
+- 기존 `session_search` 출력 완전 호환 (`withExcerpt=false`).
+- `withExcerpt=true`에서 pi toolResult, entwurf-message, Claude tool_result가 적어도 하나씩 sample로 확인.
+- score/fallback 동작 변화 없음.
+- 8B/4096d score range 관찰을 함께 기록한다. 현재 검수 범위는 `~0.004–0.066`; `retriever.ts`/fallback의 임계값이 이 분포와 맞는지 read-only로 확인하고, 조정은 별도 승인 후 진행한다.
 
-#### 검증 게이트
+#### 별도 이슈 — dictcli expansion 보정
 
-- `pnpm exec tsc --noEmit` clean
-- `pnpm exec tsx session-excerpt.test.ts` 모두 pass
-- sample 3건 출력에서 entwurf-message 1건 이상, toolResult 요약 1건 이상, center 보존 확인
-- API 0 / DB 0 / network 0 명시
+andenken 작업은 아니지만 품질 검수에서 발견한 Layer 3 이슈로 별도 추적한다.
 
-#### 금지 (재확인)
+- 문제: `초기` → `enactment`, `establishment`, `institution` 등으로 확장됨.
+- 기대: `initial`, `early`, `beginning`, `earlystage` 계열.
+- 영향: Korean→English mixed query에서 BM25/embedding query enrichment가 엉뚱해질 수 있음.
+- 처리 위치: `dictcli` vocabulary graph. andenken에서는 증상과 재현 쿼리만 기록.
 
-- DB write
-- embedding API call
-- sessions full rebuild
-- search/sync 실행
-- store schema 변경
-- org/qmd 변경
-- transcript-window production 적용
+#### 후속 후보 (C2.1c 이후)
 
-#### 후속 (C2.1b 후보, 보류)
-
-- `session_search` tool에 `withExcerpt: boolean` 옵션 추가
-- `entwurf-message` / `toolResult` 인덱싱 dry-run (chunk 수 폭증 가능)
-- assistant tool-only turn을 `[tool: read /path]` 텍스트로 인덱싱
-
-보조 참고:
-
-- `session-indexer.ts` — `extractSessionChunks` (centerLine = 결과 `lineNumber`)
-- `session-sanitize.ts` — A3 C1 sanitizer (그대로 재사용)
-- `session-window.ts` — C2.0 prototype의 `extractTextContent`/`pushTranscriptLine` 패턴 일부 참고
-- `/home/junghan/repos/3rd/openclaw/packages/memory-host-sdk/src/host/session-files.ts` — buildSessionEntry, lineMap 개념
+- C2.1b — source policy optionalization: indexer가 `pi` / `claude` / `all`만 받도록 명시적 enum 확립, overlay 경로 거부 단정.
+- C2.2 — `entwurf-message` / `toolResult` 인덱싱 dry-run: 현재 silent skip되는 데이터 인덱싱 시 chunk 수 폭증 / 비용 영향 추정.
+- window chunking revised dry-run: C2.0의 600/100, 800/120 등 재평가.
 
 ## 트랙 B — org/qmd: 보류
 
