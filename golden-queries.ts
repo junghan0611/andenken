@@ -19,7 +19,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { execSync } from "node:child_process";
 import {
-  createProviderFromEnv,
+  createSessionProviderFromEnv,
+  createOrgProviderFromEnv,
   type EmbeddingProvider,
 } from "./embedding-provider.js";
 import { VectorStore, getSessionsDbPath, getOrgDbPath } from "./store.js";
@@ -369,9 +370,14 @@ interface QueryResult {
   topResults: { score: number; text: string; project?: string; scaffold?: boolean }[];
 }
 
+interface ProviderPair {
+  sessions: EmbeddingProvider | null;
+  org: EmbeddingProvider | null;
+}
+
 async function runQuery(
   gq: GoldenQuery,
-  provider: EmbeddingProvider,
+  providers: ProviderPair,
   useExpand: boolean,
   dbFilter?: "session" | "org",
 ): Promise<QueryResult> {
@@ -382,15 +388,24 @@ async function runQuery(
 
   const allResults: { score: number; text: string; project: string }[] = [];
 
-  const dim = provider.dimensions || 2560;
-
-  // Session DB
+  // Session DB — sessions provider (e.g. OpenRouter 8B / 4096d)
   if (targetDb === "session" || targetDb === "both") {
     const dbPath = getSessionsDbPath();
-    if (fs.existsSync(dbPath)) {
-      const store = new VectorStore(dbPath, dim);
+    if (fs.existsSync(dbPath) && providers.sessions) {
+      const sessP = providers.sessions;
+      const sessDim = sessP.dimensions || 2560;
+      const store = new VectorStore(dbPath, sessDim);
       await store.init();
-      const qv = await provider.embedQuery(enrichedQuery);
+      // Dim guard mirrors cli.ts searchSessions: fail-loud on provider/DB
+      // mismatch so paid embed calls are never issued against a stale index.
+      const dimCheck = await store.checkCompatibleDim();
+      if (!dimCheck.ok) {
+        await store.close();
+        throw new Error(
+          `golden sessions dim mismatch: ${dimCheck.reason ?? "incompatible"} (configured=${dimCheck.configured}, actual=${dimCheck.actual}). Run scripts/rebuild-sessions-full.sh or fix ANDENKEN_SESSION_*.`,
+        );
+      }
+      const qv = await sessP.embedQuery(enrichedQuery);
       const vec = await store.search(qv, 20);
       const fts = await store.fullTextSearch(bm25Query, 20);
       const results = await retrieve(gq.query, vec, fts, {
@@ -406,13 +421,22 @@ async function runQuery(
     }
   }
 
-  // Org DB
+  // Org DB — org provider (e.g. vLLM 4B / 2560d)
   if (targetDb === "org" || targetDb === "both") {
     const dbPath = getOrgDbPath();
-    if (fs.existsSync(dbPath)) {
-      const store = new VectorStore(dbPath, dim);
+    if (fs.existsSync(dbPath) && providers.org) {
+      const orgP = providers.org;
+      const orgDim = orgP.dimensions || 2560;
+      const store = new VectorStore(dbPath, orgDim);
       await store.init();
-      const qv = await provider.embedQuery(enrichedQuery);
+      const dimCheck = await store.checkCompatibleDim();
+      if (!dimCheck.ok) {
+        await store.close();
+        throw new Error(
+          `golden org dim mismatch: ${dimCheck.reason ?? "incompatible"} (configured=${dimCheck.configured}, actual=${dimCheck.actual}). Fix ANDENKEN_ORG_* or rebuild org index.`,
+        );
+      }
+      const qv = await orgP.embedQuery(enrichedQuery);
       const vec = await store.search(qv, 20, 0.05);
       const fts = await store.fullTextSearch(bm25Query, 20);
       const results = await retrieve(gq.query, vec, fts, {
@@ -541,12 +565,35 @@ async function main() {
   const dbIdx = args.indexOf("--db");
   const dbFilter = dbIdx >= 0 ? (args[dbIdx + 1] as "session" | "org") : undefined;
 
-  const provider = createProviderFromEnv();
-  if (!provider) {
-    console.error("❌ No embedding provider available (set GEMINI_API_KEY or ANDENKEN_PROVIDER=vllm)");
+  // Sessions and org are dimension-separated tracks. Loading both providers
+  // independently is required so each DB is queried with the matching dim.
+  // Prior implementation used a single createProviderFromEnv() (legacy 2560d
+  // unified slot) which silently dim-mismatched the 4096d sessions index and
+  // produced empty results.
+  const sessionsProvider = createSessionProviderFromEnv();
+  const orgProvider = createOrgProviderFromEnv();
+
+  // Decide which providers are required for the requested scope.
+  const wantsSessions = dbFilter === "session" || dbFilter === undefined;
+  const wantsOrg = dbFilter === "org" || dbFilter === undefined;
+  if (wantsSessions && !sessionsProvider) {
+    console.error("❌ Sessions provider unavailable (set ANDENKEN_SESSION_PROVIDER + endpoint/model). Use --db org to skip.");
     process.exit(1);
   }
-  console.log(`📡 Provider: ${provider.name} (${provider.dimensions}d)\n`);
+  if (wantsOrg && !orgProvider) {
+    console.error("❌ Org provider unavailable (set ANDENKEN_ORG_* or legacy ANDENKEN_VLLM_*). Use --db session to skip.");
+    process.exit(1);
+  }
+
+  const providers: ProviderPair = { sessions: sessionsProvider, org: orgProvider };
+
+  if (sessionsProvider) {
+    console.log(`📡 Sessions provider: ${sessionsProvider.name} (${sessionsProvider.dimensions}d)`);
+  }
+  if (orgProvider) {
+    console.log(`📡 Org provider:      ${orgProvider.name} (${orgProvider.dimensions}d)`);
+  }
+  console.log("");
 
   if (compareMode) {
     // Run each query twice: with/without expand
@@ -560,8 +607,8 @@ async function main() {
     for (const gq of GOLDEN_QUERIES) {
       if (dbFilter && gq.db !== dbFilter && gq.db !== "both") continue;
 
-      const without = await runQuery(gq, provider, false, dbFilter);
-      const withExp = await runQuery(gq, provider, true, dbFilter);
+      const without = await runQuery(gq, providers, false, dbFilter);
+      const withExp = await runQuery(gq, providers, true, dbFilter);
 
       const scoreDiff = withExp.topScore - without.topScore;
       const icon = scoreDiff > 0.01 ? "📈" : scoreDiff < -0.01 ? "📉" : "➡️";
@@ -584,7 +631,7 @@ async function main() {
 
   for (const gq of GOLDEN_QUERIES) {
     if (dbFilter && gq.db !== dbFilter && gq.db !== "both") continue;
-    results.push(await runQuery(gq, provider, !noExpand, dbFilter));
+    results.push(await runQuery(gq, providers, !noExpand, dbFilter));
   }
 
   if (jsonMode) {
