@@ -17,6 +17,7 @@
     "gemini-embeddings.ts",
     "store.ts",
     "session-indexer.ts",
+    "session-sanitize.ts",
     "retriever.ts",
     "org-chunker.ts",
     "indexer.ts",

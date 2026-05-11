@@ -198,6 +198,186 @@ async function testSessionIndexer() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Session Indexer — sanitize integration (production path).
+//
+// session-sanitize.test.ts covers the sanitizer helpers in isolation.
+// This section runs extractSessionChunks() end-to-end against a temp JSONL
+// file, so the actual parser + sanitize + length + isNoise + truncate
+// decision tree is exercised together. Modeled after OpenClaw's
+// buildSessionEntry tests.
+// ---------------------------------------------------------------------------
+
+async function testSessionIndexerSanitize() {
+  section("Session Indexer (sanitize integration)");
+
+  const tmpDir = path.join(
+    process.env.TMPDIR ?? "/tmp",
+    `andenken-sanitize-${process.pid}-${Date.now()}`,
+  );
+  fs.mkdirSync(tmpDir, { recursive: true });
+  const sessionFile = path.join(tmpDir, "fixture.jsonl");
+
+  // Helper: pi JSONL line for a single message
+  const piLine = (
+    role: "user" | "assistant",
+    text: string,
+    timestamp = 1700000000000,
+  ): string =>
+    JSON.stringify({
+      type: "message",
+      timestamp,
+      message: {
+        role,
+        content: [{ type: "text", text }],
+      },
+    });
+
+  // Helper: pad text to comfortably exceed assistant length filter (>100).
+  const long = (head: string): string =>
+    head +
+    " " +
+    "본문 내용 추가 — 길이 필터(>100)를 통과시키기 위한 더미 텍스트. 이 부분은 검색 가치가 거의 없는 padding이다.";
+
+  const lines: string[] = [
+    // L1: user with inbound metadata envelope + real body
+    piLine(
+      "user",
+      [
+        "Sender (untrusted metadata):",
+        "```json",
+        '{"name":"telegram-user","label":"foo"}',
+        "```",
+        "",
+        "실제 user question — 환경변수 ANDENKEN_SESSION_*는 어디서 정의되나요?",
+      ].join("\n"),
+    ),
+    // L2: assistant whose body coincidentally contains a sentinel-shaped line
+    piLine(
+      "assistant",
+      long(
+        "Conversation info (untrusted metadata): 이 문구를 답변 본문에서 인용해 설명합니다.",
+      ),
+    ),
+    // L3: envelope-only user message (no body) — must produce no chunk
+    piLine(
+      "user",
+      [
+        "Conversation info (untrusted metadata):",
+        "```json",
+        '{"id":"abc"}',
+        "```",
+      ].join("\n"),
+    ),
+    // L4: System (untrusted) wrapper user message — drop
+    piLine("user", "System (untrusted): [tool error: ECONNREFUSED]"),
+    // L5: cron-prompt user message — drop
+    piLine("user", "[cron:daily-check] run health probe"),
+    // L6: ordinary user message — keep
+    piLine("user", "이 세션은 새 검색 평가 기준에 대한 토론을 이어가려고 합니다."),
+    // L7: ordinary assistant message — keep
+    piLine(
+      "assistant",
+      long("좋습니다 — 검색 평가 기준 후보 4가지를 정리하겠습니다."),
+    ),
+    // L8: assistant with internal runtime context block + body
+    piLine(
+      "assistant",
+      [
+        "<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>",
+        "private internal state, must not be embedded",
+        "<<<END_OPENCLAW_INTERNAL_CONTEXT>>>",
+        "",
+        long("이 답변은 runtime context를 strip한 후 본문만 남아야 합니다."),
+      ].join("\n"),
+    ),
+  ];
+  fs.writeFileSync(sessionFile, lines.join("\n") + "\n", "utf8");
+
+  // detectSource depends on /.pi/agent/sessions/ or /.claude/ in path.
+  // tmpDir doesn't include either, so we exercise the default branch (pi).
+  // That's the production code path used in this test.
+  const chunks = await extractSessionChunks(sessionFile);
+
+  // Map by lineNumber for assertions
+  const byLine: Record<number, typeof chunks[number] | undefined> = {};
+  for (const c of chunks) byLine[c.lineNumber] = c;
+
+  // L1: user envelope stripped, body kept, "Sender (untrusted" must NOT remain
+  const l1 = byLine[1];
+  assert(!!l1, "L1: envelope+body user produces chunk");
+  if (l1) {
+    assert(l1.role === "user", "L1: chunk role=user");
+    assert(
+      !l1.text.includes("Sender (untrusted metadata):"),
+      "L1: sentinel removed from user chunk",
+    );
+    assert(
+      l1.text.includes("실제 user question"),
+      "L1: user body preserved",
+    );
+  }
+
+  // L2: assistant — sentinel-shaped text is content, must be preserved
+  const l2 = byLine[2];
+  assert(!!l2, "L2: assistant sentinel-shaped content produces chunk");
+  if (l2) {
+    assert(l2.role === "assistant", "L2: chunk role=assistant");
+    assert(
+      l2.text.includes("Conversation info (untrusted metadata):"),
+      "L2: sentinel text preserved verbatim in assistant chunk",
+    );
+  }
+
+  // L3: envelope-only user → no chunk
+  assert(byLine[3] === undefined, "L3: envelope-only user produces NO chunk");
+
+  // L4: System (untrusted) wrapper → no chunk
+  assert(byLine[4] === undefined, "L4: System (untrusted) wrapper produces NO chunk");
+
+  // L5: cron prompt → no chunk
+  assert(byLine[5] === undefined, "L5: [cron:...] prompt produces NO chunk");
+
+  // L6: ordinary user → chunk produced, text unchanged
+  const l6 = byLine[6];
+  assert(!!l6, "L6: ordinary user produces chunk");
+  if (l6) {
+    assert(
+      l6.text === "이 세션은 새 검색 평가 기준에 대한 토론을 이어가려고 합니다.",
+      "L6: ordinary user text unchanged",
+    );
+  }
+
+  // L7: ordinary assistant → chunk produced
+  const l7 = byLine[7];
+  assert(!!l7, "L7: ordinary assistant produces chunk");
+
+  // L8: assistant with runtime context block → block stripped, body kept
+  const l8 = byLine[8];
+  assert(!!l8, "L8: assistant with runtime context produces chunk");
+  if (l8) {
+    assert(
+      !l8.text.includes("<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>"),
+      "L8: runtime context delimiter removed",
+    );
+    assert(
+      !l8.text.includes("private internal state"),
+      "L8: runtime context body removed",
+    );
+    assert(
+      l8.text.includes("이 답변은 runtime context를 strip한 후"),
+      "L8: assistant body preserved after runtime strip",
+    );
+  }
+
+  // Cleanup
+  try {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  } catch {
+    /* ignore */
+  }
+}
+
 async function testOrgChunker() {
   section("Org Chunker");
 
@@ -1404,6 +1584,7 @@ console.log("🧠 andenken Test Suite\n");
 
 if (mode === "unit" || mode === "all") {
   await testSessionIndexer();
+  await testSessionIndexerSanitize();
   await testOrgChunker();
   await testExportQmd();
   await testQmdBootstrap();

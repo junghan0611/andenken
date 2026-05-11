@@ -19,6 +19,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as readline from "node:readline";
+import { sanitizeSessionChunkText } from "./session-sanitize.js";
 
 export type SessionSource = "pi" | "claude";
 
@@ -38,8 +39,10 @@ export interface SessionChunk {
 // Minimum session file size to index (skip trivial 1-2 message sessions)
 const MIN_SESSION_SIZE_BYTES = 2048;
 
-// Patterns that indicate noise (tool errors, delegate failures, smoke tests)
-const NOISE_PATTERNS = [
+// Patterns that indicate noise (tool errors, delegate failures, smoke tests).
+// Exported for sanitize-dryrun and any other parity-checking caller; if you
+// edit this list, dryrun emit/noise counts shift automatically.
+export const NOISE_PATTERNS: readonly RegExp[] = [
   /^error: .{0,50}connection refused/i,
   /^error: .{0,50}ECONNREFUSED/i,
   /^error: .{0,50}timeout/i,
@@ -49,6 +52,23 @@ const NOISE_PATTERNS = [
   /^✅ \d+ tests? passed/,
   /^PASS |^FAIL /,  // test runner output
 ];
+
+/**
+ * Returns true if `text` matches any noise pattern.
+ * Same function used by parseMessageContent in production indexing.
+ */
+export function isNoise(text: string): boolean {
+  return NOISE_PATTERNS.some((p) => p.test(text));
+}
+
+/**
+ * Minimum text length to emit, by role. Production constants.
+ * user: > 20, assistant: > 100.
+ */
+export function passesLengthFilter(text: string, role: "user" | "assistant"): boolean {
+  if (role === "user") return text.length > 20;
+  return text.length > 100;
+}
 
 // --- Pi format ---
 
@@ -309,10 +329,6 @@ function parseClaudeLine(
   );
 }
 
-function isNoise(text: string): boolean {
-  return NOISE_PATTERNS.some(p => p.test(text));
-}
-
 function parseMessageContent(
   role: string,
   content: Array<{ type: string; text?: string }> | string | undefined,
@@ -323,9 +339,23 @@ function parseMessageContent(
   source: SessionSource,
 ): SessionChunk | null {
   if (!content) return null;
-  const text = extractTextContent(content);
+  if (role !== "user" && role !== "assistant") return null;
 
-  if (role === "user" && text && text.length > 20) {
+  const rawText = extractTextContent(content);
+  if (!rawText) return null;
+
+  // 1. Sanitize FIRST — strip OpenClaw-injected envelopes and drop
+  //    generator-artifact wrappers. See session-sanitize.ts.
+  const sanitized = sanitizeSessionChunkText(rawText, role, source);
+  if (!sanitized.ok) return null;
+  const text = sanitized.text;
+
+  // 2. Length filter — POST-strip. An 80KB envelope-only message would
+  //    now correctly fall through.
+  // 3. Noise filter — patterns inherited from prior session-indexer behavior.
+  // 4. Truncate — embedding input cap, unchanged from prior policy.
+
+  if (role === "user" && text.length > 20) {
     if (isNoise(text)) return null;
     return {
       id: `${sessionFile}:${lineNumber}`,
@@ -340,7 +370,7 @@ function parseMessageContent(
     };
   }
 
-  if (role === "assistant" && text && text.length > 100) {
+  if (role === "assistant" && text.length > 100) {
     if (isNoise(text)) return null;
     return {
       id: `${sessionFile}:${lineNumber}`,

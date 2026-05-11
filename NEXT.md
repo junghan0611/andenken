@@ -47,18 +47,83 @@ Sessions track을 OpenRouter Qwen3-Embedding-8B 4096d로 전환했다.
 - dim mismatch면 main search/index가 embed 전에 refuse.
 - paid full rebuild는 `ANDENKEN_ALLOW_PAID_FULL_REBUILD=1` guard 필요.
 
-### 지금 할 일 — A2 read-only mapping
+### A2 완료 — read-only mapping
 
-OpenClaw식 sanitization 이식 전에 **read-only mapping**을 먼저 한다.
+**완료일**: 2026-05-11
+**산출물**: `~/org/llmlog/20260511T095442--§andenken-openclaw-sanitization-readonly-mapping-a2...org`
 
-목표: andenken `session-indexer.ts`와 OpenClaw session memory export sanitization을 1:1로 비교하고,
-무엇을 이식할지 범위를 좁힌다. 코드 변경은 아직 하지 않는다.
+OpenClaw `session-files.ts` ↔ andenken `session-indexer.ts` 1:1 mapping 확정. C1/C2/보류 항목 분리.
 
-핵심 참고 파일:
+### A3 C1 완료 — sanitization-only code, API 0
 
-- `/home/junghan/repos/3rd/openclaw/packages/memory-host-sdk/src/host/session-files.ts`
+**완료일**: 2026-05-11
 
-보조 참고:
+OpenClaw `97d2d40fb7` 기준 **strip helper 일부를 verbatim port**한 선택적 sanitization 부분집합. 전체 `sanitizeSessionText`를 그대로 옮긴 것은 아니고, normalize/heartbeat/silent/exec/redact/provenance/lineMap 등은 의도적으로 제외.
+
+C1 범위 (확정):
+
+- `stripInboundMetadata` (user-role only, 6 sentinels + active_memory_plugin + trailing-untrusted)
+- `stripInternalRuntimeContext` (delimited + legacy header + prompt preface)
+- `GENERATED_SYSTEM_MESSAGE_RE` user wrapper drop
+- `DIRECT_CRON_PROMPT_RE` user wrapper drop
+- leading timestamp prefix strip
+
+C1에서 의도적으로 **뺀** 것 (C2 또는 영구 제외):
+
+- `HEARTBEAT_TOKEN` / silent reply / exec completion drops — OpenClaw-specific tokens, dry-run 0건 확인 (C2 후 실측 시점에 재검토).
+- `redactSensitiveText(mode:"tools")` — andenken 핵심 가치 = 명령/파일명/에러 recall. 영구 제외.
+- `hasInterSessionUserProvenance` — pi/Claude JSONL에 `message.provenance` 필드 자체 없음 (grep 실측). 호출점 미생성.
+- `normalizeSessionText` newline collapse — 임베딩 입력 의미 변경 + 비용 큰 재인덱싱 트리거. C2.
+- transcript-window chunking / lineMap / 800-char wrap. C2.
+
+API 0 검증:
+
+- `pnpm exec tsc --noEmit`: clean
+- `session-sanitize.test.ts`: 77/77 fixture pass (6 inbound sentinels × {user, assistant} parametrized 포함)
+- `test.ts` 신규 production-path 섹션 `Session Indexer (sanitize integration)`: extractSessionChunks 경로로 user envelope strip / assistant sentinel 보존 / envelope-only 미생성 / cron·system wrapper 미생성 / ordinary text 생성 검증
+- `scripts/sanitize-dryrun.ts` reproduces full production decision tree
+  (sanitize + length + isNoise + truncate). On 1,614 sessions / 114,296
+  messages, 2.45s, API 0:
+  - emitted (old) 28,327 → emitted (new) 28,319
+  - net delta **-8 (0.03%)**
+  - new drops 8 (모두 `under_length_after_strip` — trim 후 본문이 length threshold 아래)
+  - **noise_after_strip 0** (trim이 PASS/FAIL/raw tool JSON 같은 noise prefix를 드러내는 시나리오 — 실제 corpus 0건)
+  - newly_emitted 0 (sanitize가 OLD가 버린 텍스트를 살리는 케이스 없음)
+  - generated_system_wrapper / generated_cron_prompt drops: 0건
+  - changed_in_emit 1,132 — **대부분 leading whitespace trim** (검색 품질 신호 아님, cosmetic body shrink)
+  - files w/ impact 392 (theoretical full-rebuild affected)
+
+### A3 C1 적용 — 현재 corpus 효과: 미래 안전망 + 작은 과거 정제
+
+**중요**: andenken session manifest는 `mtimeMs + size + chunks` 기반. session-sanitize.ts 코드 변경만으로 JSONL mtime/size는 바뀌지 않으므로 **incremental sync는 historical chunk에 새 sanitizer를 자동 적용하지 않는다**.
+
+| 경로 | 동작 |
+|---|---|
+| 신규 append되는 JSONL 라인 | 새 sanitizer 자동 통과. **자연 누적**. 비용 = 평소 sync 비용. |
+| 기존 28K chunk에 sanitizer 일치시키기 | `./run.sh rebuild:sessions` (paid full rebuild). 비용 ~$0.063 / 31분대. **GLG 승인 후 별도** |
+
+dry-run 기준 full rebuild 기대효과 (만약 한다면):
+
+- DB와 새 sanitizer 일치 (consistency)
+- 8건 짧은 메시지 chunk 제거 (`under_length_after_strip`)
+- 1,132건 trim 반영 (cosmetic, 검색 품질 신호 아님)
+
+**검색 품질 대폭 개선 목적이라면 full rebuild는 정당화되지 않는다.** 일관성 목적이면 GLG가 선택지로 가져갈 수 있다.
+
+### 지금 할 일 — 다음 한 가지 결정
+
+A3 C1 commit/push 이후, 다음 **단일** 항목은 GLG 우선순위에 따라 두 갈래 중 하나:
+
+**갈래 (a) — 일관성 우선**: full sessions rebuild로 새 sanitizer를 historical chunk에 적용. ~$0.063 / 31분. ROADMAP에 cutover 기록.
+
+**갈래 (b) — 검색 품질 우선 (권장)**: C2 본류로 진입. 후보 두 가지 중 하나 선택:
+
+1. **transcript-window chunking** — OpenClaw식 multi-turn window. 가장 큰 recall 개선 가능성. DB schema 변경 필요. 풀 재인덱싱 동반.
+2. **lineMap / excerpt model** — chunk-to-source 정확도 개선. read-back UX 향상. DB schema에 line range 추가.
+
+→ NEXT.md single-item 원칙에 따라 GLG가 갈래를 정해주면 그 항목 하나로 본 섹션을 갈아끼운다.
+
+보조 참고 (C1 구현 시 참조 완료):
 
 - `/home/junghan/repos/3rd/openclaw/packages/memory-host-sdk/src/host/openclaw-runtime-session.ts`
 - `/home/junghan/repos/3rd/openclaw/src/agents/internal-runtime-context.ts`
@@ -67,40 +132,7 @@ OpenClaw식 sanitization 이식 전에 **read-only mapping**을 먼저 한다.
 - `/home/junghan/repos/3rd/openclaw/src/agents/pi-embedded-runner/transcript-rewrite.ts`
 
 주의: `transcript-rewrite.ts` / `tool-result-truncation.ts`는 live transcript maintenance 쪽이다.
-andenken indexing에 직접 이식할 본체는 `session-files.ts`의 `sanitizeSessionText` / `extractSessionText` 흐름이다.
-
-### A2 read-only 산출물
-
-llmlog 1건 또는 이 repo 내 임시 검토 문서로 다음을 남긴다.
-
-| 항목 | 내용 |
-|------|------|
-| OpenClaw 단계 | `stripInboundMetadata`, `stripInternalRuntimeContext`, generated wrapper drop 등 |
-| andenken 현 상태 | `extractTextContent`, `isNoise`, length threshold, `truncateText(2000)` |
-| gap | 어떤 strip/drop/redact가 빠졌는지 |
-| 이식 우선순위 | C1에 넣을 것 / 보류할 것 / C2로 뺄 것 |
-| risk | 사용자 의도 손실 가능성, Claude/pi 포맷 차이, tool 결과 과삭제 위험 |
-
-### A3 예정 — sanitization C1 구현
-
-A2 mapping 검토 후 GLG 승인 시 진행한다.
-
-C1 후보:
-
-- inbound metadata strip
-- internal runtime context strip
-- generated system wrapper drop
-- cron / heartbeat / silent reply / exec completion drop
-- tool-sensitive redaction
-- tool log / tool result noise 정리
-- before/after chunk count
-- random 50 spot-check
-
-의도적으로 C1에서 안 하는 것:
-
-- 800자 wrap/split. `truncateText(2000)` 유지 후 별도 C2.
-- OpenClaw-specific dreaming/provenance file-level filter 무차별 이식.
-- org/qmd 변경.
+andenken indexing에 직접 참조한 본체는 `session-files.ts`의 `sanitizeSessionText` / `extractSessionText` 흐름이며, 그 중 strip helper 부분집합을 C1에 verbatim port 완료. 나머지는 본 문서의 "C1에서 의도적으로 뺀 것" 섹션 참조.
 
 ## 트랙 B — org/qmd: 보류
 
