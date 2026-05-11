@@ -97,6 +97,9 @@ Usage: ./run.sh <command> [args]
   window:dryrun [flags]       Parse-only transcript-window dry-run over all sessions
                               Flags: --source pi|claude|all  --tokens N  --overlap N  --json
   test:window                 Fixture tests for session-window.ts (API 0)
+  excerpt:session <f> <line>  Render read-only excerpt around a JSONL line (C2.1a)
+                              Flags: --before N --after N --max N --no-tool --no-session --json
+  test:excerpt                Fixture tests for session-excerpt.ts (API 0)
 
 === Utility ===
   env                         Show environment status
@@ -222,6 +225,10 @@ case "${1:-help}" in
     shift; cd "$SCRIPT_DIR" && pnpm exec tsx scripts/window-dryrun.ts "$@" ;;
   test:window)
     cd "$SCRIPT_DIR" && pnpm exec tsx session-window.test.ts ;;
+  excerpt:session)
+    shift; cd "$SCRIPT_DIR" && pnpm exec tsx scripts/session-excerpt.ts "$@" ;;
+  test:excerpt)
+    cd "$SCRIPT_DIR" && pnpm exec tsx session-excerpt.test.ts ;;
 
   # === PR-B sessions sync / rebuild ===
   rebuild:sessions)

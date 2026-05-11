@@ -159,9 +159,63 @@ C2.0 산출:
 | 600/100 | 21,542 | -24.06% | 2.44 | 2 / 6 | 12.11M | ~$0.1211 |
 | 800/120 | 15,787 | -44.35% | 2.93 | 2 / 8 | 11.71M | ~$0.1171 |
 
-### 지금 할 일 — C2.1a lineMap/excerpt first (구현 착수)
+### C2.1a 완료 — lineMap/excerpt first (read-only readback)
 
-**결정일**: 2026-05-11
+**완료일**: 2026-05-11
+
+#### 산출물
+
+| 파일 | 라인 | 역할 |
+|---|---:|---|
+| `session-excerpt.ts` | ~470 | `readSessionExcerpt(sessionFile, centerLine, opts)` + 6종 line renderer + center-preserving truncation + claude tool_result 분기 |
+| `session-excerpt.test.ts` | ~520 | fixture tests (pi/claude/entwurf/toolResult/Claude tool_result/totalLines/maxChars/boundary/center-preserve/args) |
+| `scripts/session-excerpt.ts` | ~110 | CLI: `<file> <line> [--before --after --max --no-tool --no-session --json]` + `Number.isInteger` + bounds 에러 |
+| `run.sh` | +6 | `excerpt:session`, `test:excerpt` |
+
+#### 검증
+
+- `pnpm exec tsc --noEmit`: clean
+- `pnpm exec tsx session-excerpt.test.ts`: **76/76 pass**
+- `./run.sh excerpt:session <pi> 181 --before 1 --after 1 --max 3000`: pi entwurf-heavy 정상 렌더
+- `./run.sh excerpt:session <claude> 13 --before 1 --after 1`: claude tool_result block이 `→ tool result [01CEHoNp]: ...`로 렌더 (이전 `empty:user` skip 회귀 fix)
+- API 0 / DB 0 / network 0
+
+#### 우리 corpus 맞춤 튜닝 반영 (모두 구현 확인)
+
+| 항목 | 구현 |
+|---|---|
+| toolResult one-line summary, toolName/isError | pi `role==="toolResult"` + claude `tool_result` block 양쪽 |
+| Claude tool_result 분기 | `extractClaudeToolResultBlocks()` + `renderClaudeToolResultLine()` |
+| entwurf-message (custom_message display=true) 풀 렌더 | `SESSION_MESSAGE_CUSTOM_TYPES` set + sender/receiver 짧은 id |
+| assistant tool-only 다중 toolCall | pi `toolCall` + claude `tool_use` 양쪽 지원 |
+| center-preserving truncation | `applyCenterPreservingTruncation()` distance-sorted, centerIdx 보호 |
+| skipped 격리 | `skippedCounts` 별도 필드, text에 미주입 |
+| CLI bounds 명시 에러 | `Number.isInteger` 체크 + `centerLine > totalLines` 시 throw |
+
+#### 변경되지 않은 것 (재확인)
+
+- DB schema, embedding pipeline, manifest, store, indexer.ts, retriever.ts, cli.ts — 무접촉
+- A3 C1 sanitizer 그대로 재사용
+- transcript-window prototype (C2.0 산출) 그대로 보존
+
+#### Source policy 정합성 (AGENTS.md/README.md GLG 직접 갱신 반영)
+
+session sources는 정확히 둘만 지원: `pi` = `~/.pi/agent/sessions`, `claude` = `~/.claude/projects`. `~/.pi/agent/claude-config-overlay/projects`는 절대 인덱싱 금지 (pi/entwurf 중복). excerpt는 path-based read이므로 source enumeration을 강제하지 않지만, `detectSource()`(session-indexer.ts)는 `/.claude/` substring 기준으로 동작하므로 overlay 경로는 자동으로 `pi`로 분류됨. 이는 정책과 어긋나지 않음 (excerpt는 indexer가 발견한 파일만 받는 게 정상 흐름).
+
+### 지금 할 일 — 다음 단일 항목 결정 대기
+
+C2.1a 완료. 다음 후보:
+
+1. **C2.1b — source policy optionalization 검토**: indexer가 `pi` / `claude` / `all`만 받도록 명시적 enum 확립, overlay 경로 거부 단정. 현재는 `findSessionFiles*()` 로직상 overlay가 자연스럽게 빠져있지만 가드는 없음.
+2. **C2.1c — `session_search` tool에 `withExcerpt: boolean` 옵션 추가**: 검색 결과에 자동으로 excerpt 첨부. 활용도가 직접 검증되는 단계.
+3. **C2.2 — entwurf-message / toolResult 인덱싱 dry-run**: 현재 silent skip되는 데이터 인덱싱 시 chunk 수 폭증 / 비용 영향 추정.
+4. **window chunking revised dry-run** (C2.0의 600/100, 800/120 등 재시도): C2.1a 도입 후에도 windowing 가치 있는지 재평가.
+
+GLG가 단일 항목 골라주면 이어간다. 그 전까지는 C2.1a 완료 상태로 정지.
+
+#### C2.1a 폐기 — 작업 지시 원문 (참고 보존)
+
+**결정일(원래)**: 2026-05-11
 **큰 방향**: lineMap/excerpt first 승인. 현재 message-per-chunk 구조 유지, DB/embedding/full rebuild 무접촉. 검색 hit `sessionFile + lineNumber`를 입력으로 주변 JSONL을 read-only로 렌더링하는 helper/CLI를 만든다.
 
 #### 우리 corpus 실측 (codex 1.2MB / 272-line entwurf 세션 기준)

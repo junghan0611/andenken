@@ -79,32 +79,45 @@ Kiwi morphology lives in dictcli.
 
 ## Indexing endpoints
 
-Two paths, same Qwen3-Embedding-4B 2560d output. Same LanceDB is queryable
-anywhere that also emits 2560d.
+andenken now has two dimension-separated tracks. A vector DB is queryable only
+by a provider that emits the same dimension.
 
-| Purpose | Endpoint | When |
-|---------|----------|------|
-| **Sessions fast path** | laptop ollama `localhost:11434` (preferred) → falls back to gpu1i tunnel | hourly incremental driven by `scripts/sync-sessions.sh` / agent-config `memory-sync` skill |
-| **Org / full rebuild** | gpu1i tunnel `localhost:18000` only | human-initiated, runs through `scripts/rebuild-full.sh` / `scripts/rebuild-incremental.sh` |
-| **Query (search)** | OpenRouter `https://openrouter.ai/api` model `qwen/qwen3-embedding-4b` | every retrieval call from any host |
+| Track | Model / dim | Endpoint | When |
+|-------|-------------|----------|------|
+| **Sessions** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `https://openrouter.ai/api` via `ANDENKEN_SESSION_*` | hourly incremental driven by `scripts/sync-sessions.sh` / agent-config `memory-sync` skill; full rebuild via `scripts/rebuild-sessions-full.sh` |
+| **Org** | Qwen3-Embedding-4B / 2560d | `ANDENKEN_ORG_*` / legacy vLLM path | human-initiated org indexing; org/qmd track is separate and currently conservative |
+
+### Session corpus sources
+
+Sessions index exactly two harness sources:
+
+| Source | Directory | Format |
+|--------|-----------|--------|
+| `pi` | `~/.pi/agent/sessions` | pi JSONL (`type="message"`, `message.role`) |
+| `claude` | `~/.claude/projects` | Claude Code JSONL (`type="user" | "assistant"`) |
+
+Do **not** index `~/.pi/agent/claude-config-overlay/projects`. That directory
+is pi-shell-acp's Claude overlay, not a third memory source. Its work is already
+represented through pi harness sessions / entwurf messages; indexing it would
+create duplicate memory. If source optionalization is added, valid choices are
+only `pi`, `claude`, and `all` (`pi + claude`). No `overlay` source.
 
 ### Why the split
 
-- **Sessions** churn constantly (every active conversation appends). They need
-  a path that costs nothing per call and is reachable from a laptop on the road.
-  Ollama on the laptop fits; gpu1i is the fallback when ollama isn't running.
-- **Org / full rebuild** processes thousands of files at once. That work belongs
-  on a real GPU. Letting it run anywhere else is how the ₩100K bill happened.
-- **Query** is small per call (one vector per search) and OpenRouter gives us a
-  stable host-agnostic URL.
+- **Sessions** are load-bearing for live agent continuity and now use 8B/4096d.
+  Incremental sync is paid-remote but low cost; wrong-dim and paid full-rebuild
+  guards are mandatory.
+- **Org** stays 4B/2560d until the org/qmd track is explicitly changed.
+- Query providers are track-specific. Never use a sessions vector against the
+  org DB or an org vector against the sessions DB.
 
 ### Cost discipline (mandatory)
 
-- All indexing scripts unset `ANDENKEN_VLLM_API_KEY` before running so a
-  misconfigured endpoint cannot silently bill OpenRouter.
-- All indexing scripts run a dimension probe (must return 2560) before touching
-  the index. A wrong endpoint returning 3584d (e.g. gpu2i) can never corrupt
-  the LanceDB silently.
+- Sessions full rebuild against a paid remote is gated by
+  `ANDENKEN_ALLOW_PAID_FULL_REBUILD=1` and should go through
+  `scripts/rebuild-sessions-full.sh` after estimate + explicit confirmation.
+- Indexing/search paths must check DB/provider dimension compatibility before
+  any paid embedding call. Sessions expect 4096d; org expects 2560d.
 - `memory-sync` skill (agent-config side) covers the sessions fast path only.
   Org/full/oracle full-sync require human invocation from this repo.
 

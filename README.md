@@ -22,7 +22,8 @@ understand where it fits.
 
  embedding       │ THIS REPO.
   (semantic)     │ Vector + BM25 hybrid retrieval over curated corpora.
-                 │ Qwen3-Embedding-4B (2560d) via vLLM, LanceDB.
+                 │ Sessions: Qwen3-Embedding-8B (4096d).
+                 │ Org: Qwen3-Embedding-4B (2560d).
                  │ Two tracks: sessions and org (see below).
 
  dream           │ Overnight consolidation. Compacts recent memory into
@@ -71,7 +72,7 @@ andenken status
 Query ──→ Embed ──→ │                  └── Claude Code sessions (.jsonl)
   │                 └─ Org Chunker ────── 3,000+ Denote notes
   │
-  ├─ Vector Search (Qwen3-Embedding-4B via vLLM, LanceDB)
+  ├─ Vector Search (sessions 8B/4096d, org 4B/2560d; LanceDB)
   ├─ Full-Text Search (BM25, Korean particle stripping)
   ├─ Hybrid Merge (weighted sum / RRF)
   ├─ Temporal Decay (exponential, configurable half-life)
@@ -100,23 +101,36 @@ embeddings. See `index.ts` (pi) and `cli.ts` (CLI harnesses).
 
 ## Stack
 
-- **Embeddings** Qwen3-Embedding-4B via vLLM (2560d)
+- **Embeddings** Sessions: Qwen3-Embedding-8B via OpenRouter (4096d); Org: Qwen3-Embedding-4B (2560d)
 - **Vector store** LanceDB (file-based)
 - **Retrieval** Weighted merge + RRF + temporal decay + MMR
 - **Chunking** Org-aware 2-tier (heading + direct body)
 - **Query expansion** dictcli personal vocabulary graph
 - **Runtime** TypeScript (tsx)
 
-## Provider split — query vs indexing
+## Provider split — sessions vs org
 
-| Path | Endpoint | Why |
-|------|----------|-----|
-| **Query** | OpenRouter `qwen/qwen3-embedding-4b` | Works from any host. ~$0 per query. |
-| **Sessions fast path** | laptop ollama `localhost:11434` (preferred) → gpu1i tunnel fallback | Hourly incremental, $0, works from a laptop on the road. |
-| **Org / full rebuild** | Local vLLM `localhost:18000` (gpu1i tunnel) | Bulk work stays on GPU. |
+| Track | Model / dim | Endpoint | Why |
+|-------|-------------|----------|-----|
+| **Sessions** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `ANDENKEN_SESSION_*` | Live agent continuity. Incremental sync is small; full rebuild is explicitly gated. |
+| **Org** | Qwen3-Embedding-4B / 2560d | `ANDENKEN_ORG_*` / vLLM-compatible path | Conservative knowledge-base indexing; separate from sessions. |
 
-All three paths produce identical Qwen3-Embedding-4B 2560d vectors. The same
-LanceDB is queryable anywhere as long as the query provider also emits 2560d.
+The two LanceDB stores are dimension-separated. Sessions search must use a
+4096d sessions provider; knowledge search must use a 2560d org provider.
+
+### Session sources
+
+andenken indexes two session sources:
+
+| Source | Directory | Notes |
+|--------|-----------|-------|
+| `pi` | `~/.pi/agent/sessions` | pi-native harness sessions |
+| `claude` | `~/.claude/projects` | standalone Claude Code sessions |
+
+Do **not** index `~/.pi/agent/claude-config-overlay/projects`. It is the
+pi-shell-acp Claude overlay and would duplicate work already represented in pi
+sessions / entwurf messages. Valid source filters are `pi`, `claude`, and
+`all` (`pi + claude`) only.
 
 ## Scope and safety policy
 
