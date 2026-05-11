@@ -90,10 +90,13 @@ Usage: ./run.sh <command> [args]
   doctor --org --save-baseline  Record current snapshot as baseline
   doctor --org --json         JSON output
 
-=== Sanitize (A3 C1, API 0) ===
+=== Sanitize / Window prototypes (API 0) ===
   sanitize:dryrun [flags]     Parse-only sanitization dry-run over all sessions
                               Flags: --source pi|claude|all  --limit N  --json
   test:sanitize               Fixture tests for session-sanitize.ts (API 0)
+  window:dryrun [flags]       Parse-only transcript-window dry-run over all sessions
+                              Flags: --source pi|claude|all  --tokens N  --overlap N  --json
+  test:window                 Fixture tests for session-window.ts (API 0)
 
 === Utility ===
   env                         Show environment status
@@ -210,11 +213,15 @@ case "${1:-help}" in
   estimate:sessions)
     shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts estimate sessions "$@" ;;
 
-  # === Sanitize (A3 C1) ===
+  # === Sanitize / Window prototypes (API 0) ===
   sanitize:dryrun)
     shift; cd "$SCRIPT_DIR" && pnpm exec tsx scripts/sanitize-dryrun.ts "$@" ;;
   test:sanitize)
     cd "$SCRIPT_DIR" && pnpm exec tsx session-sanitize.test.ts ;;
+  window:dryrun)
+    shift; cd "$SCRIPT_DIR" && pnpm exec tsx scripts/window-dryrun.ts "$@" ;;
+  test:window)
+    cd "$SCRIPT_DIR" && pnpm exec tsx session-window.test.ts ;;
 
   # === PR-B sessions sync / rebuild ===
   rebuild:sessions)

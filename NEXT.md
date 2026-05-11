@@ -110,44 +110,69 @@ dry-run 기준 full rebuild 기대효과 (만약 한다면):
 
 **검색 품질 대폭 개선 목적이라면 full rebuild는 정당화되지 않는다.** 일관성 목적이면 GLG가 선택지로 가져갈 수 있다.
 
-### 지금 할 일 — C2.0 transcript-window + line range read-only prototype
+### C2.0 완료 — transcript-window + line range read-only prototype
 
-**결정일**: 2026-05-11
+**완료일**: 2026-05-11
 **산출물**: `~/org/llmlog/20260511T104934--§andenken-c2-transcript-window-line-range-prep...org`
 
-A3 C1 직후 full sessions rebuild는 **일관성 정리**일 뿐 검색 품질 대폭 개선이 아니다. 따라서 지금은 rebuild하지 않고, 검색 품질을 직접 올릴 가능성이 큰 C2 본류로 간다.
+A3 C1 직후 full sessions rebuild는 **일관성 정리**일 뿐 검색 품질 대폭 개선이 아니다. 따라서 rebuild하지 않고, DB/API 0 조건으로 C2.0 prototype을 먼저 검증했다.
 
-C2.0 목표:
+C2.0 산출:
 
-> DB/API 없이 현재 session corpus에 OpenClaw식 transcript-window model을 적용해 chunk count, line range, sample, cost estimate를 검증한다. 결과가 좋을 때만 C2.1 implementation과 full rebuild를 판단한다.
+- `session-window.ts` — read-only transcript-window prototype
+- `session-window.test.ts` — fixture tests, 25/25 pass
+- `scripts/window-dryrun.ts` — parse-only corpus dry-run
+- `./run.sh window:dryrun`, `./run.sh test:window`
 
-C2.0에서 할 것:
+검증:
 
-- JSONL user/assistant messages를 `User:` / `Assistant:` transcript lines로 평탄화.
-- A3 C1 sanitizer를 그대로 사용.
-- rendered transcript line → original JSONL line `lineMap` 생성.
-- window chunks 생성: 기본 목표 400 tokens / 80 overlap.
-- 각 chunk에 `startLine`, `endLine`, `messageCount`, `roles`, `windowIndex` 산출.
-- old message-chunk vs new window-chunk count 비교.
-- sample 30~50개로 source line range 검증.
-- estimated tokens/cost 산출.
+- `pnpm exec tsc --noEmit`: clean
+- `pnpm exec tsx session-window.test.ts`: 25/25 pass
+- `./run.sh window:dryrun --source all --tokens 400 --overlap 80`: API 0 / DB 0 / network 0
 
-C2.0에서 하지 말 것:
+기본안 400/80 결과:
 
-- DB write
-- embedding API call
-- sessions full rebuild
-- search/sync 실행
-- store schema 변경
-- org/qmd 변경
+| 항목 | 값 |
+|---|---:|
+| files scanned | 1,628 |
+| old chunks | 28,367 |
+| window chunks | 34,548 |
+| delta | +6,181 (+21.79%) |
+| avg messages/window | 1.93 |
+| p50/p95 messages | 1 / 5 |
+| estimated tokens | 13.00M |
+| estimated 8B cost | ~$0.1300 |
 
-C2.1 후보 구현 방향 (C2.0 검토 후):
+해석:
 
-- `SessionChunk.lineNumber = startLine` 으로 기존 result format 유지.
-- line range는 우선 `metadata.startLine` / `metadata.endLine` / `metadata.messageCount` / `metadata.windowIndex` 에 저장해 store schema 변경을 피한다.
-- chunk id는 `sessionFile:startLine-endLine:windowIndex` 형태.
-- excerpt/read helper는 별도 후속으로 붙인다.
-- 이 단계가 승인될 때만 full sessions rebuild를 품질 목적 비용으로 판단한다.
+- naive 400/80은 chunk 수와 비용을 늘린다.
+- p50 messages/window = 1 이라 중앙값 기준 multi-turn context 개선이 약하다.
+- 원인은 긴 assistant/tool-rich message가 window를 독점하는 세션 구조.
+- 따라서 400/80을 그대로 C2.1로 밀어붙이는 것은 비추천.
+
+대안 스윕:
+
+| 설정 | window chunks | delta | avg msg/window | p50/p95 msg | est tokens | est cost |
+|---|---:|---:|---:|---:|---:|---:|
+| 400/0 | 26,162 | -7.77% | 1.94 | 1 / 5 | 9.69M | ~$0.0969 |
+| 500/100 | 27,166 | -4.23% | 2.18 | 2 / 5 | 12.78M | ~$0.1278 |
+| 600/100 | 21,542 | -24.06% | 2.44 | 2 / 6 | 12.11M | ~$0.1211 |
+| 800/120 | 15,787 | -44.35% | 2.93 | 2 / 8 | 11.71M | ~$0.1171 |
+
+### 지금 할 일 — C2.1 방향 결정
+
+C2.0 결과만으로 "OpenClaw식 400/80 window로 가면 품질이 좋아진다"고 단정할 수 없다. 다음 단일 항목을 GLG가 골라야 한다.
+
+**권장: lineMap/excerpt first**
+
+- 현재 message chunk 구조를 유지하면서 readback UX를 먼저 개선.
+- 검색 hit 이후 주변 JSONL line range를 빠르게 펼치는 도구/CLI를 만든다.
+- full rebuild 없이도 일부 효과를 얻을 수 있고, compact 없는 전략의 rediscovery에 직접 기여한다.
+
+대안:
+
+1. **window chunking revised** — 600/100 또는 800/120 후보로 sample quality를 더 본 뒤 C2.1 구현.
+2. **hybrid message+window dual index** — recall은 좋아질 수 있으나 DB/비용이 커져 보류.
 
 보조 참고:
 

@@ -18,6 +18,7 @@
     "store.ts",
     "session-indexer.ts",
     "session-sanitize.ts",
+    "session-window.ts",
     "retriever.ts",
     "org-chunker.ts",
     "indexer.ts",
