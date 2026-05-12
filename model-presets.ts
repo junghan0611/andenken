@@ -99,15 +99,26 @@ export function getModelPreset(modelName: string): ModelPreset | null {
   // Exact match
   if (MODEL_PRESETS[modelName]) return MODEL_PRESETS[modelName];
 
+  // Case-insensitive exact match. OpenRouter uses lowercase model ids
+  // (`qwen/qwen3-embedding-8b`) while presets are keyed by HuggingFace
+  // canonical names (`Qwen/Qwen3-Embedding-8B`). Without this branch the
+  // md/sessions tracks would silently drop instruction prefixes and
+  // batch-size config — gpt-5.5 review item #4 (2026-05-12).
+  const modelLower = modelName.toLowerCase();
+  for (const [key, preset] of Object.entries(MODEL_PRESETS)) {
+    if (key.toLowerCase() === modelLower) return preset;
+  }
+
   // Path → model name extraction
   const basename = modelName.split("/").pop() ?? "";
+  const basenameLower = basename.toLowerCase();
 
-  // Try matching by basename
+  // Try matching by basename (case-insensitive + variant-aware).
   for (const [key, preset] of Object.entries(MODEL_PRESETS)) {
     const presetBasename = key.split("/").pop() ?? "";
-    if (presetBasename === basename) return preset;
-    // Also match without variant suffix
-    if (presetBasename.split(":")[0] === basename) return preset;
+    const presetBasenameLower = presetBasename.toLowerCase();
+    if (presetBasenameLower === basenameLower) return preset;
+    if (presetBasenameLower.split(":")[0] === basenameLower) return preset;
   }
 
   return null;

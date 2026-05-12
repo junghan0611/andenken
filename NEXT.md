@@ -76,7 +76,90 @@ GLG 방침 (2026-05-12):
   - 검증: tsc 클린, real garden `findMdFiles` 2,210 files (bib 678 / botlog 63 / journal 94 / meta 538 / notes 837), `./run.sh status`에 `📝 MD: not indexed yet` 신규 라인.
 - **env 셋업 완료** — GLG가 `~/.env.local`에 `ANDENKEN_MD_*` 활성, `ANDENKEN_ORG_*` / `ANDENKEN_VLLM_*` 주석 처리. `createMdProviderFromEnv()`가 정상적으로 `vllm (md:openrouter) (4096d, paid)` 만드는 것 확인.
 
-### B1b — 임베딩 보류 (GPT 리뷰 대기, 2026-05-12)
+### B1a-rev — gpt-5.5 리뷰 반영 완료 (2026-05-12, commit pending)
+
+GPT 리뷰 + GLG 추가 지시(openclaw md 방식 충실 포팅 / CJK 고려 / decay 비활성화)를
+한 번에 반영. 검증된 효과는 estimate:md 측정에서 바로 보임 — chunks/file 17.5 →
+4.7, full 비용 추정 $0.35 → $0.097. preset도 잡힘.
+
+핵심 변경:
+
+| 영역 | before | after |
+|---|---|---|
+| chunker | heading-aware H2~H6 + enrichText 4줄 prefix | **OpenClaw `chunkMarkdown` 그대로 포팅** + CJK weighting + body-only embedding |
+| chunks/file (실측) | 17.5 (p50 194c) | 4.7 |
+| full cost (실측 추정) | $0.35 (avg chunks/file 26 기반) | $0.097 |
+| recency decay | 90d (knowledge와 동일) | **0 (off)** — 가든은 시간축이 본질 아님 |
+| role | "" (공란) | **"doc"** — sessions와 union 검색 시 분류 가능 |
+| paid-remote gate | --force 시에만 | --force OR 첫 full run (DB 비어있고 manifest 없음) — first paid index도 명시 confirm 필수 |
+| partial-run safety | manifest checkpoint 100 files, ghost zone skip | checkpoint **25 files**, ghost zone(`indexed && !manifest[f]`)을 staleFiles로 → 자동 재인덱싱 |
+| cleanup md | 미구현 | **manifest repair 추가** (org와 동일 분기) |
+| estimate md | 없음 (메시지만 안내) | **`./run.sh estimate:md`** 구현 — CJK-weighted, per-folder 분해 |
+| verify md | org provider dim 비교(false warning) | md provider dim 직접 비교 |
+| cli.ts status JSON | md 없음 | md 섹션 포함 |
+| preset 매칭 | OpenRouter lowercase `qwen/qwen3-embedding-8b` → preset 미적용 (batch=64, no instruction) | **case-insensitive** → preset `Qwen/Qwen3-Embedding-8B` 잡힘 (batch=100 + instruction) |
+| frontmatter TOML | delimiter strip만 | `key = value` 파싱 추가 |
+
+GPT 리뷰 10개 응답:
+
+| # | GPT 답변 | 우리 처리 |
+|---|---|---|
+| 1 | 청크 정책: 과분할. H2/H3까지만 + coalescing 필요 | **OpenClaw 알고리즘으로 교체** (heading boundary 폐기, GLG 지시) — 더 강한 해결 |
+| 2 | enrichText: anchor 제거 + description 첫 청크만 | **enrichText 자체 폐기** (OpenClaw style) — title/desc/tags는 metadata only |
+| 3 | fence detection: heading은 OK, splitSegment가 fence 쪼개기 가능 | 새 chunker는 line-based라 fence-aware 불요 |
+| 4 | JSON FM: corpus 없음, 비블로커 | 그대로. TOML `=` 파싱은 추가 |
+| 5 | denote-id: 파일명 충분 | 파일명 유지 |
+| 6 | chunk id: `filePath#chunkIndex` OK | 유지. hash는 metadata에 박힘 |
+| 7 | role: "doc" 권장 | **"doc"으로 변경** |
+| 8 | recency 90d: garden은 짧을 수 있음, 별도 decay | **decay off** (GLG 지시) |
+| 9 | paid gate: 첫 인덱스도 게이트 필요 | **첫 full run 게이트 추가** |
+| 10 | partial-run safety: 고쳐야 함 | **getStaleFiles 분기 수정 + cleanup md manifest repair + checkpoint 25 files** |
+
+GPT non-blocker 2건:
+
+- verify md provider dim: **md provider 직접 사용**
+- cli.ts status JSON: **md 섹션 추가**
+
+수정 파일:
+
+| 파일 | 변경 |
+|---|---|
+| `md-chunker.ts` | 재작성 (~530줄, OpenClaw `chunkMarkdown` 포팅 + CJK weighting `estimateStringChars`/`estimateTokensFromChars` 포팅 + heading-aware/enrichText/hierarchy 폐기 + role=doc) |
+| `indexer.ts` | getStaleFiles ghost-zone fix + indexMd paid-remote 강화 + checkpoint 25 + cleanup md manifest repair + estimateMd 구현 + verify md provider 정확화 |
+| `cli.ts` | searchMd `recencyHalfLifeDays: 0` + status JSON에 md 섹션 |
+| `model-presets.ts` | getModelPreset case-insensitive (정확/basename 둘 다) |
+| `run.sh` | `estimate:md` 명령 + help 텍스트 |
+| `test.ts` | testMdChunker 새 shape 대응 (CJK weighting 5개 assertion, role="doc", TOML, 큰 본문 분할, monotonic chunkIndex) |
+
+검증:
+
+- tsc 클린
+- unit 115/0/0 (+17 from previous 98)
+- `./run.sh estimate:md` 실측: 2210 files / 10,297 chunks / avg 4.7/file / ~9.7M tokens (CJK-weighted) / **$0.097** estimated
+- preset 로그: `📋 md:openrouter preset: qwen/qwen3-embedding-8b (4096d, batch=100)`
+
+### B1b — 본 임베딩 (env confirm 후 즉시 실행)
+
+paid-remote gate 통과 필요 (`ANDENKEN_ALLOW_PAID_FULL_REBUILD=1`):
+
+```bash
+./run.sh estimate:md                            # 이미 실측: ~$0.097
+ANDENKEN_ALLOW_PAID_FULL_REBUILD=1 ./run.sh index:md  # 실제 인덱싱 (~50분 추정)
+./run.sh status                                 # md count / actual_dim 확인
+./run.sh verify md                              # 무결성
+./run.sh search:md "보편 학문" --limit 5
+./run.sh search:md "피투성" --limit 5
+./run.sh search:md "어쏠로지" --limit 5
+./run.sh search:md "바네바 부시" --limit 5
+./run.sh search:md "제프 베이조스" --limit 5
+./run.sh search:md "andenken openclaw" --limit 5
+./run.sh search:md "entwurf 시간축" --limit 5
+./run.sh search:md "일일일생" --limit 5
+./run.sh search:md "2026-05-11 andenken" --limit 5
+./run.sh search:md "디지털가든 메타휴먼" --limit 5
+```
+
+### B1b — (legacy 섹션, 위 내용으로 대체됨) 임베딩 보류 (GPT 리뷰 대기, 2026-05-12)
 
 GLG 결정: **첫 임베딩 전에 gpt-5.5 리뷰를 통해 한 번 수정한 다음 본 임베딩 들어간다.** 한 번에 끝내자 (두세번 안 하려고).
 

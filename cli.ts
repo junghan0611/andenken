@@ -450,10 +450,15 @@ async function searchMd(query: string, limit: number): Promise<void> {
   const vectorResults = await store.search(queryVector, candidates, 0.05);
   const ftsResults = await store.fullTextSearch(bm25Query, candidates);
 
+  // gpt-5.5 review #8 + GLG decision (2026-05-12): no recency decay for md.
+  // Garden is not chronological — a 2021 long-form note is as relevant as a
+  // 2025 one when the query asks for the concept itself. applyRecencyDecay
+  // short-circuits on halfLifeDays <= 0, so this skips the decay branch
+  // entirely without touching retriever code.
   const results = await retrieve(query, vectorResults, ftsResults, {
     vectorWeight: 0.7,
     bm25Weight: 0.3,
-    recencyHalfLifeDays: 90,
+    recencyHalfLifeDays: 0,
     minScore: 0.05,
     mmr: { enabled: true, lambda: 0.7 },
     mergeStrategy: "weighted" as MergeStrategy,
@@ -486,6 +491,24 @@ async function status(): Promise<void> {
     // not initialized
   }
 
+  // gpt-5.5 review (non-blocker #2): md was missing from the CLI JSON
+  // surface. The text-mode `./run.sh status` covers it via indexer.ts, but
+  // tools that read the JSON (skills, MCP wrappers) need it here too.
+  let mdCount = 0;
+  let mdFiles = 0;
+  const mdExists = fs.existsSync(mdDbPath);
+  if (mdExists) {
+    const mdStore = new VectorStore(mdDbPath, 4096);
+    try {
+      await mdStore.init();
+      mdCount = await mdStore.getCount();
+      mdFiles = (await mdStore.getIndexedFiles()).size;
+      await mdStore.close();
+    } catch {
+      // not initialized
+    }
+  }
+
   let orgCount = 0;
   const orgExists = fs.existsSync(orgDbPath);
   if (orgExists) {
@@ -507,6 +530,11 @@ async function status(): Promise<void> {
         chunks: sessionCount,
         indexed_files: sessionFiles,
         total_files: totalSessionFiles,
+      },
+      md: {
+        chunks: mdCount,
+        indexed_files: mdFiles,
+        indexed: mdExists,
       },
       knowledge: {
         chunks: orgCount,

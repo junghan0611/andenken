@@ -206,7 +206,19 @@ function getStaleFiles(
     // Check mtime against manifest
     const entry = manifest.files[f];
     if (!entry) {
-      // New to manifest but already indexed — just record, don't re-index
+      // PR-md1 (gpt-5.5 review #10): ghost-zone protection.
+      //
+      // File is in the DB (indexed.has(f)) but missing from the manifest.
+      // That happens when a previous run crashed between a WriteBuffer flush
+      // and the next manifest checkpoint — the chunks landed in LanceDB, but
+      // mtime/size were never recorded. The old behaviour (`continue`)
+      // silently skipped these files forever; the next mtime check could
+      // never trigger because there was no baseline to compare against.
+      //
+      // Re-index them. wb.add() is idempotent per file (it pre-deletes
+      // existing rows), so the worst case is a small cost overrun on the
+      // next sync, not duplicate chunks.
+      staleFiles.push(f);
       continue;
     }
     try {
@@ -514,12 +526,28 @@ async function indexSessions(force: boolean) {
 async function indexMd(force: boolean) {
   const provider = getMdProvider();
 
-  if (force && (provider as { isPaidRemote?: boolean }).isPaidRemote) {
+  // PR-md2 (gpt-5.5 review #9): paid-remote gate strengthened.
+  //
+  // GLG's first-md-index is effectively a full rebuild (empty DB, no
+  // manifest, all 2,210 files queued as "new"), so the previous `--force`-
+  // only gate let the costly first run through without an explicit
+  // confirmation. We now gate ANY paid-remote indexing that would do a
+  // full corpus pass — defined as `--force` OR (no DB + no manifest +
+  // paid endpoint). Operators clear it the same way: estimate first, then
+  // set ANDENKEN_ALLOW_PAID_FULL_REBUILD=1 before re-running.
+  const mdDbExists = fs.existsSync(getMdDbPath());
+  const manifestExists = fs.existsSync(getMdManifestPath());
+  const isFirstFullRun = !mdDbExists && !manifestExists;
+  const needsGate =
+    (force || isFirstFullRun)
+    && (provider as { isPaidRemote?: boolean }).isPaidRemote;
+  if (needsGate) {
     if (process.env.ANDENKEN_ALLOW_PAID_FULL_REBUILD !== "1") {
       throw new Error(
-        "MD full rebuild against paid remote endpoint is gated.\n" +
-          "  Set ANDENKEN_ALLOW_PAID_FULL_REBUILD=1 after reviewing the cost estimate.\n" +
-          "  Estimate via `./run.sh estimate md`.",
+        "MD full index against paid remote endpoint is gated.\n" +
+          "  Run `./run.sh estimate md` first to size cost, then set\n" +
+          "  ANDENKEN_ALLOW_PAID_FULL_REBUILD=1 to confirm and re-run.\n" +
+          `  Trigger: ${force ? "--force" : "first full run (no DB + no manifest)"}.`,
       );
     }
   }
@@ -571,7 +599,13 @@ async function indexMd(force: boolean) {
 
   const progress = new Progress(toIndex.length, "MD");
   const wb = new WriteBuffer(store, DB_WRITE_BATCH);
-  const CHECKPOINT_INTERVAL = 100;
+  // PR-md1 (gpt-5.5 review #10 continued): tighter checkpoint cadence.
+  //
+  // Sessions uses 100 because session files are append-only and the cost
+  // of re-indexing a missed file is small. md files are static exports
+  // and the cost is per-token paid-remote, so reduce the checkpoint
+  // interval. Still cheap — saveMdManifest writes <50KB JSON.
+  const CHECKPOINT_INTERVAL = 25;
   let filesProcessed = 0;
 
   const checkpointIfNeeded = async () => {
@@ -1267,32 +1301,36 @@ async function cleanup(target: string) {
       }
     }
 
-    // 5. Manifest repair (org only)
-    if (t === "org") {
-      const manifest = loadManifest();
-      const oFiles = findOrgFiles().filter(f => shouldIndexOrgFile(f));
-      const oFileSet = new Set(oFiles);
+    // 5. Manifest repair (org / md)
+    if (t === "org" || t === "md") {
+      const isOrg = t === "org";
+      const manifest = isOrg ? loadManifest() : loadMdManifest();
+      const trackedFiles = isOrg
+        ? findOrgFiles().filter((f) => shouldIndexOrgFile(f))
+        : findMdFiles();
+      const fileSet = new Set(trackedFiles);
       let repaired = 0;
 
       // Remove deleted files from manifest
       for (const f of Object.keys(manifest.files)) {
-        if (!oFileSet.has(f)) {
+        if (!fileSet.has(f)) {
           delete manifest.files[f];
           repaired++;
         }
       }
 
-      // Add ghost zone files (indexed but not in manifest).
-      // PR-B: read-only manifest repair, dim parameter doesn't matter for
-      // getIndexedFiles, but pass actual dim to keep the constructor honest.
+      // Add ghost-zone files (indexed but not in manifest). PR-md1
+      // (gpt-5.5 review #10): same ghost-zone protection added to
+      // getStaleFiles, but cleanup also walks the corpus so a manual run
+      // brings the manifest back into shape even when sync hasn't run yet.
       const probe = new VectorStore(dbPath);
       await probe.init();
       const actualDim = await probe.getActualVectorDim();
       await probe.close();
-      const store = new VectorStore(dbPath, actualDim ?? 2560);
+      const store = new VectorStore(dbPath, actualDim ?? (isOrg ? 2560 : 4096));
       await store.init();
       const indexed = await store.getIndexedFiles();
-      for (const f of oFiles) {
+      for (const f of trackedFiles) {
         if (indexed.has(f) && !manifest.files[f]) {
           try {
             const stat = fs.statSync(f);
@@ -1304,7 +1342,8 @@ async function cleanup(target: string) {
       await store.close();
 
       if (repaired > 0) {
-        saveManifest(manifest);
+        if (isOrg) saveManifest(manifest);
+        else saveMdManifest(manifest);
         console.log(`Manifest repaired: ${repaired} entries fixed`);
       }
     }
@@ -1335,11 +1374,14 @@ async function verify(target: string) {
   //   1. actual stored dim (DB truth)        — preferred
   //   2. configured provider dim             — informational, used only when DB is empty
   //   3. 2560                                — last-resort, backward-compat
+  // PR-md4 (gpt-5.5 non-blocker #1): verify must pick the *track-matching*
+  // provider. Previously md was falling through to createOrgProviderFromEnv
+  // which produced false-positive dim mismatch warnings.
   const safeProviderDim = (t: string): number | undefined => {
     try {
-      return t === "sessions"
-        ? createSessionProviderFromEnv()?.dimensions
-        : createOrgProviderFromEnv()?.dimensions;
+      if (t === "sessions") return createSessionProviderFromEnv()?.dimensions;
+      if (t === "md") return createMdProviderFromEnv()?.dimensions;
+      return createOrgProviderFromEnv()?.dimensions;
     } catch {
       return undefined;
     }
@@ -1473,8 +1515,12 @@ async function verify(target: string) {
 // usage may differ ±20% depending on tokenizer.
 
 async function estimate(target: string) {
+  if (target === "md") {
+    await estimateMd();
+    return;
+  }
   if (target !== "sessions") {
-    console.error(`estimate: only "sessions" target supported in PR-B (got "${target}")`);
+    console.error(`estimate: only "sessions" and "md" targets supported (got "${target}")`);
     process.exit(2);
   }
 
@@ -1553,6 +1599,111 @@ async function estimate(target: string) {
   console.log(`  configured price: $${price}/M tokens`);
   console.log(`  estimated cost: $${cost.toFixed(4)}`);
   console.log(`  ↳ caveat: chars/2.5 is rough; OpenRouter actual usage may differ ±20%`);
+  console.log(`  ↳ no API call was made for this estimate`);
+}
+
+// --- MD Estimate (issue #8 / PR-md3, gpt-5.5 review #5) ---
+//
+// Runs md-chunker over the garden corpus, sums chars with CJK weighting,
+// produces an API-0 cost estimate the operator can review before clearing
+// the paid-remote gate. Default mode is INCREMENTAL (files that the next
+// `index:md` would actually embed); pass `--full` for the whole corpus.
+//
+// Token model: chars/4 with CJK weighting via estimateStringChars. This
+// matches the budget the chunker actually uses, so the estimate aligns
+// with what gets sent to the embedding API.
+
+async function estimateMd() {
+  const fullMode = process.argv.includes("--full");
+  const allFiles = findMdFiles();
+
+  let filesToEstimate: string[];
+  if (fullMode) {
+    filesToEstimate = allFiles;
+  } else {
+    const manifest = loadMdManifest();
+    if (Object.keys(manifest.files).length === 0) {
+      filesToEstimate = allFiles;
+    } else {
+      let indexed = new Set<string>();
+      const mDbPath = getMdDbPath();
+      if (fs.existsSync(mDbPath)) {
+        const store = new VectorStore(mDbPath, 4096);
+        await store.init();
+        indexed = await store.getIndexedFiles();
+        await store.close();
+      }
+      const { newFiles, staleFiles } = getStaleFiles(allFiles, indexed, manifest);
+      filesToEstimate = [...newFiles, ...staleFiles];
+    }
+  }
+
+  // Lazy-import md-chunker so we don't pull it into sessions paths.
+  const { chunkMdFile, estimateStringChars } = await import("./md-chunker.js");
+
+  let totalChunks = 0;
+  let totalChars = 0;
+  let totalWeightedChars = 0;
+  const byFolder: Record<string, { files: number; chunks: number; weightedChars: number }> = {};
+
+  for (const f of filesToEstimate) {
+    let chunks;
+    try {
+      chunks = chunkMdFile(f);
+    } catch {
+      continue;
+    }
+    if (!chunks.length) continue;
+    totalChunks += chunks.length;
+    const folder = chunks[0].folder;
+    if (!byFolder[folder]) byFolder[folder] = { files: 0, chunks: 0, weightedChars: 0 };
+    byFolder[folder].files++;
+    byFolder[folder].chunks += chunks.length;
+    for (const c of chunks) {
+      totalChars += c.text.length;
+      const w = estimateStringChars(c.text);
+      totalWeightedChars += w;
+      byFolder[folder].weightedChars += w;
+    }
+  }
+
+  // CJK-aware token estimate: weightedChars / 4 ≈ tokens.
+  const tokens = Math.ceil(totalWeightedChars / 4);
+
+  const priceRaw =
+    process.env.ANDENKEN_MD_PRICE_PER_M_TOKENS ??
+    process.env.OPENROUTER_QWEN_8B_PRICE ??
+    "0.01";
+  const pricePerM = parseFloat(priceRaw);
+  const price = Number.isFinite(pricePerM) && pricePerM > 0 ? pricePerM : 0.01;
+  const cost = (tokens / 1_000_000) * price;
+
+  const header = fullMode ? "MD estimate (FULL CORPUS)" : "MD estimate (INCREMENTAL)";
+  console.log(header);
+  if (fullMode) {
+    console.log(`  files: ${allFiles.length}`);
+  } else {
+    const skipped = allFiles.length - filesToEstimate.length;
+    console.log(`  files to index: ${filesToEstimate.length}` + (skipped > 0 ? ` (${skipped} already indexed → skipped)` : ""));
+  }
+  console.log(`  chunks (chunker output): ~${totalChunks.toLocaleString()}`);
+  if (filesToEstimate.length > 0) {
+    console.log(`  avg chunks/file: ${(totalChunks / filesToEstimate.length).toFixed(1)}`);
+  }
+  console.log(`  raw chars: ~${totalChars.toLocaleString()}`);
+  console.log(`  CJK-weighted chars: ~${totalWeightedChars.toLocaleString()}`);
+  console.log(`  estimated tokens: ~${tokens.toLocaleString()} (weighted-chars/4)`);
+  console.log(`  configured price: $${price}/M tokens`);
+  console.log(`  estimated cost: $${cost.toFixed(4)}`);
+  console.log(`  by folder:`);
+  for (const [folder, agg] of Object.entries(byFolder).sort()) {
+    const t = Math.ceil(agg.weightedChars / 4);
+    const c = (t / 1_000_000) * price;
+    console.log(
+      `    ${folder.padEnd(8)}: ${String(agg.files).padStart(4)} files | ${String(agg.chunks).padStart(6)} chunks | ~${t.toLocaleString().padStart(8)} tokens | $${c.toFixed(4)}`,
+    );
+  }
+  console.log(`  ↳ token model: chars/4 with CJK weighting (estimateStringChars); OpenRouter actual usage may differ ±10%`);
   console.log(`  ↳ no API call was made for this estimate`);
 }
 

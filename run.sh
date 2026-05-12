@@ -43,6 +43,10 @@ Usage: ./run.sh <command> [args]
                               --full  = whole corpus
                               price: ANDENKEN_SESSION_PRICE_PER_M_TOKENS
                                   > OPENROUTER_QWEN_8B_PRICE > 0.01
+  estimate:md [--full]        Issue #8: md OpenRouter 8B estimate (API 0)
+                              CJK-weighted token model, per-folder breakdown
+                              price: ANDENKEN_MD_PRICE_PER_M_TOKENS
+                                  > OPENROUTER_QWEN_8B_PRICE > 0.01
 
 === Sessions full rebuild / sync (PR-B) ===
   rebuild:sessions[:dry]      scripts/rebuild-sessions-full.sh [--dry-run]
@@ -196,6 +200,8 @@ case "${1:-help}" in
     shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx estimate.ts "${1:-all}" ;;
   estimate:sessions)
     shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts estimate sessions "$@" ;;
+  estimate:md)
+    shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts estimate md "$@" ;;
 
   # === Sanitize / Window prototypes (API 0) ===
   sanitize:dryrun)

@@ -34,8 +34,12 @@ import {
   getMdFolder,
   findMdFiles,
   mdChunkToStoreRow,
+  estimateStringChars,
+  estimateTokensFromChars,
+  CHARS_PER_TOKEN_ESTIMATE,
   INDEXABLE_MD_FOLDERS,
   MD_SOURCE_LABEL,
+  MD_ROLE_LABEL,
 } from "./md-chunker.ts";
 import { WriteBuffer, type BufferedRecord } from "./write-buffer.ts";
 import {
@@ -418,9 +422,9 @@ async function testOrgChunker() {
 }
 
 async function testMdChunker() {
-  section("MD Chunker (issue #8)");
+  section("MD Chunker (issue #8, OpenClaw port + CJK)");
 
-  // --- parseFrontmatter ---
+  // --- parseFrontmatter (YAML) ---
   const yaml = `---
 title: "테스트 노트"
 description: "샘플 설명"
@@ -444,6 +448,17 @@ draft: false
   assert(frontmatter.draft === false, "YAML draft=false parsed");
   assert(bodyOffset > 0, "bodyOffset positive when frontmatter present");
 
+  // --- parseFrontmatter (TOML key=value) ---
+  const toml = `+++
+title = "TOML 노트"
+tags = ["a", "b"]
++++
+
+본문 텍스트가 충분히 길어서 미니멈을 통과한다. 한글 본문 길이 채우기.`;
+  const fmToml = parseFrontmatter(toml).frontmatter;
+  assert(fmToml.title === "TOML 노트", "TOML title parsed via = delimiter");
+  assert(fmToml.tags.length === 2 && fmToml.tags[1] === "b", "TOML tags parsed");
+
   // --- parseDenoteId ---
   assert(
     parseDenoteId("/garden/notes/20211117T190700.md") === "20211117T190700",
@@ -456,7 +471,10 @@ draft: false
 
   // --- getMdFolder ---
   assert(
-    getMdFolder("/home/u/repos/gh/notes/content/notes/foo.md", "/home/u/repos/gh/notes/content") === "notes",
+    getMdFolder(
+      "/home/u/repos/gh/notes/content/notes/foo.md",
+      "/home/u/repos/gh/notes/content",
+    ) === "notes",
     "getMdFolder picks first segment after root",
   );
 
@@ -477,8 +495,32 @@ draft: false
     "INDEXABLE_MD_FOLDERS excludes images/talks/test/tmp",
   );
 
-  // --- chunkMdContent: basic body ---
-  const body = yaml + "본문은 충분히 길어야 MIN_CHUNK_CHARS=40을 통과합니다. 한글 텍스트를 채워서 미니멈 길이를 넘기는 샘플 본문.";
+  // --- CJK weighting (ported from OpenClaw cjk-chars.ts) ---
+  assert(
+    estimateStringChars("abcd") === 4,
+    "ASCII: estimateStringChars equals length",
+  );
+  assert(
+    estimateStringChars("가") === CHARS_PER_TOKEN_ESTIMATE,
+    `CJK single Hangul: weighted to ${CHARS_PER_TOKEN_ESTIMATE} (1 char → 1 token but accounted as 4 for the chars/4 formula)`,
+  );
+  assert(
+    estimateStringChars("a가") === 1 + CHARS_PER_TOKEN_ESTIMATE,
+    "mixed Latin+Hangul: 1 + 4",
+  );
+  assert(
+    estimateTokensFromChars(estimateStringChars("가나다라마")) === 5,
+    "5 Hangul chars → 5 tokens via chars/4 formula",
+  );
+  assert(
+    estimateTokensFromChars(estimateStringChars("hello world")) === 3,
+    '"hello world" (11 chars) → 3 tokens',
+  );
+
+  // --- chunkMdContent: basic body, body-only embedding text (no prefix) ---
+  const body =
+    yaml +
+    "본문은 충분히 길어야 MIN_CHUNK_CHARS=40을 통과합니다. 한글 텍스트를 채워서 미니멈 길이를 넘기는 샘플 본문 한 단락.";
   const chunks = chunkMdContent(
     body,
     "/garden/notes/20211117T190700.md",
@@ -491,43 +533,14 @@ draft: false
     assert(c.folder === "notes", "chunk folder=notes");
     assert(c.denoteId === "20211117T190700", "chunk denoteId extracted");
     assert(typeof c.hash === "string" && c.hash.length === 64, "chunk has sha256 hash");
-    assert(c.frontmatter.title === "테스트 노트", "chunk preserves frontmatter title");
-    assert(c.text.includes("Title: 테스트 노트"), "chunk text enriched with title prefix");
-    assert(c.text.includes(c.rawText), "chunk.text contains chunk.rawText");
+    assert(c.frontmatter.title === "테스트 노트", "chunk frontmatter preserved");
+    assert(
+      !c.text.includes("Title:") && !c.text.includes("Description:") && !c.text.includes("Path:"),
+      "chunk.text is body-only — no Title/Description/Path prefix (OpenClaw style)",
+    );
+    assert(c.text === c.rawText, "chunk.text === chunk.rawText (no enrichment)");
+    assert(c.startLine > 1, `chunk.startLine offset past frontmatter (got ${c.startLine})`);
   }
-
-  // --- chunkMdContent: heading-bounded segments ---
-  const hierarchyBody = yaml.replace("## 본문 시작", "## 본문 시작\n\n초반 텍스트가 길게 채워져 있다. 본문 첫 단락이다. 청크 분리 테스트.\n\n## 두 번째 섹션\n\n두 번째 섹션 본문도 충분히 길게 채워진 텍스트. 청크 분리 테스트 케이스 통과를 위한 분량.");
-  const hier = chunkMdContent(hierarchyBody, "/g/notes/a.md", "notes");
-  const hierTitles = hier.map((c) => c.hierarchy.join(" > "));
-  assert(
-    hierTitles.some((h) => h.includes("본문 시작"))
-      && hierTitles.some((h) => h.includes("두 번째 섹션")),
-    "hierarchy captures H2 section titles",
-  );
-
-  // --- chunkMdContent: fenced code block preserved across heading-shaped lines ---
-  const fenced = `---
-title: "Code"
-tags: []
----
-
-## A
-
-\`\`\`
-# this is shell comment not a heading
-echo "x"
-\`\`\`
-
-본문 텍스트가 충분히 길게 들어가서 청크 최소 길이를 통과합니다.
-`;
-  const fchunks = chunkMdContent(fenced, "/g/notes/b.md", "notes");
-  assert(
-    fchunks.length >= 1
-      && fchunks.every((c) => c.rawText.indexOf("# this is shell comment") < 0
-        || !c.hierarchy.some((h) => h === "this is shell comment not a heading")),
-    "fenced code block heading-shaped lines are not treated as headings",
-  );
 
   // --- chunkMdContent: tiny body skipped ---
   const tiny = `---
@@ -538,14 +551,51 @@ ok`;
   const tinyChunks = chunkMdContent(tiny, "/g/notes/c.md", "notes");
   assert(tinyChunks.length === 0, `tiny body skipped via MIN_CHUNK_CHARS (got ${tinyChunks.length})`);
 
+  // --- chunkMdContent: large body produces multiple chunks via OpenClaw budget ---
+  // notes folder: 1000 tokens × 4 = 4000 chars budget for Latin; with CJK
+  // weighting Korean text fills faster. Build a body that should split.
+  const para = "한국어 본문 단락. 가든 노트의 한 단락. 충분히 길어서 청크 budget을 넘긴다. ".repeat(20);
+  const big = `---
+title: "Big"
+tags: []
+---
+${para}
+
+${para}
+
+${para}
+`;
+  const bigChunks = chunkMdContent(big, "/g/notes/big.md", "notes");
+  assert(
+    bigChunks.length >= 2,
+    `large Korean body splits into ≥2 chunks (got ${bigChunks.length})`,
+  );
+  assert(
+    bigChunks.every((c) => c.text.length >= 40),
+    "every chunk passes MIN_CHUNK_CHARS",
+  );
+
+  // --- chunkMdContent: chunk index monotonic and start/end lines sorted ---
+  for (let i = 1; i < bigChunks.length; i++) {
+    assert(
+      bigChunks[i].chunkIndex === bigChunks[i - 1].chunkIndex + 1,
+      `chunkIndex monotonic at i=${i}`,
+    );
+    assert(
+      bigChunks[i].startLine >= bigChunks[i - 1].startLine,
+      `startLine non-decreasing at i=${i}`,
+    );
+  }
+
   // --- mdChunkToStoreRow shape ---
   if (chunks.length > 0) {
     const row = mdChunkToStoreRow(chunks[0], [0, 0, 0], "2024-01-15T00:00:00.000Z");
     assert(row.source === MD_SOURCE_LABEL, 'storeRow.source = "md"');
-    assert(row.role === "", "storeRow.role empty for md");
+    assert(row.role === MD_ROLE_LABEL, `storeRow.role = "${MD_ROLE_LABEL}" (was "" — changed to allow union search)`);
     assert(row.sessionFile === chunks[0].filePath, "storeRow.sessionFile = md file path");
     assert(row.project === "notes", "storeRow.project = folder");
     assert(typeof row.metadata.hash === "string", "storeRow.metadata.hash present");
+    assert(!row.metadata.hierarchy, "storeRow.metadata.hierarchy removed (heading-aware design retired)");
   }
 
   // --- findMdFiles smoke (no-throw on a non-existent root) ---
