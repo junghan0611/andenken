@@ -56,7 +56,7 @@ rsync "${RSYNC_FLAGS[@]}" \
   "${HOST}:${REMOTE_ROOT}/data/md.lance/"
 
 echo "== sync md-manifest.json → ${HOST}:${REMOTE_ROOT}/data/md-manifest.json =="
-rsync -az ${DRY_RUN:+--dry-run} \
+rsync "${RSYNC_FLAGS[@]}" \
   data/md-manifest.json \
   "${HOST}:${REMOTE_ROOT}/data/md-manifest.json"
 

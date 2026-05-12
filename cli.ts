@@ -7,7 +7,7 @@
  *
  * Usage:
  *   cli.ts search-sessions <query> [--limit N]
- *   cli.ts search-knowledge <query> [--limit N]
+ *   cli.ts search-knowledge <query> [--limit N]  # compatibility alias for search-md
  *   cli.ts status
  *   cli.ts reindex [--force]
  */
@@ -49,13 +49,12 @@ function recordRecall(query: string, tool: string, results: SearchResult[]): voi
 /**
  * Track-aware provider getters.
  *
- * searchSessions and searchKnowledge each pick the provider that matches the
- * corpus they're querying. A sessions vector NEVER goes into org.lance and
- * vice versa, so the two tracks can carry different dimensions (sessions on
- * OpenRouter 8B/4096d, org on local 4B/2560d).
+ * searchSessions and searchMd each pick the provider that matches the corpus
+ * they're querying. Sessions and md both use 4096d today, but they remain
+ * separate stores/providers so costs and lifecycle do not bleed across tracks.
  *
- * Sessions track is namespaced (ANDENKEN_SESSION_*) with no legacy fallback;
- * org track keeps ANDENKEN_VLLM_* fallback for backward-compat indexing.
+ * Sessions and md are namespaced (ANDENKEN_SESSION_* / ANDENKEN_MD_*) with no
+ * legacy fallback. Org provider/search remains only for upstream R&D paths.
  */
 function getSessionsProvider(): EmbeddingProvider {
   // PR-B: legacy fallback removed. Sessions track requires explicit
@@ -573,8 +572,15 @@ async function status(): Promise<void> {
         indexed: mdExists,
       },
       knowledge: {
+        chunks: mdCount,
+        indexed_files: mdFiles,
+        indexed: mdExists,
+        source: "md",
+      },
+      org: {
         chunks: orgCount,
         indexed: orgExists,
+        production: "disabled",
       },
     }),
   );
@@ -734,7 +740,10 @@ async function main() {
         console.error(JSON.stringify({ error: "Usage: search-knowledge <query> [--limit N]" }));
         process.exit(1);
       }
-      await searchKnowledge(query, limit);
+      // Compatibility alias: production knowledge axis is md.lance. The old
+      // org-backed searchKnowledge() remains in this file for R&D/manual use
+      // only; agent-facing `knowledge` now follows search-md.
+      await searchMd(query, limit);
       break;
     }
     case "status":

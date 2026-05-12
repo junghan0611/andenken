@@ -113,6 +113,13 @@ Sessions index exactly two harness sources:
 | `pi` | `~/.pi/agent/sessions` | pi JSONL (`type="message"`, `message.role`) |
 | `claude` | `~/.claude/projects` | Claude Code JSONL (`type="user" | "assistant"`) |
 
+Entwurf sessions are **not a third source**. A spawned/resumed entwurf that writes
+`*_entwurf-<taskId>.jsonl` under `~/.pi/agent/sessions/<project>/` is indexed by
+the normal `pi` source path, with project inferred from the cwd-shaped session
+directory. Saved task metadata / control sockets are not separately embedded;
+only the transcript JSONL that lands under the pi sessions tree participates in
+`sessions.lance`.
+
 Do **not** index `~/.pi/agent/claude-config-overlay/projects`. That directory
 is pi-shell-acp's Claude overlay, not a third memory source. Its work is already
 represented through pi harness sessions / entwurf messages; indexing it would
@@ -127,7 +134,11 @@ only `pi`, `claude`, and `all` (`pi + claude`). No `overlay` source.
 - **MD** is the current knowledge axis for agents. It indexes the exported
   public garden directly — a controlled corpus where chunking and retrieval
   are tunable on a sane schedule. Same 8B/4096d provider as sessions; separate
-  LanceDB file so the two pools never cross-contaminate.
+  LanceDB file so the two pools never cross-contaminate. Its chunk count is
+  intentionally much lower than org (`10,119` vs `44,916` in the 2026-05-12
+  baseline): OpenClaw-style Markdown chunking emits larger, denser
+  CJK-weighted chunks instead of org's heading/body two-tier fragments. Treat
+  this as density improvement, not missing corpus.
 - **Org** stays 4B/2560d but is **disabled in production**. Doctor WARN
   cleanup, chunker improvements, and source policy refinement are upstream R&D
   and live behind explicit operator invocation. Agents do not consume org
