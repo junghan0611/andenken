@@ -393,44 +393,160 @@ function parseInlineList(raw: string): string[] {
 // --- Core chunker ---
 
 /**
+ * Why a file may be skipped by the md indexer.
+ *
+ * `deleted` is only produced by `analyzeMdFile` when the path no longer
+ * exists on disk — it is doctor-facing (the indexer never sees a missing
+ * file because `findMdFiles` enumerates the filesystem). All other reasons
+ * mirror the bail points in `analyzeMdContent` below.
+ */
+export type MdSkipReason =
+  | "deleted"
+  | "folder_excluded"
+  | "unreadable"
+  | "noembed_tag"
+  | "empty_body"
+  | "min_body"
+  | "all_chunks_short";
+
+/**
+ * Single source of truth for "what would the indexer do with this file?".
+ *
+ * Consumed by:
+ *   - `indexer.ts` (via `chunkMdFile`) — needs `chunks` only.
+ *   - `doctor-md.ts` — needs `skipReason` to explain manifest entries that
+ *     have `chunks=0` in `md-manifest.json`.
+ *
+ * The two callers MUST share this classifier so doctor's explanation can
+ * never drift from the indexer's actual decision.
+ */
+export interface MdAnalysis {
+  filePath: string;
+  folder: string;
+  exists: boolean;
+  readable: boolean;
+  frontmatter: MdFrontmatter | null;
+  /** null exactly when chunks were produced. */
+  skipReason: MdSkipReason | null;
+  /** Empty when `skipReason !== null`. */
+  chunks: MdChunk[];
+}
+
+/**
  * Read an md file from disk and produce chunks. Returns [] for empty,
  * frontmatter-only, or excluded-folder files.
+ *
+ * Implemented as a thin wrapper over `analyzeMdFile` so the indexer and
+ * doctor share the same skip classifier (see `MdSkipReason`).
  */
 export function chunkMdFile(
   filePath: string,
   opts: { root?: string; bypassFolderPolicy?: boolean } = {},
 ): MdChunk[] {
-  const folder = getMdFolder(filePath, opts.root);
-  if (!opts.bypassFolderPolicy && !INDEXABLE_MD_FOLDERS.has(folder)) {
-    return [];
-  }
-
-  let content: string;
-  try {
-    content = fs.readFileSync(filePath, "utf-8");
-  } catch {
-    return [];
-  }
-
-  return chunkMdContent(content, filePath, folder);
+  return analyzeMdFile(filePath, opts).chunks;
 }
 
 /**
  * Pure form of `chunkMdFile`. Operates on already-read content so tests can
  * drive synthetic input without touching the filesystem.
+ *
+ * Thin wrapper over `analyzeMdContent` for the same SSOT reason as above.
  */
 export function chunkMdContent(
   content: string,
   filePath: string,
   folder: string,
 ): MdChunk[] {
+  return analyzeMdContent(content, filePath, folder).chunks;
+}
+
+/**
+ * Filesystem-side classifier + chunker. Drives the indexer decision and
+ * powers `doctor --md` gap explanation.
+ *
+ * Returns:
+ *   - `{ exists: false, skipReason: "deleted", chunks: [] }`
+ *     when `filePath` no longer exists.
+ *   - `{ readable: false, skipReason: "unreadable", chunks: [] }`
+ *     when read fails.
+ *   - `{ skipReason: "folder_excluded", chunks: [] }`
+ *     when the folder is outside `INDEXABLE_MD_FOLDERS` and the policy is
+ *     not bypassed. Doctor always bypasses (manifest entries are by
+ *     definition in an indexable folder).
+ *   - Otherwise delegates to `analyzeMdContent`.
+ */
+export function analyzeMdFile(
+  filePath: string,
+  opts: { root?: string; bypassFolderPolicy?: boolean } = {},
+): MdAnalysis {
+  const folder = getMdFolder(filePath, opts.root);
+
+  if (!fs.existsSync(filePath)) {
+    return {
+      filePath,
+      folder,
+      exists: false,
+      readable: false,
+      frontmatter: null,
+      skipReason: "deleted",
+      chunks: [],
+    };
+  }
+
+  if (!opts.bypassFolderPolicy && !INDEXABLE_MD_FOLDERS.has(folder)) {
+    return {
+      filePath,
+      folder,
+      exists: true,
+      readable: true,
+      frontmatter: null,
+      skipReason: "folder_excluded",
+      chunks: [],
+    };
+  }
+
+  let content: string;
+  try {
+    content = fs.readFileSync(filePath, "utf-8");
+  } catch {
+    return {
+      filePath,
+      folder,
+      exists: true,
+      readable: false,
+      frontmatter: null,
+      skipReason: "unreadable",
+      chunks: [],
+    };
+  }
+
+  return analyzeMdContent(content, filePath, folder);
+}
+
+/**
+ * Pure form of `analyzeMdFile`. Same SSOT for content-level classification.
+ * Test fixtures use this to drive synthetic input without touching disk.
+ */
+export function analyzeMdContent(
+  content: string,
+  filePath: string,
+  folder: string,
+): MdAnalysis {
   const { frontmatter, bodyOffset } = parseFrontmatter(content);
 
   // Opt-out tags: `noembed` / `tts` skip the file entirely. Mirrors org's
   // exclusion semantics so a garden author has a one-line lever to keep a
   // page out of retrieval.
   if (frontmatter.tags.some((t) => NOEMBED_TAGS.has(t.toLowerCase()))) {
-    return [];
+    return {
+      filePath,
+      folder,
+      exists: true,
+      readable: true,
+      frontmatter,
+      skipReason: "noembed_tag",
+      chunks: [],
+    };
   }
 
   // Body starts at bodyOffset; compute the line offset so chunk line
@@ -438,13 +554,33 @@ export function chunkMdContent(
   const headLines =
     bodyOffset > 0 ? content.slice(0, bodyOffset).split("\n").length - 1 : 0;
   const rawBody = content.slice(bodyOffset);
-  if (!rawBody.trim()) return [];
+  if (!rawBody.trim()) {
+    return {
+      filePath,
+      folder,
+      exists: true,
+      readable: true,
+      frontmatter,
+      skipReason: "empty_body",
+      chunks: [],
+    };
+  }
 
   // Garden-specific sanitization. Order matters: strip the bibliography
   // tail BEFORE the MIN_FILE_BODY_CHARS check so a tail-heavy file can
   // still be dropped if the actual content is too thin.
   const body = stripBibliographyTail(rawBody);
-  if (body.trim().length < MIN_FILE_BODY_CHARS) return [];
+  if (body.trim().length < MIN_FILE_BODY_CHARS) {
+    return {
+      filePath,
+      folder,
+      exists: true,
+      readable: true,
+      frontmatter,
+      skipReason: "min_body",
+      chunks: [],
+    };
+  }
 
   const cfg = FOLDER_CHUNK_TOKENS[folder] ?? FOLDER_CHUNK_TOKENS.default;
   const raw = chunkMarkdownOpenclaw(body, cfg);
@@ -474,7 +610,33 @@ export function chunkMdContent(
       idx++;
     }
   }
-  return out;
+
+  if (out.length === 0) {
+    // Reached the chunker but every raw chunk fell under MIN_CHUNK_CHARS.
+    // Indexer-side this is identical to any other zero-chunk skip (the
+    // manifest entry still records `chunks: 0`), but doctor wants to call
+    // it out separately because it's the most "surprising" skip class —
+    // worth investigating if its count grows.
+    return {
+      filePath,
+      folder,
+      exists: true,
+      readable: true,
+      frontmatter,
+      skipReason: "all_chunks_short",
+      chunks: [],
+    };
+  }
+
+  return {
+    filePath,
+    folder,
+    exists: true,
+    readable: true,
+    frontmatter,
+    skipReason: null,
+    chunks: out,
+  };
 }
 
 // --- Garden-specific sanitization ---

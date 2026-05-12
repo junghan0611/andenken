@@ -82,6 +82,8 @@ Usage: ./run.sh <command> [args]
   doctor --org --no-smoke     Skip retrieval probes (no API calls)
   doctor --org --save-baseline  Record current snapshot as baseline
   doctor --org --json         JSON output
+  doctor --md                 MD triage (V1): explain manifest↔indexed gap
+  doctor --md --json          MD triage JSON output
 
 === Sanitize / Window prototypes (API 0) ===
   sanitize:dryrun [flags]     Parse-only sanitization dry-run over all sessions

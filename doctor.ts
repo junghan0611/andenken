@@ -24,6 +24,7 @@ import { findSessionFiles } from "./session-indexer.js";
 import { findOrgFiles, shouldIndexOrgFile } from "./org-chunker.js";
 import { createProviderFromEnv } from "./embedding-provider.js";
 import { runOrgDoctor } from "./doctor-org.js";
+import { runMdDoctor } from "./doctor-md.js";
 
 // --- Types ---
 
@@ -226,6 +227,18 @@ async function main() {
       smoke,
       json: jsonMode,
       saveBaseline,
+      device,
+      time,
+    });
+    process.exit(exitCode);
+  }
+
+  // MD triage mode — V1 dispatch (read-only, local-only). Explains the
+  // manifest ↔ DB indexed_files gap via the shared `analyzeMdFile` SSOT.
+  // Smoke/baseline/structure scans are deferred to V2.
+  if (process.argv.includes("--md")) {
+    const exitCode = await runMdDoctor({
+      json: jsonMode,
       device,
       time,
     });
