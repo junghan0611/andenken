@@ -193,7 +193,7 @@ The implementation ports OpenClaw's builtin md memory logic
 (`~/repos/3rd/openclaw/packages/memory-host-sdk/src/host/`) onto the same
 LanceDB backend used by the sessions track. This is the exact pattern the org
 track was built with originally — OpenClaw core + LanceDB substitute for
-sqlite.
+sqlite. See [COMPARISON.md](./COMPARISON.md) for the track-by-track matrix.
 
 ## Scope and safety policy
 
@@ -235,7 +235,8 @@ In Heidegger, *Geworfenheit* and *Andenken* form a pair. 이기상 rendered
 
 ## Further reading
 
-- **[ROADMAP.md](./ROADMAP.md) — core document.** OpenClaw vs andenken comparison table, change history, maintenance signals, role boundaries. Korean.
+- **[ROADMAP.md](./ROADMAP.md) — core document.** OpenClaw vs andenken comparison summary, change history, maintenance signals, role boundaries. Korean.
+- **[COMPARISON.md](./COMPARISON.md) — detailed sessions + md matrix vs OpenClaw.** English.
 - **[NEXT.md](./NEXT.md) — the single next thing this agent is doing.** Korean.
 - [AGENTS.md](./AGENTS.md) — agent-in-charge doc (axes, boundaries, ownership)
 - [INVARIANT.md](./INVARIANT.md) — rules that must stay true across changes

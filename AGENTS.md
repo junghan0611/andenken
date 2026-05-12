@@ -263,14 +263,16 @@ workflow. Implications:
 | For... | Read... |
 |--------|---------|
 | **Core document — comparison, history, maintenance, boundaries (Korean)** | **[ROADMAP.md](./ROADMAP.md)** |
+| **Detailed sessions + md matrix vs OpenClaw** | **[COMPARISON.md](./COMPARISON.md)** |
 | **Next single thing this agent is doing** | **[NEXT.md](./NEXT.md)** |
 | Rules that must stay true | [INVARIANT.md](./INVARIANT.md) |
 | Public framing / naming | [README.md](./README.md) |
 | "What can I run?" | `./run.sh` |
 
 When code and docs disagree, trust the code and update the doc. ROADMAP.md is
-the SSOT for *what andenken is and is not, vs OpenClaw*. AGENTS.md is the
-stable surface for identity / boundaries / ownership.
+the SSOT for role / history / boundary decisions. COMPARISON.md is the detailed
+sessions + md matrix against OpenClaw. AGENTS.md is the stable surface for
+identity / boundaries / ownership.
 
 ### Document policy — single-axis discipline
 

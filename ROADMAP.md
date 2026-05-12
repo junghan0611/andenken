@@ -109,6 +109,7 @@
 
 ## 관련 문서
 
+- 상세 세션 / md 비교표: [COMPARISON.md](./COMPARISON.md)
 - 정체성 / 경계: [AGENTS.md](./AGENTS.md)
 - 깨지면 안 되는 규칙: [INVARIANT.md](./INVARIANT.md)
 - 외부 표면: [README.md](./README.md)
