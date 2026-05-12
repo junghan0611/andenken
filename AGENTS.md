@@ -101,7 +101,7 @@ queryable only by a provider that emits the same dimension.
 | Track | Model / dim | Endpoint | When |
 |-------|-------------|----------|------|
 | **Sessions** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `https://openrouter.ai/api` via `ANDENKEN_SESSION_*` → `data/sessions.lance` | hourly incremental driven by `scripts/sync-sessions.sh` / agent-config `memory-sync` skill; full rebuild via `scripts/rebuild-sessions-full.sh` |
-| **MD** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `https://openrouter.ai/api` via `ANDENKEN_MD_*` → `data/md.lance` | incremental driven by `./run.sh sync:md` once the track lands; full index via `./run.sh index:md --force`; corpus `~/repos/gh/notes/content` |
+| **MD** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `https://openrouter.ai/api` via `ANDENKEN_MD_*` → `data/md.lance` | incremental driven by `./run.sh sync:md`; full index via `./run.sh index:md`; corpus `~/repos/gh/notes/content`; Oracle replication via `./run.sh sync:md:oracle` |
 | **Org** | Qwen3-Embedding-4B / 2560d | `ANDENKEN_ORG_*` / legacy vLLM path → `data/org.lance` | **disabled in production.** Upstream R&D only. Do not run from operator workflow. |
 
 ### Session corpus sources
@@ -145,9 +145,11 @@ only `pi`, `claude`, and `all` (`pi + claude`). No `overlay` source.
   cadence.
 - Indexing/search paths must check DB/provider dimension compatibility before
   any paid embedding call. Sessions and md expect 4096d; org expects 2560d.
-- `memory-sync` skill (agent-config side) covers the sessions fast path; md
-  will follow once the track stabilizes. Full / oracle full-sync require human
-  invocation from this repo.
+- `memory-sync` skill (agent-config side) covers the sessions fast path. md
+  full indexing requires GLG confirmation; md Oracle replication should reuse
+  the completed local DB via `./run.sh sync:md:oracle` rather than paying for a
+  second full embedding run. Full / oracle full-sync require human invocation
+  from this repo.
 
 > **2026-04-30 — gpu2i removed from embedding role.**
 > gpu2i was repurposed as VOS chat-completion node (Qwen2.5-7B-Instruct-AWQ).
@@ -165,6 +167,7 @@ or cost.
 |------|-------|
 | Logic, analysis, verification | andenken (this repo) |
 | Embedding execution, cost bearing | agent-config |
+| Oracle replication scripts / verification | andenken (this repo) |
 | Final approval for code changes | agent-config (or Hih) |
 
 ### Commit discipline
@@ -193,8 +196,14 @@ shown there is a real command against real code; no documentation gap.
 Specific operations worth knowing by name:
 
 - `./run.sh index:md` / `./run.sh sync:md` / `./run.sh search:md` — md track
-  operating surface (under active construction per NEXT.md). Direct embedding
-  of `~/repos/gh/notes/content` via OpenRouter 8B/4096d into `data/md.lance`.
+  operating surface. Direct embedding of `~/repos/gh/notes/content` via
+  OpenRouter 8B/4096d into `data/md.lance`.
+- `./run.sh sync:md:oracle` — md Oracle replication surface. It rsyncs the
+  completed local `data/md.lance/` and `data/md-manifest.json` to
+  `oracle:/home/junghan/repos/gh/andenken/data/`, then runs remote
+  `./run.sh status` + `./run.sh verify md` by default (API 0). `--smoke` adds
+  one remote `search:md` query. This script is part of the md production
+  contract; do not leave ad-hoc rsync snippets outside `run.sh` / AGENTS.md.
 - `scripts/sync-sessions.sh` — sessions-only incremental path through
   OpenRouter Qwen3-Embedding-8B 4096d. Wrong-dim aborts before API; no-work
   exits with API 0; optional `--push` to oracle. Used by the agent-config

@@ -47,6 +47,8 @@ Usage: ./run.sh <command> [args]
                               CJK-weighted token model, per-folder breakdown
                               price: ANDENKEN_MD_PRICE_PER_M_TOKENS
                                   > OPENROUTER_QWEN_8B_PRICE > 0.01
+  sync:md:oracle [flags]      Rsync completed data/md.lance + md-manifest.json to Oracle
+                              flags: --dry-run --no-verify --smoke --host <ssh-host>
 
 === Sessions full rebuild / sync (PR-B) ===
   rebuild:sessions[:dry]      scripts/rebuild-sessions-full.sh [--dry-run]
@@ -183,6 +185,15 @@ case "${1:-help}" in
     echo "  PAID_REMOTE: ${ANDENKEN_SESSION_PAID_REMOTE:-0}"
     echo "  PRICE/M:     \$${ANDENKEN_SESSION_PRICE_PER_M_TOKENS:-(unset, default 0.01)}"
     echo ""
+    echo "  --- md track (ANDENKEN_MD_*) ---"
+    echo "  PROVIDER:    ${ANDENKEN_MD_PROVIDER:-(unset — md search will fail)}"
+    echo "  ENDPOINT:    ${ANDENKEN_MD_ENDPOINT:-(unset)}"
+    echo "  MODEL:       ${ANDENKEN_MD_MODEL:-(unset)}"
+    echo "  DIMENSIONS:  ${ANDENKEN_MD_DIMENSIONS:-(unset)}"
+    echo "  API_KEY:     ${ANDENKEN_MD_API_KEY:+SET (${#ANDENKEN_MD_API_KEY}ch)}"
+    echo "  PAID_REMOTE: ${ANDENKEN_MD_PAID_REMOTE:-0}"
+    echo "  PRICE/M:     \$${ANDENKEN_MD_PRICE_PER_M_TOKENS:-(unset, default 0.01)}"
+    echo ""
     echo "  --- legacy / org track (ANDENKEN_VLLM_* + ANDENKEN_ORG_*) ---"
     echo "  ANDENKEN_PROVIDER (legacy):     ${ANDENKEN_PROVIDER:-(unset)}"
     echo "  ANDENKEN_VLLM_ENDPOINT (legacy): ${ANDENKEN_VLLM_ENDPOINT:-(unset)}"
@@ -202,6 +213,8 @@ case "${1:-help}" in
     shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts estimate sessions "$@" ;;
   estimate:md)
     shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts estimate md "$@" ;;
+  sync:md:oracle)
+    shift; load_env; cd "$SCRIPT_DIR" && bash scripts/sync-md-to-oracle.sh "$@" ;;
 
   # === Sanitize / Window prototypes (API 0) ===
   sanitize:dryrun)
