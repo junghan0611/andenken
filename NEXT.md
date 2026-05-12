@@ -4,63 +4,89 @@
 > 이 파일은 **andenken 담당자가 지금 진행 중인 단 하나의 다음 항목**만 잡는다.
 > 완료된 긴 히스토리는 ROADMAP.md / commit log로 보낸다.
 
-## Next — B2: md retrieval quality follow-up
+## Next — B2a: md golden trace-seeded baseline (no judge)
 
-**단 하나의 현재 우선순위:** md 검색 품질을 정량적으로 추적할 수 있게 만든다.
-
-B1c (md embedding production hardening) 와 B1d (md doctor V1) 는 2026-05-12 에 종료.
-이제 남은 진짜 기술 부채는 검색 품질이다 — 인덱싱과 진단 도구는 갖췄지만
-"이 쿼리에서 적합한 노트가 진짜 1순위로 뜨는가?" 를 시간축으로 비교할 수단이 없다.
+**단 하나의 현재 우선순위:** trace-derived golden 20건 + read-only baseline
+한 번 측정을 1차 PR로 자른다. judge / sentinel 비율 / cadence / 알람 경로는
+**측정 결과를 본 다음** 결정한다.
 
 ### Why this is next
 
-10-query md smoke 중 `2026-05-11 andenken` 은 결과가 나오기는 했지만 **그 날의
-실제 현재 작업 노트가 1순위로 뜨지 않았다**. 이건 단발성 관찰일 수도 있고
-구조적 이슈일 수도 있는데, golden query set 없이 알고리즘을 건드리면 회귀를
-잡을 수 없다.
+2026-05-12 사전조사로 B2 가설 4개가 데이터로 갈음됨
+(`~/org/llmlog/20260512T165651--md-golden-사전조사__andenken_evaluation_golden_llmasjudge_llmlog_md.org`).
+핵심 발견:
 
-### Definition of done for B2
+- 실제 에이전트 쿼리는 keyword bag (mixed 63.3%, median 38자) — NEXT의 자연어
+  후보(`보편 학문`, `피투성`)는 실제 사용 surface와 형태가 다름.
+- md 호출 90건 중 **strong seed로 바로 쓸 수 있는 게 20건**, weak 포함 26건.
+  strong은 *assistant가 명시 수용한 케이스만* 추출 → 사람 라벨링과 동치.
+  추가 calibration 라벨링은 strong seed에는 불필요.
+- `2026-05-11 andenken` 실패는 단발 아님 (`2026-03-19`, `2026-03-15`,
+  `2026-04-15`에서 재현) → **date+project combined ranking failure**로 일반화.
+  단 ranking 알고리즘 손대는 건 B2a non-goal — 측정만 먼저.
+- schema 3층 분리(raw / curated / surface)는 over-engineering 위험. 30건
+  안 되는 데이터에 분리 비용 과함. 단일 JSONL + 단일 JSON으로 1차 cut.
 
-1. **md golden query set 정의** — `data/md-golden.json` (또는 `golden-queries.ts`
-   확장)에 최소 10개 쿼리 + expected top-N 파일/folder 패턴. 후보:
-   - `보편 학문`, `피투성`, `어쏠로지`, `바네바 부시`, `제프 베이조스`,
-     `andenken openclaw`, `entwurf 시간축`, `일일일생`,
-     `2026-05-11 andenken`, `디지털가든 메타휴먼`.
-   - 각 쿼리에 대해 "이 노트가 top-5에 있어야 한다" 정도로 부드러운 매칭.
-2. **`./run.sh golden:md` 추가** — 현재 baseline 점수 측정 + 마지막 점수 대비
-   delta 출력. fail 임계값은 운영 데이터 1주일 모은 다음 결정 (placeholder OK).
-3. **`2026-05-11 andenken` 실패 사례 분석** — 왜 day-specific 쿼리에서 당일성
-   note 가 약하게 잡히는지 진단. 가설:
-   - BM25 `2026-05-11` 토큰이 frontmatter `date:` 에 매칭 안 됨 (FTS text 가
-     title + tags 만 prefix 됨)
-   - 날짜 토큰을 query enrichment 단에서 별도 처리해야 할 수도
-   - 또는 `andenken` 태그가 너무 흔해서 specificity 부족
-   - **doctor 가 아니라 golden query 가 이 가설을 검증한다.**
-4. **md doctor V2 의 smoke probe** — B2 가 golden 갖춰지면 `doctor --md --smoke`
-   가 같은 골든을 read-only 로 회전시킬 수 있게 V2 작업 시작.
+### Definition of done for B2a
 
-### Non-goal right now
+1. **`scripts/build-md-traces.py` 정착** — `/tmp/andenken_md_trace_mining.py`
+   에서 옮기고 `./run.sh build:md-traces`로 등록. Python 유지 (TS 포팅 무의미).
+2. **`data/md-golden-traces.jsonl`** — mining 결과 90건 그대로 dump. 필드는
+   사전조사 §schema 권고 그대로 (`id` / `source` / `surface` / `query_raw`
+   / `intent_context` / `usefulness_signal` / `ground_truth_extractable` /
+   `next_assistant_excerpt`). curated 분리 안 함 — 30건 넘으면 그때.
+3. **`data/md-golden.json`** — strong seed 20건 + GLG sentinel 별도 섹션.
+   두 그룹은 다른 metric으로 본다 (seed = top-5 hit rate, sentinel =
+   boolean must-hit).
+4. **`./run.sh golden:md`** — top-1 / top-3 / top-5 hit rate + MRR +
+   repeat_refinement count. **judge 없음.** baseline 한 번 측정으로 끝.
+5. **query vector cache** — paid embedding 1회만. `data/md-golden-vectors.lance`
+   또는 `golden.json` 안에 인라인. 매 실행마다 OpenRouter 호출하면 안 됨.
+6. **첫 baseline 숫자 commit log에 박기** — "오늘 측정됨"이 운영 닻.
 
-- Org 트랙 손대지 않는다 (production disabled / upstream R&D).
-- md chunker / sanitization 로직 변경하지 않는다 — golden 베이스라인 없이 건드리면
-  회귀 검증이 안 됨.
-- pi extension / live surface 추가 변경 없음. B1c 에서 sessions + md 로 정렬 완료.
+### Non-goal for B2a
+
+- judge 본체 통합 (4축이든 2축이든) — baseline 측정 후 silver 승격 때만.
+- sentinel 비율 확정 (5~10 vs 15~20) — measurement 보고 결정.
+- regression cadence / 알람 경로 — measurement 보고 결정.
+- ranking 알고리즘 수정 (`andenken` 태그 specificity / date+project) —
+  golden 없이 건드리면 회귀 검증 안 됨. baseline이 측정 도구다.
+- md chunker / sanitization 변경.
+- Org 트랙.
+
+### Deferred — measurement 후 결정 (큐 아님, 기록일 뿐)
+
+baseline이 굴러가면 그때 한 줄씩 골라 다음 NEXT로 승격. 여러 항목 동시
+진행 안 함.
+
+- (D1) repeat_refinement 18건을 **negative bucket이 아니라 fix-target list**로
+  격상할지 — `data/md-repeat-refinement.jsonl` 분리 여부.
+- (D2) judge 도입 — 2축(relevance + next_action) vs 4축, calibration cadence,
+  cost gate.
+- (D3) sentinel 비율 / 회귀 안전망 확장.
+- (D4) golden 실행 cadence — `sync:md` 후 자동? `memory-sync` 후크? 수동?
+  실패 알람 경로 (CI fail / GLG 확인 / Google Chat 알림).
+- (D5) date+project combined ranking — `andenken` 태그 IDF / dense note
+  specificity. ranking 알고리즘 측면. ROADMAP 운영 신호로 이동 후보.
 
 ### Completed prerequisites (closed)
 
 | 마일스톤 | 종료일 | 핵심 산출물 |
 |---|---|---|
 | B0 | 2026-05-11 | `0831487` — qmd path 폐기, org 분리 |
-| B1a | 2026-05-12 | `b431bf7` `db99aa2` `6d5ad90` — md 스캐폴딩 + OpenClaw chunkMarkdown 포팅 + CJK 가중 + 임베딩/FTS 분리 |
+| B1a | 2026-05-12 | `b431bf7` `db99aa2` `6d5ad90` — md 스캐폴딩 + OpenClaw `chunkMarkdown` 포팅 + CJK 가중 + 임베딩/FTS 분리 |
 | B1b | 2026-05-12 | `9f16a24` — Oracle sync 핸드오프 (`sync:md:oracle`) |
-| B1c | 2026-05-12 | local full index (10,119 chunks, 4096d, verify pass) + sessions/md live surface 전환 + agent-config 핸드오프 정렬 + Oracle sync `sync:md:oracle --smoke` pass |
-| B1d | 2026-05-12 | `doctor --md` V1 — `analyzeMdFile` SSOT + manifest↔indexed gap explainability (3 noembed_tag + 15 min_body = 18 zero-chunk; unclassified=0 = drift 없음) |
+| B1c | 2026-05-12 | local full index (10,119 chunks, 4096d, `verify md` pass) + sessions/md live surface 전환 + agent-config 핸드오프 정렬 + Oracle `sync:md:oracle --smoke` pass |
+| B1d | 2026-05-12 | `c20de24` `baa5a61` `e5154f8` — `doctor --md` V1 (`analyzeMdFile` SSOT + manifest↔indexed gap explainability) + 문서 정렬 |
+| B2-survey | 2026-05-12 | llmlog `20260512T165651` — 1,716세션 마이닝, md 90호출, strong seed 20 / hard-negative 19, judge 설계 권고, `2026-05-11 andenken` ranking 일반화 |
 
-B1d 의 SSOT 함수 `analyzeMdFile` 는 indexer 와 doctor 가 공유한다. 새 skip 분기를
-추가할 때 두 소비자가 동시에 갱신되도록 강제하는 게 이 함수의 존재 이유다.
+### Notes
 
-### Notes for future skip-class additions
-
-`MdSkipReason` 에 새 카테고리를 추가하면 doctor-md 의 `ALL_REASONS` /
-`emptyBreakdown` / `GapBreakdown` / pretty-render `order` 를 같이 갱신해야 한다.
-그 외에는 SSOT 가 알아서 처리한다.
+- B2-survey 가 갈음한 가설: 이전 NEXT의 4개 가설 중 #1 (frontmatter `date:`
+  미매칭)은 *약화*, #2 (`andenken` 태그 specificity 부족) + #4 (단순 ranking
+  failure)는 *강하게 의심*, #3 (date enrichment)은 *후속 실험 필요*.
+- B2a 끝나면 NEXT는 D1~D5 중 baseline 측정이 가장 강하게 가리키는 하나로
+  덮어쓴다. 여러 항목 큐로 쌓지 않는다.
+- B1d의 SSOT 함수 `analyzeMdFile` 는 indexer / doctor 공유. 새 `MdSkipReason`
+  추가 시 `ALL_REASONS` / `emptyBreakdown` / `GapBreakdown` / pretty-render
+  `order` 동시 갱신.

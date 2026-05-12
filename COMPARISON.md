@@ -98,7 +98,63 @@ For sessions, this means the comparison is mostly about **corpus and operator
 surface**, not radically different retrieval philosophy. For md, the chunking
 logic is intentionally shared while the storage/ops layer diverges.
 
-## 4. What is intentionally different
+## 4. Testing and evaluation — what is actually proven
+
+OpenClaw and andenken do not prove the same thing today.
+
+OpenClaw mostly proves **runtime memory as a product surface**: config,
+plugin/runtime wiring, doctor/repair flows, session-context persistence,
+and failure behavior under QA parity suites.
+
+andenken currently proves **index integrity and operator visibility** much
+better than **garden-specific relevance over time**.
+
+| Proof target | OpenClaw evidence | andenken evidence | Why it matters for `/recall` |
+|---|---|---|---|
+| Runtime/config correctness | Dozens of memory-focused tests across `memory-search`, runtime, doctor, dreaming, plugin-sdk, plus QA parity/live smoke docs | Track-specific env/dim guards, `verify`, `status`, CLI/tool contracts | Recall that cannot start is useless no matter how good relevance is |
+| Index integrity | SQLite/schema/runtime tests and doctor coverage | `./run.sh verify sessions`, `./run.sh verify md`, manifest accounting | A skewed corpus makes recall silently lie |
+| Search relevance regression | General runtime memory behavior is exercised, but not against GLG's public garden as a named golden corpus | Sessions have an older golden surface; **md still lacks a measured golden baseline**, but the 2026-05-12 trace-mining survey closed the gap-analysis phase (1,716 sessions → 90 md calls, 20 strong seeds available) | `/recall` quality is mostly a ranking problem, not only an indexing problem |
+| Repairability / explainability | `doctor --fix`, recall-store repair, dreaming artifact repair | `doctor --md` explains manifest ↔ indexed gaps, but not yet retrieval misses | Operators need to know *why* recall failed |
+| End-user recovery scenarios | Per-agent continuity and session runtime context are covered as product behavior | Manual smoke + real usage; no md recall benchmark yet | The target is fast continuation, not just passing unit tests |
+
+A crucial OpenClaw note from its own testing docs: **live transport gateway
+lanes disable memory search; memory behavior stays covered by QA parity
+suites**. That is a mature product-testing choice. It means OpenClaw's test
+strength is broad runtime QA, not a GLG-specific garden relevance benchmark.
+
+## 5. Recall usefulness bar
+
+A comparison document is only useful if it says what counts as success for the
+actual operator workflow.
+
+### Session recall must prove
+
+- A concrete repo/task query recovers the last meaningful work in **top-3**.
+- Recent shipped work beats generic old chatter.
+- Source filters (`pi`, `claude`) do not cross-contaminate results.
+- A one-turn or smoke session does not masquerade as the main thread.
+
+### MD recall must prove
+
+- A concept/person/work query returns the intended note in **top-5**.
+- A day-specific query like `2026-05-11 andenken` can recover the actual day's
+  working note instead of generic `andenken`-heavy notes.
+- Korean↔English conceptual retrieval works without exact-title dependency.
+- Skipped files are explainable (`noembed_tag`, `min_body`, etc.), never silent.
+
+### Cross-axis recall must prove
+
+- If session recall is thin, the shift to md knowledge is explicit, not hidden.
+- `/recall` can reach the "next turn as a one-liner" goal without the operator
+  reverse-engineering the retrieval stack.
+- Once the golden baseline lands, failure cases should be classifiable as one
+  of: corpus miss, ranking miss, source-boundary mistake, or operator-surface
+  mistake.
+
+This is the real bar for andenken. Not "does search return something," but
+"does recall restore the operator's next move quickly and honestly?"
+
+## 6. What is intentionally different
 
 | Topic | OpenClaw | andenken |
 |---|---|---|
@@ -114,7 +170,7 @@ OpenClaw is a full runtime. andenken is the **embedding hub** for GLG's harness.
 
 ---
 
-## 5. What OpenClaw has that andenken does not own
+## 7. What OpenClaw has that andenken does not own
 
 | Surface | Owner |
 |---|---|
@@ -128,7 +184,7 @@ in this repo.
 
 ---
 
-## 6. What andenken has that OpenClaw does not target in the same way
+## 8. What andenken has that OpenClaw does not target in the same way
 
 | Surface | andenken value |
 |---|---|
@@ -139,7 +195,7 @@ in this repo.
 
 ---
 
-## 7. Code map
+## 9. Code map
 
 | Concern | OpenClaw reference | andenken implementation |
 |---|---|---|
@@ -151,7 +207,7 @@ in this repo.
 
 ---
 
-## 8. Current judgment
+## 10. Current judgment
 
 ### Sessions
 
@@ -179,5 +235,16 @@ but:
 ### Next quality step
 
 The next real gap is no longer bring-up. It is **retrieval quality accounting**:
-`md` golden queries, day-specific retrieval checks, and a baseline that can fail
-when relevance drifts.
+md golden queries that can fail when relevance drifts.
+
+As of 2026-05-12, the gap-analysis phase closed via a trace-mining survey
+(1,716 sessions → 90 md calls, 20 strong seeds, hard-negative bucket of 19
+repeat-refinement cases, and `2026-05-11 andenken` ranking failure generalized
+across `2026-03-19`, `2026-03-15`, `2026-04-15`).
+
+The immediate next step is a **trace-seeded baseline** — no judge, no cadence
+yet — measured once, then iterated. Judge integration, sentinel ratio,
+regression cadence, and date+project ranking work wait on what that baseline
+measures. See `NEXT.md` for the active item.
+
+That is the path from "index exists" to "`/recall` shows real skill."
