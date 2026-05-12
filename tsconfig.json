@@ -21,12 +21,7 @@
     "session-window.ts",
     "retriever.ts",
     "org-chunker.ts",
-    "indexer.ts",
-    "export-qmd.ts",
-    "export-qmd-template.ts",
-    "qmd-context.ts",
-    "query-qmd.ts",
-    "qmd-bakeoff.ts"
+    "indexer.ts"
   ],
   "exclude": ["test.ts", "benchmark.ts", "node_modules"]
 }

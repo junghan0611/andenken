@@ -41,7 +41,8 @@
 
 | 축 | 규모 | 의의 |
 |----|-----|------|
-| **org corpus** | ~45,000 chunks / 2,198 files | qmd가 아닌 org-mode KB. **이게 차별점의 본체.** |
+| **org corpus** | ~45,000 chunks / 2,198 files | org-mode KB. 차별점의 본체이지만 **현재 production에서는 disable**. 업스트림 R&D로 분리. |
+| **md corpus (public garden)** | 2,218 .md / ~27MB | 가든 export를 직접 임베딩. 통제된 surface라 튜닝 빠름. 에이전트가 당장 쓰는 지식축. |
 | pi sessions + Claude Code 통합 | 1,600+ sessions / 28,537 chunks | OpenClaw는 봇별 transcript. 우리는 *나*의 모든 세션. 2026-05-11 sessions track 안정화 종료. |
 | **denote graph** | denotecli sidecar | back-link / 카테고리 / 시간축 |
 | 한국어 형태소 | dictcli sidecar | Kiwi stem + 한↔영 expand |
@@ -54,15 +55,16 @@
 - **org × sessions 교차 retrieval** — 같은 query에 두 corpus 결과가 동시에 뜨는 경험. OpenClaw는 자체 corpus가 없어 불가.
 - **org-native 구조 활용** — 카테고리(journal / botlog / llmlog / notes / bib / meta)별 가중치, heading hierarchy, citation/back-link graph 통합.
 - **agent-as-author signal** — llmlog / botlog가 sessions의 "결정 인덱스"로 작동.
-- **qmd public garden MD → org/qmd** — sessions track은 2026-05-11에 8B/4096d + excerpt readback + `withExcerpt`까지 안정화 종료. 다음 차별점은 곧장 raw org가 아니라, 먼저 `~/repos/gh/notes/content` public garden Markdown을 qmd로 연결해 당장 쓰는 검색축을 세우는 것이다. org track은 qmd public baseline 이후 doctor/chunker 정리 대상으로 유지한다. 모델 변경은 manifold drift라 해당 corpus *전체 reindex* 필요. Model/serving recipe: [QMD.md](./QMD.md).
+- **md (public garden) → org 정리** — sessions는 2026-05-11에 8B/4096d 안정화 종료. 다음 축은 raw org가 아니라 export된 public garden Markdown을 직접 임베딩(`data/md.lance`, 4096d)해서 에이전트에게 즉시 주는 지식축이다. 구현은 OpenClaw `memory-host-sdk/src/host` 빌트인 md 로직 + sessions와 동일한 LanceDB 백엔드 (origin org 트랙이 만들어진 패턴과 같다). org은 그 다음, doctor/chunker 정리로 들어가며 그 동안은 production에서 disable. 모델 변경은 manifold drift라 해당 corpus *전체 reindex* 필요.
 
 ## 변화 기록 (History)
 
 새 변화는 위에 추가. 시간 역순.
 
-- **2026-05-11** — qmd-first 중단, garden-md OpenRouter embedding으로 전환. qmd local stack은 설치/runner/Vulkan까지 검증됐고 `garden-smoke` 90 files / 1215 vectors까지 임베딩됐으나, full `qmd query`가 rerank 39~40 chunks에 약 53초/query를 써서 interactive 지식축으로 과하다고 판단. GLG의 실제 목적은 qmd 자체가 아니라 exported public garden Markdown을 급히 semantic retrieval에 태우는 것이므로, 다음 track은 `garden-md` LanceDB + OpenRouter `qwen/qwen3-embedding-8b` 4096d baseline으로 재정의.
-- **2026-05-11** — qmd garden runner 도입. `scripts/qmd-garden.sh` / `./run.sh qmd:garden`가 GLG public garden qmd 작업의 operator surface가 됨. Env는 Qwen3-Embedding-0.6B GGUF + Vulkan + NixOS `LD_LIBRARY_PATH=$NIX_LD_LIBRARY_PATH`로 고정. thinkpad AMD Radeon 780M Vulkan offload verified. qmd는 당분간 `search/get/multi-get` 후보로만 보류.
-- **2026-05-11** — qmd 방향 전환. GLG 결정: “이제 org 하자”가 아니라, 먼저 qmd로 당장 쓸 수 있는 검색축을 뽑는다. `~/repos/3rd/qmd`를 clone/build하고 `~/.local/bin/qmd`로 연결. qmd DB는 `~/.cache/qmd/index.sqlite`, 첫 corpus는 exported public garden Markdown `~/repos/gh/notes/content`(2,218 md / ~27.2MB). 이후 smoke 결과 때문에 qmd-first는 보류되고 garden-md 직접 임베딩으로 전환.
+- **2026-05-12** — qmd 경로 폐기 (issue #8). 신규 파일 7개(`export-qmd*`, `qmd-*`, `scripts/qmd-garden.sh`, `QMD.md`) 삭제. `test.ts` / `run.sh` / `tsconfig.json` 수술. retriever.ts "QMD pattern" 주석은 일반화. **org 트랙은 production에서 disable**로 명시 — 에이전트가 당장 쓸 기억축은 sessions + md로 정렬, org는 업스트림 R&D로 분리 (지금 garden export는 통제된 정보라 튜닝이 쉽다는 판단). md 트랙은 OpenClaw `memory-host-sdk/src/host` 빌트인 md 로직을 LanceDB 백엔드 위로 포팅 — 이는 origin org 트랙을 만든 동일 패턴이다. 차원/store/manifest contract: 4096d OpenRouter `qwen/qwen3-embedding-8b`, `data/md.lance`, `data/md-manifest.json`, env namespace `ANDENKEN_MD_*`.
+- **2026-05-11** — qmd-first 중단 결정 (실코드 정리는 2026-05-12). qmd local stack은 설치/runner/Vulkan까지 검증됐고 `garden-smoke` 90 files / 1215 vectors까지 임베딩됐으나, full `qmd query`가 rerank 39~40 chunks에 약 53초/query를 써서 interactive 지식축으로 과하다고 판단. GLG의 실제 목적은 qmd 자체가 아니라 exported public garden Markdown을 급히 semantic retrieval에 태우는 것이므로, 다음 track은 LanceDB + OpenRouter `qwen/qwen3-embedding-8b` 4096d baseline으로 재정의.
+- **2026-05-11** — qmd garden runner 도입 (다음날 폐기). `scripts/qmd-garden.sh` / `./run.sh qmd:garden`가 GLG public garden qmd 작업의 operator surface였음. Env는 Qwen3-Embedding-0.6B GGUF + Vulkan + NixOS `LD_LIBRARY_PATH=$NIX_LD_LIBRARY_PATH`로 고정. thinkpad AMD Radeon 780M Vulkan offload verified.
+- **2026-05-11** — qmd 방향 전환 시도 (다음날 폐기). `~/repos/3rd/qmd`를 clone/build하고 `~/.local/bin/qmd`로 연결. qmd DB는 `~/.cache/qmd/index.sqlite`, 첫 corpus는 exported public garden Markdown `~/repos/gh/notes/content`(2,218 md / ~27.2MB). qmd 자체 채택은 issue #8로 회수되어 폐기.
 - **2026-05-11** — sessions track 안정화 종료. C2.1a excerpt readback(`16e6abf`), 전체 sessions rebuild(28,537 chunks, 4096d, ~6.48M tokens, ~$0.065, verify pass), C2.1c `session_search.withExcerpt` opt-in(`3cafb36`) 완료. transcript-window production / toolResult indexing / source weight / score threshold 조정은 보류.
 - **2026-05-10** — andenken sessions track을 OpenRouter `qwen/qwen3-embedding-8b` 4096d로 전환. commit `c618a73`. Provider namespace 분리(`ANDENKEN_SESSION_*` / `ANDENKEN_ORG_*`), dim guard, paid full-rebuild guard, `rebuild-sessions-full.sh`, OpenRouter incremental `sync-sessions.sh` 도입. 첫 full rebuild: 28,188 chunks, ~6.34M tokens, ~$0.063, 31.7분, errors 0. Smoke query `openclaw session embedding` top 5 모두 관련. Org는 2560d 유지.
 - **2026-05-08** — OpenClaw 측 Qwen3-Embedding-8B 변경 테스트 시작 (nixos-config 담당자). andenken은 결과 보고 적용 여부 검토 — NEXT.md *외부 의존 대기* 항목으로 등록. matryoshka 2560d truncate 옵션이 있어 schema 무변경 가능.
@@ -84,10 +86,12 @@
 | 명령 | 용도 | 호출 시점 |
 |------|------|-----------|
 | `./run.sh status` | manifest stale / cadence 모니터 | 정기 |
-| `qmd status` / `qmd collection list` | public garden MD qmd baseline 상태 확인 | qmd 작업 중 |
-| `./run.sh qmd:bootstrap --cache-dir ~/repos/gh/notes/content --collection-prefix garden` | qmd collection/context 명령 생성 | qmd baseline 구성 |
-| `./run.sh doctor --org` | malformed block / oversize / zero-chunk / hard-guard skip 신호 | qmd baseline 이후 org 정리 |
-| `./run.sh verify [sessions\|org\|all]` | 인덱싱 후 무결성 확인 | sync 후 |
+| `./run.sh sync:md` | md 증분 (OpenRouter 8B 4096d, garden export) | NEXT 트랙 도착 후 정기 |
+| `./run.sh index:md --force` | md 전체 인덱스 (paid-remote gate) | 초기 / 모델 변경 시 |
+| `./run.sh search:md "<query>"` | md 검색 smoke | 품질 점검 |
+| `./run.sh verify md` | md 인덱싱 후 무결성 확인 | sync 후 |
+| `./run.sh doctor --org` | malformed block / oversize / zero-chunk / hard-guard skip 신호 | **업스트림 R&D 한정** (org disable 상태) |
+| `./run.sh verify sessions` | sessions 인덱싱 후 무결성 확인 | sync 후 |
 | `scripts/sync-sessions.sh` | sessions 증분 (OpenRouter 8B 4096d, wrong-dim API0 abort) | 시간당 |
 | agent-config `memory-sync` skill | 위 스크립트의 skill wrapper | 사용자 호출 |
 
@@ -95,7 +99,7 @@
 
 | 누구 | 책임 |
 |------|------|
-| **andenken** (이 repo) | 임베딩 기억축 1개 + qmd 연결 현실화. corpus / index / retrieval 운영. OpenClaw 비교 SSOT 유지. |
+| **andenken** (이 repo) | 임베딩 기억축 + md 트랙으로 에이전트에게 지식축 제공. corpus / index / retrieval 운영. OpenClaw 비교 SSOT 유지. **org 트랙은 disable / 업스트림 R&D**로 분리. |
 | **GLG** | 다축 맥락 복원(recap) 설계. 담당자 간 인터페이스. 모든 commit 최종 결정. |
 | **agent-config** | semantic-memory 스킬을 모든 surface(pi / Claude Code / Codex / Gemini)에 노출. memory-sync 스킬 (sessions 증분). |
 | **denotecli** | org 구조 그래프 (Layer 2). dblock / backlink. |

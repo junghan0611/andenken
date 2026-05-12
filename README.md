@@ -23,8 +23,9 @@ understand where it fits.
  embedding       │ THIS REPO.
   (semantic)     │ Vector + BM25 hybrid retrieval over curated corpora.
                  │ Sessions: Qwen3-Embedding-8B (4096d).
-                 │ Org: Qwen3-Embedding-4B (2560d).
-                 │ Two tracks: sessions and org (see below).
+                 │ MD (public garden export): Qwen3-Embedding-8B (4096d).
+                 │ Org: 4B/2560d — currently disabled (upstream R&D).
+                 │ Two live tracks: sessions and md.
 
  dream           │ Overnight consolidation. Compacts recent memory into
   (consolidation)│ distilled units. Separate axis; separate roadmap.
@@ -45,13 +46,23 @@ covers all three.
 | Track | Quality bar | Scope |
 |-------|------------|-------|
 | **sessions** | Parity with openclaw session memory | Core. pi + Claude Code JSONL. Closed/stable as of 2026-05-11. |
-| **qmd over public garden MD** | Immediately usable knowledge retrieval | Current active track. Uses exported Markdown in `~/repos/gh/notes/content`; see [QMD.md](./QMD.md). |
-| **org** | Optional, high-signal only | 3,000+ Denote notes. Conservative source track; doctor/chunker work is next-after-qmd. |
+| **md (public garden)** | Immediately usable knowledge retrieval for agents | Current active track. Direct Markdown embedding over exported `~/repos/gh/notes/content` (~2,200 md / ~27MB). OpenClaw builtin md memory logic + LanceDB backend (same pattern that built the org track). |
+| **org** | Currently disabled | 3,000+ Denote notes. Source track. Doctor/chunker/incremental work is upstream R&D, **not** what agents consume right now. |
 
-Sessions is load-bearing for agent continuity. The immediate knowledge path is
-qmd over the public garden Markdown, because that is the surface GLG can use
-now. Org remains the richer source track, but org incremental/chunker work is
-not the current next step.
+**Split of effort.** The agent-in-charge separates *what we ship to agents now*
+from *upstream development*:
+
+- **Now:** sessions + md tracks. These are what agents consume as memory axes.
+  Garden export is controlled, easier to tune, and immediately useful.
+- **Upstream:** org track. Org notes are richer but messier; few people actually
+  retrieve them well today. Doctor WARN cleanup, chunker improvements, and
+  incremental sync all live here. Disabled in production until it earns its keep.
+
+The previous qmd-over-garden-MD plan was retired on 2026-05-12 (issue #8).
+qmd's local-GGUF rerank/expand stack was too heavy for interactive retrieval
+(~53s/query on 90-file smoke). The current md track keeps the same garden
+source but uses the same simple **embed → LanceDB → hybrid retrieve** contract
+as the sessions track.
 
 ## What It Does
 
@@ -72,9 +83,10 @@ andenken status
 ```
                     ┌─ Session Indexer ─── pi sessions (.jsonl)
 Query ──→ Embed ──→ │                  └── Claude Code sessions (.jsonl)
-  │                 └─ Org Chunker ────── 3,000+ Denote notes
+  │                 ├─ MD Chunker ──────── public garden (~2,200 .md, exported)
+  │                 └─ (Org Chunker) ───── disabled — upstream R&D
   │
-  ├─ Vector Search (sessions 8B/4096d, org 4B/2560d; LanceDB)
+  ├─ Vector Search (sessions + md 8B/4096d; org 4B/2560d when re-enabled; LanceDB)
   ├─ Full-Text Search (BM25, Korean particle stripping)
   ├─ Hybrid Merge (weighted sum / RRF)
   ├─ Temporal Decay (exponential, configurable half-life)
@@ -103,24 +115,24 @@ embeddings. See `index.ts` (pi) and `cli.ts` (CLI harnesses).
 
 ## Stack
 
-- **Embeddings** Sessions: Qwen3-Embedding-8B via OpenRouter (4096d); Org: Qwen3-Embedding-4B (2560d)
-- **Vector store** LanceDB (file-based)
+- **Embeddings** Sessions + md: Qwen3-Embedding-8B via OpenRouter (4096d). Org (disabled): Qwen3-Embedding-4B (2560d).
+- **Vector store** LanceDB (file-based, one file per track)
 - **Retrieval** Weighted merge + RRF + temporal decay + MMR
-- **Chunking** Org-aware 2-tier (heading + direct body)
+- **Chunking** Track-specific. Sessions: message-aware. MD: Markdown-aware. Org (disabled): org 2-tier (heading + direct body).
 - **Query expansion** dictcli personal vocabulary graph
 - **Runtime** TypeScript (tsx)
 
-## Provider split — sessions, qmd, org
+## Provider split — sessions, md, org
 
-| Track | Model / dim | Endpoint | Why |
-|-------|-------------|----------|-----|
-| **Sessions** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `ANDENKEN_SESSION_*` | Live agent continuity. Incremental sync is small; full rebuild is explicitly gated. |
-| **qmd public garden MD** | qmd local GGUF models; baseline `Qwen3-Embedding-0.6B` + Vulkan | `./run.sh qmd:garden` / `~/.cache/qmd/index.sqlite` | Current practical knowledge path over exported Markdown. See [QMD.md](./QMD.md). |
-| **Org** | Qwen3-Embedding-4B / 2560d | `ANDENKEN_ORG_*` / vLLM-compatible path | Conservative source indexing; deferred until qmd baseline is useful. |
+| Track | Model / dim | Endpoint | Status |
+|-------|-------------|----------|--------|
+| **Sessions** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `ANDENKEN_SESSION_*` → `data/sessions.lance` | Live. Closed and stable. |
+| **MD** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `ANDENKEN_MD_*` → `data/md.lance` | Active build. Direct embedding over `~/repos/gh/notes/content`. |
+| **Org** | Qwen3-Embedding-4B / 2560d | `ANDENKEN_ORG_*` → `data/org.lance` | **Disabled.** Upstream R&D only. Do not run `index:org` in production. |
 
-The two LanceDB stores are dimension-separated. Sessions search must use a
-4096d sessions provider; knowledge search must use a 2560d org provider. qmd is
-separate: it indexes Markdown collections into its own SQLite database.
+LanceDB stores are dimension- and track-separated. Each track's search must use
+its own provider env. The 4096d sessions/md providers and the 2560d org provider
+are not cross-compatible.
 
 ### Session sources
 
@@ -149,22 +161,29 @@ query level so the candidate pool is source-specific. Explicit `pi` or `claude`
 also suppresses the org knowledge fallback — if the caller named a session
 source, they asked for sessions, not org notes.
 
-## qmd public garden MD path
+## md track — public garden direct embedding
 
-Current qmd work intentionally starts from the exported public garden rather
-than raw org:
+The md track starts from the exported public garden, not raw org. Garden export
+is a controlled surface (already shaped by Hugo + Denote conventions) and
+therefore much easier to tune than the raw Denote tree.
 
 | Surface | Path | Notes |
 |---------|------|-------|
-| qmd source | `~/repos/3rd/qmd` | upstream clone, built with Bun |
-| qmd binary | `~/.local/bin/qmd` | symlink to `~/repos/3rd/qmd/bin/qmd` |
-| qmd DB | `~/.cache/qmd/index.sqlite` | qmd-owned SQLite index |
-| public garden Markdown | `~/repos/gh/notes/content` | first qmd corpus; ~2.2K md files / ~27MB |
-| org→qmd export | `~/.cache/andenken-qmd` | deferred; depends on org doctor/chunker cleanup |
+| md source | `~/repos/gh/notes/content` | exported Markdown; ~2,200 md / ~27MB |
+| md store | `data/md.lance` | LanceDB, dimension 4096d |
+| md manifest | `data/md-manifest.json` | mtime/size based incremental |
+| provider env | `ANDENKEN_MD_*` | OpenRouter qwen/qwen3-embedding-8b |
 
-First baseline collections are expected to be `garden-bib`, `garden-botlog`,
-`garden-journal`, `garden-meta`, and `garden-notes`. Images, talks, test, and
-tmp stay out of the first baseline unless GLG explicitly asks.
+First baseline indexes `notes`, `bib`, `meta`, `journal`, `botlog`. Folders
+`images`, `talks`, `test`, `tmp` are excluded until explicitly asked. The md
+chunker is Markdown-specific (frontmatter strip, heading boundaries, code-block
+preservation); the org chunker is not reused.
+
+The implementation ports OpenClaw's builtin md memory logic
+(`~/repos/3rd/openclaw/packages/memory-host-sdk/src/host/`) onto the same
+LanceDB backend used by the sessions track. This is the exact pattern the org
+track was built with originally — OpenClaw core + LanceDB substitute for
+sqlite.
 
 ## Scope and safety policy
 
@@ -179,19 +198,19 @@ tmp stay out of the first baseline unless GLG explicitly asks.
 
 ```bash
 cd ~/repos/gh/andenken
-scripts/sync-sessions.sh              # sessions-only incremental (8B/4096d)
-scripts/rebuild-sessions-full.sh      # sessions-only full rebuild (estimate + confirm)
-./run.sh qmd:bootstrap --cache-dir ~/repos/gh/notes/content --collection-prefix garden
-                                      # print qmd collection/context commands for public garden MD
-./run.sh doctor --org --no-smoke      # org read-only triage, API 0 (deferred after qmd baseline)
+scripts/sync-sessions.sh              # sessions incremental (8B/4096d)
+scripts/rebuild-sessions-full.sh      # sessions full rebuild (estimate + confirm)
+./run.sh index:md                     # md incremental (8B/4096d) — see NEXT.md while track is being built
+./run.sh search:md "<query>"          # md search
 ./run.sh golden                       # search quality baseline (API required)
 ```
 
 `sync-sessions.sh` is the operating heartbeat for the sessions track and what
-the agent-config `memory-sync` skill calls under the hood. Mixed
+the agent-config `memory-sync` skill calls. The md track follows the same
+shape (manifest-driven incremental). The legacy mixed-track
 `scripts/rebuild-incremental.sh` / `scripts/rebuild-full.sh` paths are
-deprecated for normal operations; sessions and org are dimension-separated
-tracks and should be handled deliberately.
+deprecated; each track is run on its own. Org indexing is currently disabled
+in production — do not invoke `index:org` outside upstream R&D.
 
 ## Why the name
 
@@ -213,10 +232,15 @@ In Heidegger, *Geworfenheit* and *Andenken* form a pair. 이기상 rendered
 
 ## Recent milestones
 
-- **2026-05-11** — Direction switch after sessions closure: qmd over public
-  garden Markdown becomes the active knowledge path. qmd is installed from
-  `~/repos/3rd/qmd`, linked at `~/.local/bin/qmd`, and will index
-  `~/repos/gh/notes/content` before raw org/org→qmd work resumes.
+- **2026-05-12** — qmd path retired (issue #8). md track redefined as direct
+  Markdown embedding over the public garden export, ported from OpenClaw
+  builtin md memory logic onto the sessions LanceDB backend. Org track marked
+  disabled in production — agents consume sessions + md only. Split of effort:
+  *what we ship to agents now (sessions + md)* vs *upstream R&D (org)*.
+- **2026-05-11** — Direction first set toward qmd over the public garden
+  Markdown after sessions closure. qmd was installed and a `garden-smoke` of
+  90 files / 1215 vectors ran, but full `qmd query` hit ~53s/query on rerank;
+  qmd was retired the next day in favor of direct md embedding (see above).
 - **2026-05-11** — Sessions track stabilized and closed: OpenRouter
   Qwen3-Embedding-8B / 4096d full rebuild (28,537 chunks, ~$0.065, verify
   pass), C2.1a excerpt readback, and C2.1c `session_search.withExcerpt`

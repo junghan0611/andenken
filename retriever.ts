@@ -161,7 +161,7 @@ export function weightedMerge(
 }
 
 // --- RRF (kept for session search where it works well) ---
-// QMD top-rank bonus: results ranking #1 in any list get score boost.
+// Top-rank bonus: results ranking #1 in any list get score boost.
 
 export function rrfFusion(
   vectorResults: SearchResult[],
@@ -194,7 +194,7 @@ export function rrfFusion(
     }
   });
 
-  // Top-rank bonus (QMD pattern)
+  // Top-rank bonus
   for (const entry of scoreMap.values()) {
     if (entry.topRank === 0) entry.score += 0.05;
     else if (entry.topRank <= 2) entry.score += 0.02;

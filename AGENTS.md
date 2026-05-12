@@ -31,23 +31,32 @@ andenken agent-in-charge.
 
 | Track | Quality bar | Notes |
 |-------|------------|-------|
-| **sessions** | Parity with openclaw session memory | Load-bearing for agent continuity. Regression here is a real incident. |
-| **qmd over public garden MD** | Immediately usable knowledge retrieval | Current next track. Uses exported Markdown in `~/repos/gh/notes/content` first, because this is what GLG can use now. Model/serving contract: [QMD.md](./QMD.md). |
-| **org** | Optional, high-signal only | Conservative source track. Doctor/chunker work is deferred until qmd over public garden MD has a usable baseline. |
+| **sessions** | Parity with openclaw session memory | Load-bearing for agent continuity. Regression here is a real incident. Closed/stable as of 2026-05-11. |
+| **md (public garden)** | Immediately usable knowledge retrieval for agents | Current active track (issue #8). Direct Markdown embedding over `~/repos/gh/notes/content`. Ports OpenClaw builtin md memory logic (`~/repos/3rd/openclaw/packages/memory-host-sdk/src/host/`) onto the same LanceDB backend used by sessions. Same pattern that originally built the org track. |
+| **org** | Currently disabled | Source track over 3,000+ Denote notes. Doctor / chunker / incremental work is upstream R&D. Not consumed by agents in production. Do not run `index:org` unless explicitly working on the org track. |
 
-When a change affects multiple tracks, sessions gets the stricter review. After
-sessions closed on 2026-05-11, the next active track is **qmd over public
-garden Markdown**, not org incremental indexing.
+**Split of effort.** The agent-in-charge separates *what we ship to agents now*
+(sessions + md) from *upstream development* (org). Org is rich but messy;
+garden export is a controlled surface and far easier to tune. md is what GLG
+hands agents as their knowledge axis today; org gets time to mature on its own.
+
+When a change affects multiple live tracks, sessions gets the stricter review.
+The qmd path attempted between 2026-05-09 and 2026-05-11 was retired on
+2026-05-12 (issue #8) — local-GGUF rerank/expand stack was too heavy
+(~53s/query on 90-file smoke). Embedding axis stays a simple
+*embed → LanceDB → hybrid retrieve* engine; no brain-platform features.
 
 ## What I own
 
 ```
 embedding-provider.ts   EmbeddingProvider interface + vLLM impl + factory
-model-presets.ts        Qwen3-Embedding-4B / bge-m3 / Gemini presets
-store.ts                LanceDB vector store (sessions.lance + org.lance)
+model-presets.ts        Qwen3-Embedding-4B/8B / bge-m3 / Gemini presets
+store.ts                LanceDB vector store (sessions.lance + md.lance + org.lance)
 retriever.ts            Hybrid retrieval (weighted/RRF + decay + MMR)
 session-indexer.ts      pi + Claude Code JSONL parser
-org-chunker.ts          Org-aware 2-tier chunker (direct-body rule)
+md-chunker.ts           Markdown-aware chunker (frontmatter / heading / code-block)
+md-indexer.ts           md indexing driver (manifest + dim guard)
+org-chunker.ts          Org-aware 2-tier chunker (disabled track — upstream R&D)
 indexer.ts              Indexing driver (manifest + hard guard + zero-chunk clear)
 write-buffer.ts         Single-writer serialization
 doctor.ts               Operator triage — retrieval / chunk / structure health
@@ -55,8 +64,12 @@ index.ts                pi extension entry
 cli.ts                  Claude Code / OpenCode CLI entry
 ```
 
-Two separate LanceDB files — `sessions.lance` and `org.lance`. One DB is not a
-fallback for the other.
+Three separate LanceDB files — `sessions.lance`, `md.lance`, `org.lance`. Each
+is keyed to its own provider/dim. No DB is a fallback for another.
+
+(md-chunker.ts / md-indexer.ts are under active construction per NEXT.md while
+the md track is being built. Once they land they replace any remaining qmd
+artifacts from the retired 2026-05-09 → 2026-05-11 experiment.)
 
 ## What I do not own
 
@@ -82,13 +95,14 @@ Kiwi morphology lives in dictcli.
 
 ## Indexing endpoints
 
-andenken has dimension-separated embedding stores and a separate qmd bridge.
-A vector DB is queryable only by a provider that emits the same dimension.
+andenken has dimension-separated embedding stores per track. A vector DB is
+queryable only by a provider that emits the same dimension.
 
 | Track | Model / dim | Endpoint | When |
 |-------|-------------|----------|------|
-| **Sessions** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `https://openrouter.ai/api` via `ANDENKEN_SESSION_*` | hourly incremental driven by `scripts/sync-sessions.sh` / agent-config `memory-sync` skill; full rebuild via `scripts/rebuild-sessions-full.sh` |
-| **Org** | Qwen3-Embedding-4B / 2560d | `ANDENKEN_ORG_*` / legacy vLLM path | human-initiated org indexing; deferred while qmd public garden MD baseline is established |
+| **Sessions** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `https://openrouter.ai/api` via `ANDENKEN_SESSION_*` → `data/sessions.lance` | hourly incremental driven by `scripts/sync-sessions.sh` / agent-config `memory-sync` skill; full rebuild via `scripts/rebuild-sessions-full.sh` |
+| **MD** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `https://openrouter.ai/api` via `ANDENKEN_MD_*` → `data/md.lance` | incremental driven by `./run.sh sync:md` once the track lands; full index via `./run.sh index:md --force`; corpus `~/repos/gh/notes/content` |
+| **Org** | Qwen3-Embedding-4B / 2560d | `ANDENKEN_ORG_*` / legacy vLLM path → `data/org.lance` | **disabled in production.** Upstream R&D only. Do not run from operator workflow. |
 
 ### Session corpus sources
 
@@ -107,33 +121,40 @@ only `pi`, `claude`, and `all` (`pi + claude`). No `overlay` source.
 
 ### Why the split
 
-- **Sessions** are load-bearing for live agent continuity and now use 8B/4096d.
+- **Sessions** are load-bearing for live agent continuity and use 8B/4096d.
   Incremental sync is paid-remote but low cost; wrong-dim and paid full-rebuild
   guards are mandatory.
-- **qmd over public garden MD** is the current practical knowledge path. It
-  uses `~/repos/gh/notes/content` Markdown directly through qmd collections,
-  separate from LanceDB/org chunker quality work.
-- **Org** stays 4B/2560d until the org/qmd track is explicitly changed. Org
-  doctor WARN cleanup is next-after-qmd, not the current active step.
+- **MD** is the current knowledge axis for agents. It indexes the exported
+  public garden directly — a controlled corpus where chunking and retrieval
+  are tunable on a sane schedule. Same 8B/4096d provider as sessions; separate
+  LanceDB file so the two pools never cross-contaminate.
+- **Org** stays 4B/2560d but is **disabled in production**. Doctor WARN
+  cleanup, chunker improvements, and source policy refinement are upstream R&D
+  and live behind explicit operator invocation. Agents do not consume org
+  today.
 - Query providers are track-specific. Never use a sessions vector against the
-  org DB or an org vector against the sessions DB.
+  md or org DB, or vice versa.
 
 ### Cost discipline (mandatory)
 
 - Sessions full rebuild against a paid remote is gated by
   `ANDENKEN_ALLOW_PAID_FULL_REBUILD=1` and should go through
   `scripts/rebuild-sessions-full.sh` after estimate + explicit confirmation.
+- MD indexing follows the same gate (`ANDENKEN_ALLOW_PAID_FULL_REBUILD=1` for
+  full rebuilds) and the same wrong-dim preflight. Incremental is the default
+  cadence.
 - Indexing/search paths must check DB/provider dimension compatibility before
-  any paid embedding call. Sessions expect 4096d; org expects 2560d.
-- `memory-sync` skill (agent-config side) covers the sessions fast path only.
-  Org/full/oracle full-sync require human invocation from this repo.
+  any paid embedding call. Sessions and md expect 4096d; org expects 2560d.
+- `memory-sync` skill (agent-config side) covers the sessions fast path; md
+  will follow once the track stabilizes. Full / oracle full-sync require human
+  invocation from this repo.
 
 > **2026-04-30 — gpu2i removed from embedding role.**
 > gpu2i was repurposed as VOS chat-completion node (Qwen2.5-7B-Instruct-AWQ).
 > It now serves `/v1/chat/completions` and **must not be used for embedding** —
 > calling `/v1/embeddings` against it returns 3584d (last hidden state) and
-> would corrupt a 2560d org index. Sessions now use OpenRouter 8B/4096d via
-> `ANDENKEN_SESSION_*`; org remains 4B/2560d until the org/qmd track changes.
+> would corrupt a 2560d org index. Sessions and md use OpenRouter 8B/4096d via
+> `ANDENKEN_SESSION_*` / `ANDENKEN_MD_*`; org stays on 4B/2560d but disabled.
 
 ## Cross-repo responsibility
 
@@ -171,11 +192,9 @@ shown there is a real command against real code; no documentation gap.
 
 Specific operations worth knowing by name:
 
-- `qmd` — installed from `~/repos/3rd/qmd` and linked at `~/.local/bin/qmd` for
-  the current qmd public garden MD baseline. DB: `~/.cache/qmd/index.sqlite`.
-  Use `./run.sh qmd:garden ...`; model/serving/testing details live in
-  [QMD.md](./QMD.md).
-- `./run.sh qmd:bootstrap --cache-dir ~/repos/gh/notes/content --collection-prefix garden` — prints qmd collection/context commands for the exported garden Markdown tree.
+- `./run.sh index:md` / `./run.sh sync:md` / `./run.sh search:md` — md track
+  operating surface (under active construction per NEXT.md). Direct embedding
+  of `~/repos/gh/notes/content` via OpenRouter 8B/4096d into `data/md.lance`.
 - `scripts/sync-sessions.sh` — sessions-only incremental path through
   OpenRouter Qwen3-Embedding-8B 4096d. Wrong-dim aborts before API; no-work
   exits with API 0; optional `--push` to oracle. Used by the agent-config
@@ -185,10 +204,17 @@ Specific operations worth knowing by name:
   → verify. Human-driven and paid-remote gated.
 - `scripts/rebuild-incremental.sh` / `scripts/rebuild-full.sh` — deprecated
   mixed sessions+org paths. Do not use for normal operations.
-- `./run.sh verify all` — integrity check after indexing
+- `./run.sh verify all` — integrity check after indexing (skips disabled org).
 - `./run.sh doctor --org` — operator triage (read-only, local-only). Verdict
-  comes with `reasons[]` so the operator sees *why* it WARNed.
+  comes with `reasons[]` so the operator sees *why* it WARNed. Only used in
+  upstream R&D since the org track is disabled in production.
 - `./run.sh golden` — search quality baseline (regression gate)
+
+Retired:
+
+- `./run.sh qmd:*` — the qmd-over-garden-MD path was removed on 2026-05-12
+  (issue #8). Replaced by the direct md track above. qmd binary at
+  `~/.local/bin/qmd` is no longer driven from this repo.
 
 If you want to add a new operation, add it to `run.sh` first. If it does not
 appear in `./run.sh` help, it does not exist for operators.
