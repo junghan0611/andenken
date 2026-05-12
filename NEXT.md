@@ -64,57 +64,90 @@ GLG 방침 (2026-05-12):
 ### 진행 현황 (2026-05-12)
 
 - **B0 완료** — commit `0831487` `chore(qmd): retire qmd path; split org from agent-facing surface (#8)`. 신규 qmd 파일 7개 삭제 + test.ts/run.sh/tsconfig 수술 + 4개 문서 정렬. 2,661줄 제거, 317줄 추가. tsc 클린 + unit 71/0/0.
-- **B1a 완료** — md 트랙 골격이 들어왔다. commit pending.
+- **B1a 완료** — md 트랙 골격. commit `b431bf7` `feat(md): scaffold md track — public garden direct embedding (#8)`. 1,344줄 추가 / 45줄 제거.
   - 신규 `md-chunker.ts` (~470줄). Hugo frontmatter strip + heading-bounded segmentation + 코드블록 보존 + per-folder 크기 정책 + 12K hard guard + sha256 chunk hash + denote-id 자동 추출.
-  - `store.ts`: `getMdDbPath()` 추가. md.lance는 sessions/org와 별도 LanceDB 파일.
-  - `embedding-provider.ts`: `createMdProviderFromEnv()` — `ANDENKEN_MD_*` namespace, sessions와 동일한 OpenRouter 8B/4096d 권장. legacy fallback 없음.
+  - `store.ts`: `getMdDbPath()` → `data/md.lance` (sessions/org와 별도).
+  - `embedding-provider.ts`: `createMdProviderFromEnv()` (`ANDENKEN_MD_*` namespace, legacy fallback 없음).
   - `indexer.ts`: `indexMd(force)` (sessions 미러 + paid-remote gate), `MdFileManifest`, `collectMdStatus()`, dispatch `case "md":`, compact/cleanup/verify에 md 분기, status 출력에 md 라인 추가, org는 "disabled in production" 라벨.
-  - `cli.ts`: `searchMd(query, limit)` + `search-md` dispatch + `mdDbPath`. hybrid + dictcli expand + MMR. recency half-life 90d (org와 동일, garden은 시간순이 아님).
+  - `cli.ts`: `searchMd(query, limit)` + `search-md` dispatch + `mdDbPath`. hybrid + dictcli expand + MMR. recency half-life 90d.
   - `run.sh`: `index:md` / `sync:md` / `search:md` 명령군 + help 텍스트. compact/cleanup/verify target에 md 추가.
   - `tsconfig.json`: `md-chunker.ts` 등재.
-  - `test.ts`: `testMdChunker()` (27 assertions — frontmatter / denote-id / folder / hierarchy / fenced code / tiny skip / storeRow / findMdFiles smoke).
-  - 검증: tsc 클린, unit 98/0/0, real garden `findMdFiles` 2,210 files (bib 678 / botlog 63 / journal 94 / meta 538 / notes 837), `./run.sh status`에 `📝 MD: not indexed yet` 신규 라인.
+  - `test.ts`: `testMdChunker()` (27 assertions). 전체 suite 98/0/0.
+  - 검증: tsc 클린, real garden `findMdFiles` 2,210 files (bib 678 / botlog 63 / journal 94 / meta 538 / notes 837), `./run.sh status`에 `📝 MD: not indexed yet` 신규 라인.
+- **env 셋업 완료** — GLG가 `~/.env.local`에 `ANDENKEN_MD_*` 활성, `ANDENKEN_ORG_*` / `ANDENKEN_VLLM_*` 주석 처리. `createMdProviderFromEnv()`가 정상적으로 `vllm (md:openrouter) (4096d, paid)` 만드는 것 확인.
 
-### B1b — smoke index (다음 단계)
+### B1b — 임베딩 보류 (GPT 리뷰 대기, 2026-05-12)
 
-env 셋업 (GLG가 `~/.env.local`에 추가, sessions와 동일 OpenRouter key 재사용 가능):
+GLG 결정: **첫 임베딩 전에 gpt-5.5 리뷰를 통해 한 번 수정한 다음 본 임베딩 들어간다.** 한 번에 끝내자 (두세번 안 하려고).
+
+첫 시도 부분 인덱싱 (멈춤):
+
+| 항목 | 값 |
+|---|---:|
+| 진행 | 65/2210 files 인덱싱 후 중단 |
+| 관찰된 chunks/file 평균 | ~26 (1703 chunks / 65 files) |
+| 관찰 throughput | ~0.5 files/s (concurrency=2, OpenRouter 8B) |
+| ETA full | ~72분 (4290s) |
+| 추정 chunks (전체) | ~57,500 (28K~64K 사이 폭) |
+| 추정 tokens (전체) | ~35M (chunks × ~600 tokens) |
+| 추정 cost (full) | **~$0.35** at $0.01/M |
+| ETA cost 갱신 | 2026-05-12 09:24 KST 기준. 첫 50개 평균 22 chunks/file. |
+| 부분 인덱스 처리 | `data/md.lance` + `data/md-manifest.json` 삭제 후 clean. 다음 인덱스는 처음부터. |
+
+**예상보다 chunks/file이 큰 이유 (리뷰 포인트 후보)**:
+
+- Hugo export 본문에 frontmatter 외에도 footnotes / 참고문헌 블록이 길게 붙어 청크 수 증가
+- meta/notes 폴더의 큰 파일(특히 메타뷰)이 maxChars 4000 기준 다수 분할
+- per-folder config: `meta: 6000, bib: 4800, notes: 4000` 인데 실효치 평균이 이보다 작게 잘리는 듯 → splitSegment의 paragraph 경계 분할이 너무 공격적일 수 있음
+- enrichText 프리픽스가 매 청크에 붙어 토큰 부풀림 (Title + Description + Path + Tags 4줄)
+
+### B1b-pre — GPT 리뷰 대기 (지금 단계)
+
+GPT에게 보여줄 review surface:
+
+| 파일 | 라인 | 핵심 |
+|---|---:|---|
+| `md-chunker.ts` | ~470 | 가장 큰 변경 면. 청킹 정책 자체. |
+| `indexer.ts` | +316 | `indexMd()` + manifest + dispatch. 패턴은 sessions와 거의 동형. |
+| `cli.ts` | +100 | `searchMd()`. hybrid weights는 knowledge와 동일. |
+| `embedding-provider.ts` | +48 | `createMdProviderFromEnv()`. sessions 미러. |
+| `store.ts` | +9 | `getMdDbPath()`. |
+| `run.sh` | +23 | 명령 등록. |
+
+검수 권장 포인트 (GPT에게 명시):
+
+1. **chunker 청크 크기 정책** — per-folder maxChars / overlap이 가든 export 실데이터(observed 22~26 chunks/file)에 맞나? 더 큼직하게 잘라도 retrieval 품질이 유지될지?
+2. **enrichText 프리픽스** — Title/Description/Path/Tags 4줄을 매 청크에 prepend하는 게 비용 효율 OK인가? 첫 청크만 enrich + 나머지는 hierarchy만 붙이는 변형 가능.
+3. **fence detection** — `^\s{0,3}\`\`\`` 또는 `~~~` 만 본다. inline backtick(\`code\`)는 영향 없음. nested code (예: org-src-export) 케이스가 가든에 있는지?
+4. **frontmatter parser** — YAML/TOML만 처리, JSON frontmatter는 body로 흘림. 가든에 JSON frontmatter md가 있는지 확인.
+5. **denote-id 매핑** — `parseDenoteId` 파일명에서만 본다. frontmatter `identifier` 필드도 같이 보는 게 좋은지?
+6. **chunk id 안정성** — `id = filePath#chunkIndex`. 파일 변경 시 chunkIndex 시프트되면 stale chunk 정리는 manifest 기반 `wb.add()` 자동 delete가 처리하지만, 검색 결과 영속 ID 관점에서는 hash-based ID가 나은지?
+7. **role 필드 공란** — store 스키마의 `role`을 "" 로 두는 게 그대로 OK인지, "doc" 같은 라벨 박는 게 좋을지 (sessions와 union 검색할 가능성 대비).
+8. **search recency half-life 90d** — knowledge와 동일하게 했다. 가든은 시간순이 본질이 아니라 더 길게 가야 할 수도(180d / 365d). journal 폴더만 짧게 하는 것도 옵션.
+9. **paid-remote gate** — `--force` 일 때만 ANDENKEN_ALLOW_PAID_FULL_REBUILD=1 require. 첫 인덱스는 indexed=empty라 사실상 full인데 gate 안 발동. 의도된 것인지 (sessions도 같은 동작) 명시 필요.
+10. **partial run safety** — 인덱싱을 중간에 끊었을 때 manifest checkpoint 사이의 chunks가 DB에 들어가지만 manifest에는 안 박힐 수 있다. 그 파일은 다음 incremental에서 stale로 안 잡힐 수 있다(파일이 indexed Set엔 있지만 manifest entry는 없음). 코드상 그런 케이스가 getStaleFiles의 `if (!entry) continue;` 분기에 빠지는데, 그게 안전한지 (= "already indexed elsewhere, just record" 의도).
+
+GPT 결과 수령 → 수정 → tsc/unit pass → 본 임베딩 (`./run.sh index:md`) → search smoke 10개 → verify md → B1c (full 안정화 + 비용 정산) → B1d (MCP 노출).
+
+### B1b 본 임베딩 (GPT 리뷰 통과 후 실행)
+
+env는 이미 셋업되어 있으므로:
 
 ```bash
-ANDENKEN_MD_PROVIDER=openrouter
-ANDENKEN_MD_ENDPOINT=https://openrouter.ai/api
-ANDENKEN_MD_MODEL=qwen/qwen3-embedding-8b
-ANDENKEN_MD_DIMENSIONS=4096
-ANDENKEN_MD_API_KEY=$OPENROUTER_API_KEY
-ANDENKEN_MD_PAID_REMOTE=1
-ANDENKEN_MD_PRICE_PER_M_TOKENS=0.01
-```
-
-smoke (작은 부분집합부터):
-
-```bash
-# 1. 가벼운 smoke — botlog (63 files)만 임시로 index. 환경변수로 컨트롤할 수 있게 추후 --folder 플래그 추가하거나, 임시로 ANDENKEN_MD_ROOT을 botlog 하위로 좁히는 방식.
-./run.sh status                      # confirm "📝 MD: not indexed yet" still
-./run.sh index:md                    # incremental, ~2.2K files all at once is also OK
-./run.sh search:md "보편 학문"        # smoke query
-./run.sh search:md "피투성"
-./run.sh search:md "어쏠로지"
-./run.sh search:md "바네바 부시"
-./run.sh verify md
-```
-
-대표 쿼리 10개:
-
-```text
-보편 학문
-피투성
-어쏠로지
-바네바 부시
-제프 베이조스
-andenken openclaw
-entwurf 시간축
-일일일생
-2026-05-11 andenken
-디지털가든 메타휴먼
+./run.sh status                         # confirm md = not indexed yet
+./run.sh index:md                       # ~50~75분, ~$0.35 추정
+./run.sh status                         # md count / actual_dim 확인
+./run.sh verify md                      # 무결성
+./run.sh search:md "보편 학문" --limit 5
+./run.sh search:md "피투성" --limit 5
+./run.sh search:md "어쏠로지" --limit 5
+./run.sh search:md "바네바 부시" --limit 5
+./run.sh search:md "제프 베이조스" --limit 5
+./run.sh search:md "andenken openclaw" --limit 5
+./run.sh search:md "entwurf 시간축" --limit 5
+./run.sh search:md "일일일생" --limit 5
+./run.sh search:md "2026-05-11 andenken" --limit 5
+./run.sh search:md "디지털가든 메타휴먼" --limit 5
 ```
 
 검수 기준:
@@ -123,7 +156,7 @@ entwurf 시간축
 - person/work recall: bib + related notes가 연결되는가
 - bilingual mixed query: Korean + English proper noun이 함께 살아남는가
 - latency: OpenRouter 8B는 query 1회 200~600ms 예상 (sessions와 동일)
-- cost: full 2,210 files 임베딩 비용 추정. chunks/file 평균을 보고 결정.
+- cost: 실제 stats 출력으로 추정 vs 실측 비교
 
 ### B0 — qmd 흔적 제거 (단일 commit) — 완료
 
