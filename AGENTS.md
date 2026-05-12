@@ -32,7 +32,7 @@ andenken agent-in-charge.
 | Track | Quality bar | Notes |
 |-------|------------|-------|
 | **sessions** | Parity with openclaw session memory | Load-bearing for agent continuity. Regression here is a real incident. Closed/stable as of 2026-05-11. |
-| **md (public garden)** | Immediately usable knowledge retrieval for agents | Current active track (issue #8). Direct Markdown embedding over `~/repos/gh/notes/content`. Ports OpenClaw builtin md memory logic (`~/repos/3rd/openclaw/packages/memory-host-sdk/src/host/`) onto the same LanceDB backend used by sessions. Same pattern that originally built the org track. |
+| **md (public garden)** | Immediately usable knowledge retrieval for agents | Current production knowledge axis. Direct Markdown embedding over `~/repos/gh/notes/content`. Ports OpenClaw builtin md memory logic (`~/repos/3rd/openclaw/packages/memory-host-sdk/src/host/`) onto the same LanceDB backend used by sessions. First production cut closed on 2026-05-12; current work is B2 retrieval quality / golden baseline. |
 | **org** | Currently disabled | Source track over 3,000+ Denote notes. Doctor / chunker / incremental work is upstream R&D. Not consumed by agents in production. Do not run `index:org` unless explicitly working on the org track. |
 
 **Split of effort.** The agent-in-charge separates *what we ship to agents now*
@@ -54,12 +54,13 @@ model-presets.ts        Qwen3-Embedding-4B/8B / bge-m3 / Gemini presets
 store.ts                LanceDB vector store (sessions.lance + md.lance + org.lance)
 retriever.ts            Hybrid retrieval (weighted/RRF + decay + MMR)
 session-indexer.ts      pi + Claude Code JSONL parser
-md-chunker.ts           Markdown-aware chunker (frontmatter / heading / code-block)
-md-indexer.ts           md indexing driver (manifest + dim guard)
+md-chunker.ts           Markdown-aware chunker + analyzeMdFile SSOT classifier
 org-chunker.ts          Org-aware 2-tier chunker (disabled track — upstream R&D)
 indexer.ts              Indexing driver (manifest + hard guard + zero-chunk clear)
 write-buffer.ts         Single-writer serialization
-doctor.ts               Operator triage — retrieval / chunk / structure health
+doctor.ts               Operator triage dispatch
+doctor-md.ts            MD production triage — provider / DB / manifest / gap
+doctor-org.ts           Org triage (upstream R&D only)
 index.ts                pi extension entry
 cli.ts                  Claude Code / OpenCode CLI entry
 ```
@@ -67,9 +68,9 @@ cli.ts                  Claude Code / OpenCode CLI entry
 Three separate LanceDB files — `sessions.lance`, `md.lance`, `org.lance`. Each
 is keyed to its own provider/dim. No DB is a fallback for another.
 
-(md-chunker.ts / md-indexer.ts are under active construction per NEXT.md while
-the md track is being built. Once they land they replace any remaining qmd
-artifacts from the retired 2026-05-09 → 2026-05-11 experiment.)
+The md track is no longer "under construction" in the old sense: first
+production cut is closed. Current md work is quality measurement (golden
+queries) and explainability (`doctor --md`), not corpus bring-up.
 
 ## What I do not own
 
@@ -225,10 +226,13 @@ Specific operations worth knowing by name:
 - `scripts/rebuild-incremental.sh` / `scripts/rebuild-full.sh` — deprecated
   mixed sessions+org paths. Do not use for normal operations.
 - `./run.sh verify all` — integrity check after indexing (skips disabled org).
-- `./run.sh doctor --org` — operator triage (read-only, local-only). Verdict
-  comes with `reasons[]` so the operator sees *why* it WARNed. Only used in
-  upstream R&D since the org track is disabled in production.
-- `./run.sh golden` — search quality baseline (regression gate)
+- `./run.sh doctor --md` — production md triage. Explains provider / DB /
+  manifest state and accounts for manifest↔indexed gaps via `analyzeMdFile`
+  skip reasons (`noembed_tag`, `min_body`, etc.).
+- `./run.sh doctor --org` — org triage (read-only, local-only). Upstream R&D
+  only since the org track is disabled in production.
+- `./run.sh golden` — search quality baseline (regression gate); current NEXT
+  item is md-specific golden coverage.
 
 Retired:
 
@@ -246,7 +250,8 @@ of the project: it is the **live tier** of agent memory in a compact-not
 workflow. Implications:
 
 - `session-manifest.json` is treated as a first-class artifact alongside
-  `org-manifest.json`. Stale detection (mtime/size) is the entry point.
+  `md-manifest.json` (the current production knowledge-axis manifest). Stale
+  detection (mtime/size) is the entry point.
 - Hourly (or 30 min) sessions sync is the expected operating cadence. The
   `memory-sync` skill in agent-config exists for that and only that — full
   rebuild and oracle full-sync stay human-only.

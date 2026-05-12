@@ -46,7 +46,7 @@ covers all three.
 | Track | Quality bar | Scope |
 |-------|------------|-------|
 | **sessions** | Parity with openclaw session memory | Core. pi + Claude Code JSONL. Closed/stable as of 2026-05-11. |
-| **md (public garden)** | Immediately usable knowledge retrieval for agents | Current active track. Direct Markdown embedding over exported `~/repos/gh/notes/content` (~2,200 md / ~27MB). OpenClaw builtin md memory logic + LanceDB backend (same pattern that built the org track). |
+| **md (public garden)** | Immediately usable knowledge retrieval for agents | Current production knowledge axis. Direct Markdown embedding over exported `~/repos/gh/notes/content` (~2,200 md / ~27MB). OpenClaw builtin md memory logic + LanceDB backend (same pattern that built the org track). First production cut closed on 2026-05-12. |
 | **org** | Currently disabled | 3,000+ Denote notes. Source track. Doctor/chunker/incremental work is upstream R&D, **not** what agents consume right now. |
 
 **Split of effort.** The agent-in-charge separates *what we ship to agents now*
@@ -66,16 +66,17 @@ as the sessions track.
 
 ## What It Does
 
-Records buried in time — session conversations, org-mode notes, recent journal,
-health data, commit history, bibliography — are embedded into vector space.
-The system prefers conservative scope first: block noisy corpora, then open
-selectively when retrieval proves a need.
+Records buried in time — session conversations and the exported public garden —
+are embedded into vector space. The current production surface is deliberately
+narrow: session continuity + md knowledge axis first, with org left in
+upstream R&D until it earns a return path.
 
 ```
 andenken search-sessions "NixOS GPU cluster setup"
-andenken search-knowledge "체화인지 embodied cognition"
+andenken search-md "체화인지 embodied cognition"
+andenken search-knowledge "체화인지 embodied cognition"   # compatibility alias
 andenken status
-./run.sh doctor --org      # operator triage: retrieval / chunk / structure
+./run.sh doctor --md       # production md triage / gap explainability
 ```
 
 ## Architecture
@@ -110,8 +111,10 @@ Layer 3 reflects the human's vocabulary. Each catches what the others miss.
 ## Multi-Harness
 
 Same core serves pi (extension), Claude Code (skill), OpenCode (skill). Tools:
-`session_search`, `knowledge_search`. Same retriever, same store, same
-embeddings. See `index.ts` (pi) and `cli.ts` (CLI harnesses).
+`session_search`, `knowledge_search`. In the current production surface,
+`knowledge_search` points at the md track; CLI `search-knowledge` is kept as a
+compatibility alias to `search-md`. See `index.ts` (pi) and `cli.ts` (CLI
+harnesses).
 
 ## Stack
 
@@ -127,7 +130,7 @@ embeddings. See `index.ts` (pi) and `cli.ts` (CLI harnesses).
 | Track | Model / dim | Endpoint | Status |
 |-------|-------------|----------|--------|
 | **Sessions** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `ANDENKEN_SESSION_*` → `data/sessions.lance` | Live. Closed and stable. |
-| **MD** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `ANDENKEN_MD_*` → `data/md.lance` | Active build. Direct embedding over `~/repos/gh/notes/content`. |
+| **MD** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `ANDENKEN_MD_*` → `data/md.lance` | Live production knowledge axis. First production cut: 10,119 chunks / 2,192 indexed files, with `doctor --md` explaining the remaining 18 zero-chunk files. |
 | **Org** | Qwen3-Embedding-4B / 2560d | `ANDENKEN_ORG_*` → `data/org.lance` | **Disabled.** Upstream R&D only. Do not run `index:org` in production. |
 
 LanceDB stores are dimension- and track-separated. Each track's search must use
@@ -150,16 +153,16 @@ sessions / entwurf messages. Valid source filters are `pi`, `claude`, and
 
 `session_search` / `search-sessions` source semantics:
 
-| `source` value      | Candidate pool        | Org cross-track fallback |
-|---------------------|-----------------------|--------------------------|
+| `source` value      | Candidate pool        | MD cross-track fallback |
+|---------------------|-----------------------|-------------------------|
 | omitted / `all`     | pi + claude (mixed)   | enabled when results are thin |
 | `pi`                | pi only (LanceDB-side filter) | disabled (sessions-only intent) |
 | `claude`            | claude only (LanceDB-side filter) | disabled (sessions-only intent) |
 
 The source filter is pushed down into LanceDB at the vector / FTS / substring
 query level so the candidate pool is source-specific. Explicit `pi` or `claude`
-also suppresses the org knowledge fallback — if the caller named a session
-source, they asked for sessions, not org notes.
+also suppresses the md knowledge fallback — if the caller named a session
+source, they asked for sessions, not garden notes.
 
 ## md track — public garden direct embedding
 
@@ -173,11 +176,18 @@ therefore much easier to tune than the raw Denote tree.
 | md store | `data/md.lance` | LanceDB, dimension 4096d |
 | md manifest | `data/md-manifest.json` | mtime/size based incremental |
 | provider env | `ANDENKEN_MD_*` | OpenRouter qwen/qwen3-embedding-8b |
+| md doctor | `./run.sh doctor --md` | provider / DB / manifest / gap explainability |
 
-First baseline indexes `notes`, `bib`, `meta`, `journal`, `botlog`. Folders
-`images`, `talks`, `test`, `tmp` are excluded until explicitly asked. The md
-chunker is Markdown-specific (frontmatter strip, heading boundaries, code-block
-preservation); the org chunker is not reused.
+Current first-cut baseline:
+
+- `10,119` chunks / `2,192` indexed files / `2,210` manifest entries
+- gap `18` is fully explained by `doctor --md`
+  - `3` files skipped by `noembed_tag`
+  - `15` files skipped by `min_body`
+  - `0` unclassified drift
+- chunk count is intentionally much lower than org (`44,916`) because the md
+  chunker emits larger, denser OpenClaw-style CJK-weighted chunks rather than
+  org's heading/body two-tier fragments.
 
 The implementation ports OpenClaw's builtin md memory logic
 (`~/repos/3rd/openclaw/packages/memory-host-sdk/src/host/`) onto the same
@@ -188,10 +198,10 @@ sqlite.
 ## Scope and safety policy
 
 - `journal`: only files with identifier `>= 20250101T000000`
-- Exclusion tags (filetag → file skip, heading tag → subtree skip):
-  `noexport`, `tts`, `noembed`, `llmlog`, `archive`
+- Exclusion tags / skip reasons are surfaced through `analyzeMdFile` and
+  `doctor --md` (`noembed_tag`, `min_body`, `all_chunks_short`, `deleted`,
+  `unclassified`)
 - Content chunking uses **direct body only** (no parent/child duplicates)
-- Hard guard skips oversize org chunks before they can kill the run
 - Policy changes are treated as **full rebuild events**, not incremental syncs
 
 ## Rebuild / sync
@@ -200,9 +210,10 @@ sqlite.
 cd ~/repos/gh/andenken
 scripts/sync-sessions.sh              # sessions incremental (8B/4096d)
 scripts/rebuild-sessions-full.sh      # sessions full rebuild (estimate + confirm)
-./run.sh index:md                     # md incremental (8B/4096d) — see NEXT.md while track is being built
+./run.sh index:md                     # md incremental / full (with gate when needed)
 ./run.sh search:md "<query>"          # md search
-./run.sh golden                       # search quality baseline (API required)
+./run.sh doctor --md                  # md production triage / gap explainability
+./run.sh golden                       # current quality baseline surface (B2 expands md coverage)
 ```
 
 `sync-sessions.sh` is the operating heartbeat for the sessions track and what
@@ -232,33 +243,21 @@ In Heidegger, *Geworfenheit* and *Andenken* form a pair. 이기상 rendered
 
 ## Recent milestones
 
+- **2026-05-12** — md first production cut closed. Live knowledge surface
+  pivoted from org to md; `knowledge_search` now points at the public garden
+  track, Oracle sync handoff is in place, and `doctor --md` explains the
+  manifest↔indexed gap (`18 = 3 noembed_tag + 15 min_body`, `unclassified=0`).
 - **2026-05-12** — qmd path retired (issue #8). md track redefined as direct
   Markdown embedding over the public garden export, ported from OpenClaw
   builtin md memory logic onto the sessions LanceDB backend. Org track marked
-  disabled in production — agents consume sessions + md only. Split of effort:
-  *what we ship to agents now (sessions + md)* vs *upstream R&D (org)*.
-- **2026-05-11** — Direction first set toward qmd over the public garden
-  Markdown after sessions closure. qmd was installed and a `garden-smoke` of
-  90 files / 1215 vectors ran, but full `qmd query` hit ~53s/query on rerank;
-  qmd was retired the next day in favor of direct md embedding (see above).
+  disabled in production — agents consume sessions + md only.
 - **2026-05-11** — Sessions track stabilized and closed: OpenRouter
   Qwen3-Embedding-8B / 4096d full rebuild (28,537 chunks, ~$0.065, verify
   pass), C2.1a excerpt readback, and C2.1c `session_search.withExcerpt`
   opt-in.
-- **2026-05-07** — Sessions promoted to live memory tier. `session-manifest.json`
-  with mtime/size stale detection picks up appended-to active conversations.
-  CJK substring fallback recovers 1–2 char Hangul queries that LanceDB FTS
-  drops, with an ASCII-boundary guard to keep `를`/`사` particle noise out.
-  `doctor --org` verdict now carries `reasons[]`.
-- **2026-04-30** — gpu2i moved to VOS chat-completion. It must not be used
-  for embedding; org remains on the 4B/2560d embedding path until org/qmd changes.
-- **2026-04-22** — doctor `--org` stage 1: retrieval / chunk / structure triage
 - **2026-04-17** — OpenRouter query path + provider split. Indexing stays on
   local GPU; queries run from any host.
-- **2026-04-17** — Conservative scope + invariants + reproducible dual rebuild
-  (sessions 17,384 / org 44,167 / golden 26/26 PASS).
 - **2026-03-30** — Korean particle stripping for BM25 (ported from openclaw).
-- **2026-03-30** — Incremental org indexing via mtime manifest.
 - **2026-03-21** — 2-step search strategy: abstract → read top-3 → re-search
   with concrete terms. Encoded in `promptGuidelines`.
 
