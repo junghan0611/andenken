@@ -18,9 +18,10 @@ import { execSync } from "node:child_process";
 import {
   createSessionProviderFromEnv,
   createOrgProviderFromEnv,
+  createMdProviderFromEnv,
   type EmbeddingProvider,
 } from "./embedding-provider.js";
-import { VectorStore, getSessionsDbPath, getOrgDbPath, getDataDir, type SearchResult } from "./store.js";
+import { VectorStore, getSessionsDbPath, getOrgDbPath, getMdDbPath, getDataDir, type SearchResult } from "./store.js";
 import { findSessionFiles, extractSessionChunks, normalizeSourceFilter } from "./session-indexer.js";
 import { retrieve, expandQueryForBM25, getShortCJKTokens, type MergeStrategy } from "./retriever.js";
 import { readSessionExcerpt, type SessionExcerpt } from "./session-excerpt.js";
@@ -89,6 +90,20 @@ function getOrgProvider(): EmbeddingProvider {
   return p;
 }
 
+function getMdProvider(): EmbeddingProvider {
+  const p = createMdProviderFromEnv();
+  if (!p) {
+    console.error(
+      JSON.stringify({
+        error: "No md embedding provider available — set ANDENKEN_MD_PROVIDER " +
+               "(and ANDENKEN_MD_ENDPOINT / _MODEL / _API_KEY).",
+      }),
+    );
+    process.exit(1);
+  }
+  return p;
+}
+
 /**
  * Sessions-track alias used by the in-CLI `reindex` command, which only
  * touches sessions.lance. Kept as a thin alias so the call site stays terse;
@@ -137,6 +152,7 @@ function dictcliExpand(query: string): string[] {
 
 const sessionDbPath = getSessionsDbPath();
 const orgDbPath = getOrgDbPath();
+const mdDbPath = getMdDbPath();
 
 // --- Commands ---
 
@@ -388,6 +404,75 @@ async function searchKnowledge(query: string, limit: number): Promise<void> {
   await store.close();
 }
 
+/**
+ * Search the md track (public garden direct embedding).
+ *
+ * Mirrors searchKnowledge: dict expand, hybrid (vector + BM25), MMR. The
+ * recency decay half-life is longer than sessions (90 days) because the
+ * garden is intentionally not chronological — most retrieval value is in
+ * the long-form notes, not the freshest mtime.
+ */
+async function searchMd(query: string, limit: number): Promise<void> {
+  if (!fs.existsSync(mdDbPath)) {
+    console.error(
+      JSON.stringify({
+        error: "md track not indexed. Run: ./run.sh index:md",
+      }),
+    );
+    process.exit(1);
+  }
+
+  const provider = getMdProvider();
+  const dim = provider.dimensions || 4096;
+
+  const store = new VectorStore(mdDbPath, dim);
+  await store.init();
+
+  const dimCheck = await store.checkCompatibleDim();
+  if (!dimCheck.ok) {
+    console.error(
+      JSON.stringify({
+        error: `md search refused: ${dimCheck.reason ?? "md dim incompatible"}`,
+        configured: dimCheck.configured,
+        actual: dimCheck.actual,
+      }),
+    );
+    process.exit(1);
+  }
+
+  const expanded = dictcliExpand(query);
+  const enrichedQuery =
+    expanded.length > 0 ? `${query} ${expanded.join(" ")}` : query;
+
+  const candidates = Math.min(limit * 4, 200);
+  const queryVector = await provider.embedQuery(enrichedQuery);
+  const bm25Query = expandQueryForBM25(enrichedQuery);
+  const vectorResults = await store.search(queryVector, candidates, 0.05);
+  const ftsResults = await store.fullTextSearch(bm25Query, candidates);
+
+  const results = await retrieve(query, vectorResults, ftsResults, {
+    vectorWeight: 0.7,
+    bm25Weight: 0.3,
+    recencyHalfLifeDays: 90,
+    minScore: 0.05,
+    mmr: { enabled: true, lambda: 0.7 },
+    mergeStrategy: "weighted" as MergeStrategy,
+  });
+
+  const finalResults = results.slice(0, limit);
+  recordRecall(query, "search-md", finalResults);
+  console.log(
+    JSON.stringify({
+      query,
+      expanded: expanded.length > 0 ? expanded : undefined,
+      count: finalResults.length,
+      results: finalResults.map((r) => formatResult(r)),
+    }),
+  );
+
+  await store.close();
+}
+
 async function status(): Promise<void> {
   const sessionStore = new VectorStore(sessionDbPath);
   let sessionCount = 0;
@@ -567,6 +652,17 @@ async function main() {
       });
       break;
     }
+    case "search-md":
+    case "md": {
+      const query = positional.join(" ");
+      if (!query) {
+        console.error(JSON.stringify({ error: "Usage: search-md <query> [--limit N]" }));
+        process.exit(1);
+      }
+      await searchMd(query, limit);
+      break;
+    }
+
     case "search-knowledge":
     case "knowledge": {
       const query = positional.join(" ");
@@ -587,7 +683,7 @@ async function main() {
       console.error(
         JSON.stringify({
           error: "Unknown command",
-          usage: "cli.ts <search-sessions|search-knowledge|status|reindex> [args]",
+          usage: "cli.ts <search-sessions|search-md|search-knowledge|status|reindex> [args]",
         }),
       );
       process.exit(1);

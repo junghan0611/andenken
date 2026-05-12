@@ -27,6 +27,16 @@ import {
 } from "./session-indexer.ts";
 import { chunkOrgFile, shouldIndexOrgFile } from "./org-chunker.ts";
 import type { OrgChunk } from "./org-chunker.ts";
+import {
+  chunkMdContent,
+  parseFrontmatter,
+  parseDenoteId,
+  getMdFolder,
+  findMdFiles,
+  mdChunkToStoreRow,
+  INDEXABLE_MD_FOLDERS,
+  MD_SOURCE_LABEL,
+} from "./md-chunker.ts";
 import { WriteBuffer, type BufferedRecord } from "./write-buffer.ts";
 import {
   rrfFusion,
@@ -405,6 +415,142 @@ async function testOrgChunker() {
     !headingTexts.includes("Hidden") && !headingTexts.includes("Speech") && !headingTexts.includes("Archived") && !headingTexts.includes("Trace") && headingTexts.includes("Visible"),
     "excluded headings are omitted from heading tier",
   );
+}
+
+async function testMdChunker() {
+  section("MD Chunker (issue #8)");
+
+  // --- parseFrontmatter ---
+  const yaml = `---
+title: "테스트 노트"
+description: "샘플 설명"
+date: 2024-01-15T09:00:00+09:00
+tags: ["notes", "test", "md"]
+categories: ["Noname"]
+draft: false
+---
+
+## 본문 시작
+
+본문 텍스트.
+`;
+  const { frontmatter, bodyOffset } = parseFrontmatter(yaml);
+  assert(frontmatter.title === "테스트 노트", "YAML title parsed");
+  assert(frontmatter.description === "샘플 설명", "YAML description parsed");
+  assert(
+    frontmatter.tags.length === 3 && frontmatter.tags[0] === "notes",
+    "YAML tags parsed as list",
+  );
+  assert(frontmatter.draft === false, "YAML draft=false parsed");
+  assert(bodyOffset > 0, "bodyOffset positive when frontmatter present");
+
+  // --- parseDenoteId ---
+  assert(
+    parseDenoteId("/garden/notes/20211117T190700.md") === "20211117T190700",
+    "denote-id parsed from filename",
+  );
+  assert(
+    parseDenoteId("/garden/notes/just-a-slug.md") === undefined,
+    "non-denote filename returns undefined",
+  );
+
+  // --- getMdFolder ---
+  assert(
+    getMdFolder("/home/u/repos/gh/notes/content/notes/foo.md", "/home/u/repos/gh/notes/content") === "notes",
+    "getMdFolder picks first segment after root",
+  );
+
+  // --- INDEXABLE_MD_FOLDERS contract ---
+  assert(
+    INDEXABLE_MD_FOLDERS.has("notes")
+      && INDEXABLE_MD_FOLDERS.has("bib")
+      && INDEXABLE_MD_FOLDERS.has("meta")
+      && INDEXABLE_MD_FOLDERS.has("journal")
+      && INDEXABLE_MD_FOLDERS.has("botlog"),
+    "INDEXABLE_MD_FOLDERS includes all five baseline folders",
+  );
+  assert(
+    !INDEXABLE_MD_FOLDERS.has("images")
+      && !INDEXABLE_MD_FOLDERS.has("talks")
+      && !INDEXABLE_MD_FOLDERS.has("test")
+      && !INDEXABLE_MD_FOLDERS.has("tmp"),
+    "INDEXABLE_MD_FOLDERS excludes images/talks/test/tmp",
+  );
+
+  // --- chunkMdContent: basic body ---
+  const body = yaml + "본문은 충분히 길어야 MIN_CHUNK_CHARS=40을 통과합니다. 한글 텍스트를 채워서 미니멈 길이를 넘기는 샘플 본문.";
+  const chunks = chunkMdContent(
+    body,
+    "/garden/notes/20211117T190700.md",
+    "notes",
+  );
+  assert(chunks.length >= 1, `chunkMdContent emits ≥1 chunk (got ${chunks.length})`);
+  if (chunks.length > 0) {
+    const c = chunks[0];
+    assert(c.filePath === "/garden/notes/20211117T190700.md", "chunk filePath preserved");
+    assert(c.folder === "notes", "chunk folder=notes");
+    assert(c.denoteId === "20211117T190700", "chunk denoteId extracted");
+    assert(typeof c.hash === "string" && c.hash.length === 64, "chunk has sha256 hash");
+    assert(c.frontmatter.title === "테스트 노트", "chunk preserves frontmatter title");
+    assert(c.text.includes("Title: 테스트 노트"), "chunk text enriched with title prefix");
+    assert(c.text.includes(c.rawText), "chunk.text contains chunk.rawText");
+  }
+
+  // --- chunkMdContent: heading-bounded segments ---
+  const hierarchyBody = yaml.replace("## 본문 시작", "## 본문 시작\n\n초반 텍스트가 길게 채워져 있다. 본문 첫 단락이다. 청크 분리 테스트.\n\n## 두 번째 섹션\n\n두 번째 섹션 본문도 충분히 길게 채워진 텍스트. 청크 분리 테스트 케이스 통과를 위한 분량.");
+  const hier = chunkMdContent(hierarchyBody, "/g/notes/a.md", "notes");
+  const hierTitles = hier.map((c) => c.hierarchy.join(" > "));
+  assert(
+    hierTitles.some((h) => h.includes("본문 시작"))
+      && hierTitles.some((h) => h.includes("두 번째 섹션")),
+    "hierarchy captures H2 section titles",
+  );
+
+  // --- chunkMdContent: fenced code block preserved across heading-shaped lines ---
+  const fenced = `---
+title: "Code"
+tags: []
+---
+
+## A
+
+\`\`\`
+# this is shell comment not a heading
+echo "x"
+\`\`\`
+
+본문 텍스트가 충분히 길게 들어가서 청크 최소 길이를 통과합니다.
+`;
+  const fchunks = chunkMdContent(fenced, "/g/notes/b.md", "notes");
+  assert(
+    fchunks.length >= 1
+      && fchunks.every((c) => c.rawText.indexOf("# this is shell comment") < 0
+        || !c.hierarchy.some((h) => h === "this is shell comment not a heading")),
+    "fenced code block heading-shaped lines are not treated as headings",
+  );
+
+  // --- chunkMdContent: tiny body skipped ---
+  const tiny = `---
+title: "Tiny"
+tags: []
+---
+ok`;
+  const tinyChunks = chunkMdContent(tiny, "/g/notes/c.md", "notes");
+  assert(tinyChunks.length === 0, `tiny body skipped via MIN_CHUNK_CHARS (got ${tinyChunks.length})`);
+
+  // --- mdChunkToStoreRow shape ---
+  if (chunks.length > 0) {
+    const row = mdChunkToStoreRow(chunks[0], [0, 0, 0], "2024-01-15T00:00:00.000Z");
+    assert(row.source === MD_SOURCE_LABEL, 'storeRow.source = "md"');
+    assert(row.role === "", "storeRow.role empty for md");
+    assert(row.sessionFile === chunks[0].filePath, "storeRow.sessionFile = md file path");
+    assert(row.project === "notes", "storeRow.project = folder");
+    assert(typeof row.metadata.hash === "string", "storeRow.metadata.hash present");
+  }
+
+  // --- findMdFiles smoke (no-throw on a non-existent root) ---
+  const nope = findMdFiles("/tmp/__definitely_not_here__");
+  assert(Array.isArray(nope) && nope.length === 0, "findMdFiles returns [] for missing root");
 }
 
 async function testRetriever() {
@@ -826,6 +972,7 @@ if (mode === "unit" || mode === "all") {
   await testSessionIndexer();
   await testSessionIndexerSanitize();
   await testOrgChunker();
+  await testMdChunker();
   await testRetriever();
   await testWriteBuffer();
   await testVectorStore();

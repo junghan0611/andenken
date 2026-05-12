@@ -61,7 +61,71 @@ GLG 방침 (2026-05-12):
   query expansion / 별도 실행면 운영 없음. provider/dim/store contract만
   명시적으로 유지.
 
-### B0 — qmd 흔적 제거 (단일 commit)
+### 진행 현황 (2026-05-12)
+
+- **B0 완료** — commit `0831487` `chore(qmd): retire qmd path; split org from agent-facing surface (#8)`. 신규 qmd 파일 7개 삭제 + test.ts/run.sh/tsconfig 수술 + 4개 문서 정렬. 2,661줄 제거, 317줄 추가. tsc 클린 + unit 71/0/0.
+- **B1a 완료** — md 트랙 골격이 들어왔다. commit pending.
+  - 신규 `md-chunker.ts` (~470줄). Hugo frontmatter strip + heading-bounded segmentation + 코드블록 보존 + per-folder 크기 정책 + 12K hard guard + sha256 chunk hash + denote-id 자동 추출.
+  - `store.ts`: `getMdDbPath()` 추가. md.lance는 sessions/org와 별도 LanceDB 파일.
+  - `embedding-provider.ts`: `createMdProviderFromEnv()` — `ANDENKEN_MD_*` namespace, sessions와 동일한 OpenRouter 8B/4096d 권장. legacy fallback 없음.
+  - `indexer.ts`: `indexMd(force)` (sessions 미러 + paid-remote gate), `MdFileManifest`, `collectMdStatus()`, dispatch `case "md":`, compact/cleanup/verify에 md 분기, status 출력에 md 라인 추가, org는 "disabled in production" 라벨.
+  - `cli.ts`: `searchMd(query, limit)` + `search-md` dispatch + `mdDbPath`. hybrid + dictcli expand + MMR. recency half-life 90d (org와 동일, garden은 시간순이 아님).
+  - `run.sh`: `index:md` / `sync:md` / `search:md` 명령군 + help 텍스트. compact/cleanup/verify target에 md 추가.
+  - `tsconfig.json`: `md-chunker.ts` 등재.
+  - `test.ts`: `testMdChunker()` (27 assertions — frontmatter / denote-id / folder / hierarchy / fenced code / tiny skip / storeRow / findMdFiles smoke).
+  - 검증: tsc 클린, unit 98/0/0, real garden `findMdFiles` 2,210 files (bib 678 / botlog 63 / journal 94 / meta 538 / notes 837), `./run.sh status`에 `📝 MD: not indexed yet` 신규 라인.
+
+### B1b — smoke index (다음 단계)
+
+env 셋업 (GLG가 `~/.env.local`에 추가, sessions와 동일 OpenRouter key 재사용 가능):
+
+```bash
+ANDENKEN_MD_PROVIDER=openrouter
+ANDENKEN_MD_ENDPOINT=https://openrouter.ai/api
+ANDENKEN_MD_MODEL=qwen/qwen3-embedding-8b
+ANDENKEN_MD_DIMENSIONS=4096
+ANDENKEN_MD_API_KEY=$OPENROUTER_API_KEY
+ANDENKEN_MD_PAID_REMOTE=1
+ANDENKEN_MD_PRICE_PER_M_TOKENS=0.01
+```
+
+smoke (작은 부분집합부터):
+
+```bash
+# 1. 가벼운 smoke — botlog (63 files)만 임시로 index. 환경변수로 컨트롤할 수 있게 추후 --folder 플래그 추가하거나, 임시로 ANDENKEN_MD_ROOT을 botlog 하위로 좁히는 방식.
+./run.sh status                      # confirm "📝 MD: not indexed yet" still
+./run.sh index:md                    # incremental, ~2.2K files all at once is also OK
+./run.sh search:md "보편 학문"        # smoke query
+./run.sh search:md "피투성"
+./run.sh search:md "어쏠로지"
+./run.sh search:md "바네바 부시"
+./run.sh verify md
+```
+
+대표 쿼리 10개:
+
+```text
+보편 학문
+피투성
+어쏠로지
+바네바 부시
+제프 베이조스
+andenken openclaw
+entwurf 시간축
+일일일생
+2026-05-11 andenken
+디지털가든 메타휴먼
+```
+
+검수 기준:
+
+- Korean concept recall: notes / meta / botlog가 맞게 뜨는가
+- person/work recall: bib + related notes가 연결되는가
+- bilingual mixed query: Korean + English proper noun이 함께 살아남는가
+- latency: OpenRouter 8B는 query 1회 200~600ms 예상 (sessions와 동일)
+- cost: full 2,210 files 임베딩 비용 추정. chunks/file 평균을 보고 결정.
+
+### B0 — qmd 흔적 제거 (단일 commit) — 완료
 
 미커밋 잔여 + 신규 qmd 파일 + 문서 qmd 흔적을 한 commit으로 정리한다.
 
@@ -160,25 +224,11 @@ knowledge_search({ query, source: "md" })
 
 #### 진행 순서
 
-1. **B0 commit** (qmd 흔적 제거) → 단일 commit `chore(qmd): retire qmd path`
-2. **B1a** — 새 파일 골격: `md-chunker.ts`, `md-indexer.ts`, store 분기, manifest, env loader. provider는 sessions OpenRouter 어댑터를 그대로 재사용 (env namespace만 다름).
-3. **B1b** — smoke index (notes 20~50 / bib 10~30 / meta 20~50 / botlog 10~20 / journal 5~10). 대표 쿼리 10개:
-
-   ```text
-   보편 학문
-   피투성
-   어쏠로지
-   바네바 부시
-   제프 베이조스
-   andenken openclaw
-   entwurf 시간축
-   일일일생
-   2026-05-11 andenken
-   디지털가든 메타휴먼
-   ```
-
-4. **B1c** — full index (`2,218` md / 27.2MB). verify dim 4096d / row count consistency / duplicate ID 검사 / orphan 검사.
-5. **B1d** — `knowledge_search({ source: "md" })` 노출 (선택).
+1. **B0** (qmd 흔적 제거) — 완료. commit `0831487`.
+2. **B1a** — md 트랙 골격. 완료. commit pending (이 작업).
+3. **B1b** — smoke index. ANDENKEN_MD_* env 셋업 후 `./run.sh index:md` 실행. 위 10개 대표 쿼리로 search:md 품질 점검.
+4. **B1c** — full index 안정화. verify dim 4096d / row count / orphan / duplicate ID 검사. 비용 정산.
+5. **B1d** — `knowledge_search({ source: "md" })` MCP/registerTool 노출 + agent-config `semantic-memory` 스킬에 md 트랙 안내.
 
 #### 비목표 / 금지
 

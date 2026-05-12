@@ -28,14 +28,16 @@ Usage: ./run.sh <command> [args]
 
 === Indexing ===
   index:sessions [--force]    Index pi + Claude Code sessions
-  index:org [--force]         Index org-mode knowledge base
-  compact [sessions|org]      Defragment LanceDB
-  cleanup [sessions|org]      Dedup + orphan removal + manifest repair + compact
+  index:md [--force]          Index public garden Markdown (issue #8)
+  index:org [--force]         Index org-mode KB (disabled in production — upstream R&D)
+  sync:md                     md incremental (alias for index:md without --force)
+  compact [sessions|md|org]   Defragment LanceDB
+  cleanup [sessions|md|org]   Dedup + orphan removal + manifest repair + compact
   cleanup [target] --dry-run  Dry-run (report only)
-  verify [sessions|org|all]   Post-indexing integrity check
+  verify [sessions|md|org|all] Post-indexing integrity check
   status                      Show index statistics (text)
   status:json                 Show index statistics (machine-readable JSON)
-  estimate [sessions|org|all] Dry-run cost estimate (Gemini-priced, legacy)
+  estimate [sessions|md|org|all] Dry-run cost estimate (Gemini-priced, legacy)
   estimate:sessions [--full]  PR-B: sessions OpenRouter 8B estimate (API 0)
                               default = INCREMENTAL (manifest-driven)
                               --full  = whole corpus
@@ -53,8 +55,9 @@ Usage: ./run.sh <command> [args]
   rebuild:incremental         ❌ DEPRECATED (mixed sessions+org)
 
 === Search ===
-  search <query> [--limit N]  Search sessions
-  knowledge <query> [--limit N]  Search knowledge base
+  search <query> [--limit N]     Search sessions
+  search:md <query> [--limit N]  Search md (public garden) — issue #8
+  knowledge <query> [--limit N]  Search knowledge base (org — disabled in production)
 
 === Test ===
   test                        All tests (unit + integration)
@@ -109,6 +112,10 @@ case "${1:-help}" in
   # === Index ===
   index:sessions)
     shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts sessions "$@" ;;
+  index:md)
+    shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts md "$@" ;;
+  sync:md)
+    shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts md "$@" ;;
   index:org)
     shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts org "$@" ;;
   compact)
@@ -125,6 +132,8 @@ case "${1:-help}" in
   # === Search ===
   search)
     shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx cli.ts search-sessions "$@" ;;
+  search:md)
+    shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx cli.ts search-md "$@" ;;
   knowledge)
     shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx cli.ts search-knowledge "$@" ;;
 

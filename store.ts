@@ -56,6 +56,15 @@ export function getOrgDbPath(): string {
   return path.join(getDataDir(), "org.lance");
 }
 
+/**
+ * MD track (public garden export) LanceDB path. Separate file from sessions
+ * and org — the three tracks must never share a store even if two of them
+ * happen to use the same dim (sessions and md both run 4096d today).
+ */
+export function getMdDbPath(): string {
+  return path.join(getDataDir(), "md.lance");
+}
+
 export class VectorStore {
   private db: LanceDB.Connection | null = null;
   private table: LanceDB.Table | null = null;

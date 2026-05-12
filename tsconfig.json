@@ -21,6 +21,7 @@
     "session-window.ts",
     "retriever.ts",
     "org-chunker.ts",
+    "md-chunker.ts",
     "indexer.ts"
   ],
   "exclude": ["test.ts", "benchmark.ts", "node_modules"]

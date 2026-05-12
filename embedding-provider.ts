@@ -801,6 +801,54 @@ export function createSessionProviderFromEnv(): EmbeddingProvider | null {
 }
 
 /**
+ * Create the MD-track embedding provider from `ANDENKEN_MD_*`.
+ *
+ * Mirrors `createSessionProviderFromEnv` exactly — the md track is the
+ * second "live, agent-facing" axis and uses the same provider machinery as
+ * sessions. Namespaced env so a misconfiguration cannot bleed across tracks.
+ * NEVER falls back to legacy `ANDENKEN_VLLM_*` (same rule as sessions).
+ *
+ * Recommended config (OpenRouter Qwen3-Embedding-8B, 4096d, paid-remote):
+ *
+ *     ANDENKEN_MD_PROVIDER=openrouter
+ *     ANDENKEN_MD_ENDPOINT=https://openrouter.ai/api
+ *     ANDENKEN_MD_MODEL=qwen/qwen3-embedding-8b
+ *     ANDENKEN_MD_DIMENSIONS=4096
+ *     ANDENKEN_MD_API_KEY=<openrouter key>
+ *     ANDENKEN_MD_PAID_REMOTE=1
+ *     ANDENKEN_MD_PRICE_PER_M_TOKENS=0.01
+ */
+export function createMdProviderFromEnv(): EmbeddingProvider | null {
+  const read = (suffix: string) =>
+    readEnvWithFileFallback("ANDENKEN_MD_" + suffix);
+  const rawType = read("PROVIDER");
+  const providerType = resolveProviderType(rawType);
+
+  // Fail-fast on EXPLICIT-but-INVALID config (mirrors sessions/org).
+  if (rawType && !providerType) return null;
+
+  if (providerType === "vllm" || providerType === "openrouter") {
+    return buildVllmFromNamespacedEnv(
+      read,
+      providerType === "openrouter" ? "md:openrouter" : "md:vllm",
+    );
+  }
+  if (providerType === "gemini") {
+    const apiKey = loadGeminiKey();
+    if (!apiKey) return null;
+    return new GeminiProvider({
+      apiKey,
+      model: read("GEMINI_MODEL") ?? "gemini-embedding-2-preview",
+      dimensions: 768,
+    });
+  }
+
+  // MD namespace ABSENT → null. No legacy fallback (md is a new track; we
+  // never want it picking up an old org-shaped vLLM endpoint by accident).
+  return null;
+}
+
+/**
  * Create the ORG-track embedding provider from `ANDENKEN_ORG_*`.
  *
  * Falls back to the legacy `ANDENKEN_VLLM_*` reader when the ORG namespace
