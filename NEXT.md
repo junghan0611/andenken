@@ -138,6 +138,74 @@ GPT non-blocker 2건:
 - `./run.sh estimate:md` 실측: 2210 files / 10,297 chunks / avg 4.7/file / ~9.7M tokens (CJK-weighted) / **$0.097** estimated
 - preset 로그: `📋 md:openrouter preset: qwen/qwen3-embedding-8b (4096d, batch=100)`
 
+### B1a-rev2 — gpt-5.5 2차 리뷰 + 가든 품질 감사 반영 (2026-05-12, commit pending)
+
+분신(gpt-5.4, cwd=`~/repos/gh/notes`) 가든 품질 감사 결과 + gpt-5.5 2차 리뷰
+세 항목을 한 라운드에 정리.
+
+#### 가든 품질 감사 결과 (분신 task-id 34796430)
+
+| 폴더 | files | body p10 | p50 | p90 | max | stub<200 | oversize>20K |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| notes | 837 | 860 | 3,292 | 14,501 | 290K | 0 | 49 |
+| bib | 678 | 1,272 | 4,946 | 17,751 | 178K | 0 | 51 |
+| meta | 538 | 1,065 | 3,498 | 10,448 | 42K | 0 | 13 |
+| journal | 94 | 2,547 | 10,248 | 39,501 | 71K | 0 | 25 |
+| botlog | 63 | 3,480 | 10,707 | 33,536 | 54K | 0 | 17 |
+
+핵심 관찰:
+
+- **strict stub은 0건** — Hugo export가 description + [!abstract] 자동 주입.
+  실전 stub은 sanitized body < 250 (notes 20 / bib 1 / meta 6).
+- **bib ToC dump**: 목차 헤딩 112건, severe (페이지번호 나열) 3건.
+- **영→한 병치 중복** (영문 단락 + 한국어 단락 반복): notes 146 / bib 74 / meta 33.
+- **journal CITATIONS tail** (`## CITATIONS` 이후 citeproc anchor 다수): journal에 가장 심함, anchor 30+개짜리 다수.
+- **footnote/bibliography tail**: notes/bib에도 파일 후반부에 붙는 경우 多.
+- **heading-only shell**: notes 6 / meta 2 / journal 1.
+
+분신 권장 sanitization 정책 (high-impact / low-risk만 이번 라운드에 반영):
+
+| 항목 | 처리 | 다음 라운드 |
+|---|---|---|
+| `noembed` / `tts` frontmatter opt-out | **반영** (NOEMBED_TAGS set) | |
+| `MIN_CHUNK_CHARS` 40 → 100 | **반영** | |
+| `MIN_FILE_BODY_CHARS = 250` | **반영** (sanitize 후 250 미만 skip) | |
+| `## CITATIONS` / `## BIBLIOGRAPHY` / `## REFERENCES` / `## RELATED-NOTES` tail strip (50% char 이후만) | **반영** (`stripBibliographyTail`) | |
+| 영→한 병치 collapse | — | 패턴 매칭 false positive 위험 |
+| 책 ToC dump 패턴 제거 | — | 패턴 정확도 추가 검증 필요 |
+| heading-only shell skip | — | 임팩트 작음 |
+
+#### gpt-5.5 2차 리뷰 (3개)
+
+| # | 지적 | 처리 |
+|---|---|---|
+| 1 | metadata (title/tags)가 LanceDB FTS에 안 잡힘. 현재 chunk.text=body-only이므로 title/tag 쿼리 약함 | **반영** — MdChunk를 `embeddingInput` (body-only, vector용) + `text` (Title+Tags+body, FTS용)으로 분리. `mdChunkToStoreRow`는 chunk.text를 store row로 넣음. embedding 비용은 그대로 (body-only), FTS surface만 enriched. |
+| 2 | searchMd에 short CJK fallback 없음 — 1-2 char Hangul 쿼리 0-hit 가능 | **반영** — searchSessions 동일 패턴(getShortCJKTokens + substringSearch + RR interleave) 적용 |
+| 3 | gate 메시지 `./run.sh estimate md`는 legacy. 실제는 `./run.sh estimate:md` | **반영** |
+
+#### 측정된 효과
+
+| 지표 | 1차 (rev1) | 2차 (rev2) | 변화 |
+|---|---:|---:|---:|
+| files | 2,210 | 2,192 | -18 (stub 제거) |
+| chunks | 10,297 | **10,119** | -178 |
+| journal chunks | 1,009 | **936** | -73 (CITATIONS tail strip 정상 작동) |
+| notes files (chunks 출력) | 837 | 823 | -14 (stub) |
+| meta files | 538 | 535 | -3 |
+| bib files | 678 | 677 | -1 |
+| cost (estimated) | $0.0974 | **$0.0956** | -1.9% |
+
+#### 수정 파일
+
+| 파일 | 변경 |
+|---|---|
+| `md-chunker.ts` | NOEMBED_TAGS / MIN_CHUNK_CHARS 100 / MIN_FILE_BODY_CHARS 250 / stripBibliographyTail (char-position 50%) / MdChunk에 `embeddingInput` 필드 분리 / buildFtsText (Title+Tags prefix) / mdChunkToStoreRow는 chunk.text(enriched)를 row.text로 |
+| `indexer.ts` | `provider.embedDocumentBatch(chunks.map(c => c.embeddingInput))` / estimateMd도 embeddingInput 기반 / gate 메시지 `./run.sh estimate:md`로 수정 |
+| `cli.ts` | searchMd에 short CJK fallback (sessions 패턴) |
+| `test.ts` | embedding/FTS 분리 검증 / noembed opt-out / CITATIONS tail strip / bib early bibliography 보존 |
+
+검증: tsc 클린, unit **125/0/0** (+10).
+
 ### B1b — 본 임베딩 (env confirm 후 즉시 실행)
 
 paid-remote gate 통과 필요 (`ANDENKEN_ALLOW_PAID_FULL_REBUILD=1`):

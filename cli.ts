@@ -450,6 +450,42 @@ async function searchMd(query: string, limit: number): Promise<void> {
   const vectorResults = await store.search(queryVector, candidates, 0.05);
   const ftsResults = await store.fullTextSearch(bm25Query, candidates);
 
+  // gpt-5.5 review #2 (2026-05-12): short-CJK substring fallback.
+  // LanceDB FTS drops 1-2 char Hangul/CJK tokens below the match threshold,
+  // so queries like "힣", "맘", "갑" return 0 FTS hits even when the body
+  // clearly contains the term. Mirrors the searchSessions path: pull short
+  // CJK runs from the query, hit substringSearch(), interleave into the
+  // FTS bucket so RRF/weighted merge keeps them in rank order.
+  //
+  // No source filter — md store rows already carry source="md" by the
+  // store-row adapter, and there is no in-track variant to filter on.
+  const shortTokens = getShortCJKTokens(query);
+  if (shortTokens.length > 0) {
+    const ftsIds = new Set(ftsResults.map((r) => r.id));
+    const subLists = await Promise.all(
+      shortTokens.map((t) => store.substringSearch(t, candidates)),
+    );
+    const subFlat: typeof ftsResults = [];
+    const subSeen = new Set<string>();
+    for (const list of subLists) {
+      for (const r of list) {
+        if (ftsIds.has(r.id) || subSeen.has(r.id)) continue;
+        subFlat.push(r);
+        subSeen.add(r.id);
+      }
+    }
+    if (subFlat.length > 0) {
+      const ftsCopy = ftsResults.slice();
+      ftsResults.length = 0;
+      let i = 0;
+      let j = 0;
+      while (i < ftsCopy.length || j < subFlat.length) {
+        if (i < ftsCopy.length) ftsResults.push(ftsCopy[i++]);
+        if (j < subFlat.length) ftsResults.push(subFlat[j++]);
+      }
+    }
+  }
+
   // gpt-5.5 review #8 + GLG decision (2026-05-12): no recency decay for md.
   // Garden is not chronological — a 2021 long-form note is as relevant as a
   // 2025 one when the query asks for the concept itself. applyRecencyDecay

@@ -545,7 +545,7 @@ async function indexMd(force: boolean) {
     if (process.env.ANDENKEN_ALLOW_PAID_FULL_REBUILD !== "1") {
       throw new Error(
         "MD full index against paid remote endpoint is gated.\n" +
-          "  Run `./run.sh estimate md` first to size cost, then set\n" +
+          "  Run `./run.sh estimate:md` first to size cost, then set\n" +
           "  ANDENKEN_ALLOW_PAID_FULL_REBUILD=1 to confirm and re-run.\n" +
           `  Trigger: ${force ? "--force" : "first full run (no DB + no manifest)"}.`,
       );
@@ -638,7 +638,14 @@ async function indexMd(force: boolean) {
         return;
       }
 
-      const vectors = await provider.embedDocumentBatch(chunks.map((c) => c.text));
+      // gpt-5.5 review #1 (2026-05-12): vector input is body-only
+      // (`embeddingInput`). The FTS-side `text` carries Title/Tags + body
+      // and is stored in `mdChunkToStoreRow` so LanceDB BM25 over the
+      // `text` column can recover title/tag-keyed queries. Vector vs FTS
+      // surfaces now carry deliberately different content.
+      const vectors = await provider.embedDocumentBatch(
+        chunks.map((c) => c.embeddingInput),
+      );
       await wb.add(
         chunks.map((c, j) => mdChunkToStoreRow(c, vectors[j], mtimeIso)),
       );
@@ -1659,9 +1666,13 @@ async function estimateMd() {
     if (!byFolder[folder]) byFolder[folder] = { files: 0, chunks: 0, weightedChars: 0 };
     byFolder[folder].files++;
     byFolder[folder].chunks += chunks.length;
+    // Cost is driven by what the embedding API receives, which is the
+    // body-only `embeddingInput`. The FTS-side `text` is larger (Title +
+    // Tags prefix) but never sent to the API, so it does not enter the
+    // token sum here.
     for (const c of chunks) {
-      totalChars += c.text.length;
-      const w = estimateStringChars(c.text);
+      totalChars += c.embeddingInput.length;
+      const w = estimateStringChars(c.embeddingInput);
       totalWeightedChars += w;
       byFolder[folder].weightedChars += w;
     }

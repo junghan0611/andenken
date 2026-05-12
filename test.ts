@@ -517,10 +517,11 @@ tags = ["a", "b"]
     '"hello world" (11 chars) → 3 tokens',
   );
 
-  // --- chunkMdContent: basic body, body-only embedding text (no prefix) ---
-  const body =
-    yaml +
-    "본문은 충분히 길어야 MIN_CHUNK_CHARS=40을 통과합니다. 한글 텍스트를 채워서 미니멈 길이를 넘기는 샘플 본문 한 단락.";
+  // --- chunkMdContent: basic body + FTS-vs-embedding split (gpt-5.5 #1) ---
+  // Build a body big enough to clear MIN_FILE_BODY_CHARS=250 with margin.
+  const filler =
+    "본문은 충분히 길어야 MIN_FILE_BODY_CHARS=250 임계를 통과합니다. 한글 텍스트를 충분히 채워서 미니멈을 넘기는 샘플 본문. ";
+  const body = yaml + filler.repeat(5);
   const chunks = chunkMdContent(
     body,
     "/garden/notes/20211117T190700.md",
@@ -534,22 +535,103 @@ tags = ["a", "b"]
     assert(c.denoteId === "20211117T190700", "chunk denoteId extracted");
     assert(typeof c.hash === "string" && c.hash.length === 64, "chunk has sha256 hash");
     assert(c.frontmatter.title === "테스트 노트", "chunk frontmatter preserved");
+
+    // FTS-side text: Title + Tags + body
+    assert(c.text.startsWith("Title:"), "chunk.text starts with Title: prefix (FTS-side)");
+    assert(c.text.includes("Tags:"), "chunk.text contains Tags: line (FTS-side)");
+    assert(c.text.includes(c.embeddingInput), "chunk.text contains chunk.embeddingInput");
+    // Embedding-side: body only, no prefix
     assert(
-      !c.text.includes("Title:") && !c.text.includes("Description:") && !c.text.includes("Path:"),
-      "chunk.text is body-only — no Title/Description/Path prefix (OpenClaw style)",
+      !c.embeddingInput.includes("Title:") && !c.embeddingInput.includes("Tags:"),
+      "chunk.embeddingInput is body-only — no prefix (OpenClaw style)",
     );
-    assert(c.text === c.rawText, "chunk.text === chunk.rawText (no enrichment)");
+    assert(c.embeddingInput === c.rawText, "chunk.embeddingInput === chunk.rawText");
+    // FTS surface is strictly larger than vector surface because of the prefix.
+    assert(c.text.length > c.embeddingInput.length, "FTS text > embedding input");
     assert(c.startLine > 1, `chunk.startLine offset past frontmatter (got ${c.startLine})`);
   }
 
-  // --- chunkMdContent: tiny body skipped ---
+  // --- chunkMdContent: tiny body skipped (MIN_FILE_BODY_CHARS = 250) ---
   const tiny = `---
 title: "Tiny"
 tags: []
 ---
 ok`;
   const tinyChunks = chunkMdContent(tiny, "/g/notes/c.md", "notes");
-  assert(tinyChunks.length === 0, `tiny body skipped via MIN_CHUNK_CHARS (got ${tinyChunks.length})`);
+  assert(tinyChunks.length === 0, `tiny body skipped via MIN_FILE_BODY_CHARS (got ${tinyChunks.length})`);
+
+  // --- chunkMdContent: noembed tag opt-out ---
+  const optout = `---
+title: "Hidden"
+tags: ["noembed"]
+---
+
+본문이 충분히 길어도 noembed 태그면 스킵된다. 가든 페이지 단위 opt-out. 한국어 본문 길이 보장.`.repeat(2);
+  const optoutChunks = chunkMdContent(optout, "/g/notes/h.md", "notes");
+  assert(
+    optoutChunks.length === 0,
+    `noembed tag → 0 chunks (got ${optoutChunks.length})`,
+  );
+
+  // --- chunkMdContent: bibliography tail stripped (journal CITATIONS shape) ---
+  //
+  // The tail strip only fires when the heading sits past the 50% char mark
+  // of the sanitized body — bib pages that LEAD with BIBLIOGRAPHY are
+  // preserved. We size the body large enough for the tail to be clearly
+  // late.
+  const longParas = `${"한국어 본문 단락의 임베딩 가치가 있는 실제 컨텐츠. ".repeat(40)}\n\n${"두 번째 단락도 충분히 길게 채워서 본문이 50% 이상 차지하도록 만든다. ".repeat(40)}`;
+  const journal = `---
+title: "Journal Entry"
+tags: ["journal"]
+---
+
+${longParas}
+
+## CITATIONS
+
+<a href="#citeproc_bib_item_1">citeproc anchor 1</a>
+<a href="#citeproc_bib_item_2">citeproc anchor 2</a>
+<a href="#citeproc_bib_item_3">citeproc anchor 3</a>
+
+## BIBLIOGRAPHY
+
+bibliography entry 1
+bibliography entry 2
+`;
+  const journalChunks = chunkMdContent(journal, "/g/journal/x.md", "journal");
+  assert(
+    journalChunks.length >= 1,
+    `journal body still produces chunks after tail strip (got ${journalChunks.length})`,
+  );
+  assert(
+    journalChunks.every((c) =>
+      !c.embeddingInput.includes("citeproc_bib_item") &&
+      !c.embeddingInput.includes("bibliography entry"),
+    ),
+    "CITATIONS / BIBLIOGRAPHY tail stripped from embeddingInput",
+  );
+
+  // --- chunkMdContent: bibliography in early half is preserved (bib pages) ---
+  // A bib page might lead with `## BIBLIOGRAPHY` directly under the
+  // frontmatter (the entire body IS the bibliography). The strip must NOT
+  // eat that content.
+  const bibTop = `---
+title: "Book"
+tags: ["bib"]
+---
+
+## BIBLIOGRAPHY
+
+매우 길고 의미 있는 참고문헌 블록. ${"실제 인용 내용을 포함한 참고문헌 텍스트. ".repeat(50)}
+
+## 그 다음 섹션
+
+후속 본문도 충분히 길게 채워서 BIBLIOGRAPHY 헤딩이 전체의 절반 이전에 등장하도록 만든다. ${"후속 본문 채우기. ".repeat(30)}`;
+  const bibChunks = chunkMdContent(bibTop, "/g/bib/y.md", "bib");
+  assert(
+    bibChunks.some((c) => c.embeddingInput.includes("참고문헌")),
+    "BIBLIOGRAPHY heading in early half preserved (bib pages)",
+  );
 
   // --- chunkMdContent: large body produces multiple chunks via OpenClaw budget ---
   // notes folder: 1000 tokens × 4 = 4000 chars budget for Latin; with CJK
@@ -596,6 +678,9 @@ ${para}
     assert(row.project === "notes", "storeRow.project = folder");
     assert(typeof row.metadata.hash === "string", "storeRow.metadata.hash present");
     assert(!row.metadata.hierarchy, "storeRow.metadata.hierarchy removed (heading-aware design retired)");
+    // gpt-5.5 #1: store row text is the enriched FTS-side string.
+    assert(row.text === chunks[0].text, "storeRow.text = chunk.text (FTS-enriched)");
+    assert(row.text.startsWith("Title:"), "storeRow.text carries Title prefix for FTS");
   }
 
   // --- findMdFiles smoke (no-throw on a non-existent root) ---

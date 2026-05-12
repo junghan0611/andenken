@@ -105,10 +105,31 @@ const FOLDER_CHUNK_TOKENS: Record<
 const HARD_MAX_CHARS = 12000;
 
 /**
- * Minimum body length for a chunk to count. Drops chunks that contain only
- * whitespace, a heading line, or a stray frontmatter remnant.
+ * Minimum chars in a single chunk's body. Drops thin chunks that contain
+ * only whitespace, a heading line, or a stray frontmatter remnant. Tuned
+ * up from 40 to 100 after the 2026-05-12 garden audit (gpt-5.4 entwurf
+ * recommendation): 40 was admitting trivial chunks under the new
+ * OpenClaw token-budget chunker.
  */
-const MIN_CHUNK_CHARS = 40;
+const MIN_CHUNK_CHARS = 100;
+
+/**
+ * Minimum sanitized body length for a file to be indexable at all.
+ * Garden export injects a `description` + `[!abstract]` block into every
+ * page, so strict frontmatter+body < 200 catches zero files in practice;
+ * the real abstract-only stubs cluster around the sanitized 250-char mark.
+ * Drop them before they reach the chunker — they produce one ~150 char
+ * chunk and zero retrieval value.
+ */
+const MIN_FILE_BODY_CHARS = 250;
+
+/**
+ * Frontmatter tag values that opt a page out of indexing entirely.
+ * Mirrors org's `noembed` / `tts` exclusion. Currently zero hits in the
+ * garden export (per the 2026-05-12 audit) but kept as the supported
+ * opt-out lever so garden authors can flag a page without code changes.
+ */
+const NOEMBED_TAGS = new Set(["noembed", "tts"]);
 
 const YAML_FRONTMATTER = /^---\s*\n([\s\S]*?)\n---\s*\n?/;
 const TOML_FRONTMATTER = /^\+\+\+\s*\n([\s\S]*?)\n\+\+\+\s*\n?/;
@@ -181,12 +202,24 @@ export interface MdChunk {
   /** Unique id: filePath#chunkIndex. Stable across re-runs of the same file content. */
   id: string;
   /**
-   * Embedding input text. **Body only** — no Title/Description/Path/Tags
-   * prefix. Metadata stays in row metadata. This matches OpenClaw's
-   * chunkMarkdown output exactly.
+   * FTS-side text. Title + Tags + body, so LanceDB BM25 over the `text`
+   * column can recover hits keyed by frontmatter title or tags even when
+   * the body does not repeat them. gpt-5.5 review (2026-05-12) caught
+   * that the previous "body only" design lost title/tag retrieval
+   * because metadata is not in the FTS index path.
+   *
+   * NOT used for embedding. Vectors are computed from `embeddingInput`
+   * (body only) so paid-remote token cost is not inflated by the prefix
+   * and the embedding remains a clean semantic representation of the body.
    */
   text: string;
-  /** Same as text; kept for API symmetry with the predecessor and excerpt readback. */
+  /**
+   * Vector-side text. **Body only** — exactly what OpenClaw's
+   * `chunkMarkdown` would emit. The indexer feeds this to
+   * `provider.embedDocumentBatch`.
+   */
+  embeddingInput: string;
+  /** Same as embeddingInput. Kept for excerpt/display readback. */
   rawText: string;
   filePath: string;
   /** Garden folder: notes / bib / meta / journal / botlog. */
@@ -393,12 +426,25 @@ export function chunkMdContent(
 ): MdChunk[] {
   const { frontmatter, bodyOffset } = parseFrontmatter(content);
 
+  // Opt-out tags: `noembed` / `tts` skip the file entirely. Mirrors org's
+  // exclusion semantics so a garden author has a one-line lever to keep a
+  // page out of retrieval.
+  if (frontmatter.tags.some((t) => NOEMBED_TAGS.has(t.toLowerCase()))) {
+    return [];
+  }
+
   // Body starts at bodyOffset; compute the line offset so chunk line
   // numbers reference the original source file (frontmatter included).
   const headLines =
     bodyOffset > 0 ? content.slice(0, bodyOffset).split("\n").length - 1 : 0;
-  const body = content.slice(bodyOffset);
-  if (!body.trim()) return [];
+  const rawBody = content.slice(bodyOffset);
+  if (!rawBody.trim()) return [];
+
+  // Garden-specific sanitization. Order matters: strip the bibliography
+  // tail BEFORE the MIN_FILE_BODY_CHARS check so a tail-heavy file can
+  // still be dropped if the actual content is too thin.
+  const body = stripBibliographyTail(rawBody);
+  if (body.trim().length < MIN_FILE_BODY_CHARS) return [];
 
   const cfg = FOLDER_CHUNK_TOKENS[folder] ?? FOLDER_CHUNK_TOKENS.default;
   const raw = chunkMarkdownOpenclaw(body, cfg);
@@ -413,7 +459,8 @@ export function chunkMdContent(
     for (const slice of splitOversizeChars(rc.text, HARD_MAX_CHARS)) {
       out.push({
         id: `${filePath}#${idx}`,
-        text: slice,
+        text: buildFtsText(slice, frontmatter),
+        embeddingInput: slice,
         rawText: slice,
         filePath,
         folder,
@@ -428,6 +475,67 @@ export function chunkMdContent(
     }
   }
   return out;
+}
+
+// --- Garden-specific sanitization ---
+
+/**
+ * Strip the trailing bibliography/citations block when it lives in the
+ * latter half of the file. Garden export emits a `## CITATIONS` (or
+ * `## BIBLIOGRAPHY`, or `## REFERENCES`) heading followed by citeproc
+ * HTML anchors and CSL entries. For journal entries in particular, the
+ * tail can be 30+ anchors that dominate BM25 with citation keys nobody
+ * queries for, while inflating embedding cost.
+ *
+ * Rule (conservative, per 2026-05-12 garden audit):
+ *   - find the first matching tail heading at line index >= 50% of body
+ *   - strip from that line to EOF
+ *
+ * The 50% gate protects bib pages whose primary content IS a bibliography
+ * block placed near the top — we never strip those because the heading
+ * appears in the first half.
+ */
+export function stripBibliographyTail(body: string): string {
+  if (body.length < 200) return body;
+  // Match any of the tail headings as the *start* of a line. We use a
+  // multiline regex with a global flag so we can iterate all occurrences
+  // and pick the *earliest* one — once we find the first tail heading we
+  // can strip from there.
+  const TAIL_RE =
+    /(?:^|\n)(##\s+(CITATIONS|BIBLIOGRAPHY|REFERENCES|RELATED-NOTES)\b)/gim;
+  let m: RegExpExecArray | null;
+  let firstTailIdx = -1;
+  while ((m = TAIL_RE.exec(body)) !== null) {
+    // m.index points to the newline (or position 0); add 1 to step past
+    // the newline so the strip cut lands at the start of the heading line.
+    const pos = m.index + (body[m.index] === "\n" ? 1 : 0);
+    if (firstTailIdx === -1 || pos < firstTailIdx) firstTailIdx = pos;
+  }
+  if (firstTailIdx === -1) return body;
+  // Only strip when the tail starts past the 50% char mark of the body.
+  // bib pages that lead with BIBLIOGRAPHY (the actual content) are
+  // preserved — their tail heading sits in the first half.
+  if (firstTailIdx < body.length * 0.5) return body;
+  // Keep everything up to (not including) the tail heading; trim trailing
+  // whitespace so the chunker's line-walk doesn't emit an empty trailer.
+  return body.slice(0, firstTailIdx).replace(/\s+$/, "\n");
+}
+
+/**
+ * FTS-side enrichment. Prepends `Title:` and `Tags:` lines (Hugo
+ * `description` is intentionally omitted — the garden export injects a
+ * formulaic abstract that does not improve retrieval). Falls back to the
+ * raw body when no title/tags exist.
+ *
+ * Only the `text` field uses this; `embeddingInput` stays body-only so
+ * vector embeddings reflect document semantics, not metadata.
+ */
+function buildFtsText(body: string, fm: MdFrontmatter): string {
+  const parts: string[] = [];
+  if (fm.title) parts.push(`Title: ${fm.title}`);
+  if (fm.tags.length > 0) parts.push(`Tags: ${fm.tags.join(", ")}`);
+  if (parts.length === 0) return body;
+  return parts.join("\n") + "\n\n" + body;
 }
 
 // --- OpenClaw chunkMarkdown port ---
@@ -591,6 +699,11 @@ export function mdChunkToStoreRow(
 } {
   return {
     id: chunk.id,
+    // chunk.text is the FTS-side enriched string (Title + Tags + body).
+    // chunk.embeddingInput is the body-only input the indexer passed to
+    // `provider.embedDocumentBatch` to produce `vector`. The store row
+    // therefore carries both signals: vector reflects body semantics,
+    // FTS over `text` recovers title/tag hits.
     text: chunk.text,
     vector,
     sessionFile: chunk.filePath,
