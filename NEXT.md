@@ -46,30 +46,43 @@ Do not:
 - `timestamp range` / `project or cwd` / `session path` 기반의 명시적 조회·rerank surface가 약하면, “어제 한 일”, “이 repo에서 직전에 하던 일”, “담당자 맥락”을 임베딩이 우연히 맞히는 구조가 된다.
 - GLG의 기대는 세션 임베딩이 단순 의미공간이 아니라 **작업 시간축의 연결고리**가 되는 것이다.
 
-### Definition of done
+### Definition of done — sessions only, two-phase
 
-1. **Current capability audit**
-   - `session-indexer.ts`, `store.ts`, `retriever.ts`, `cli.ts`, `index.ts`에서 sessions 검색 surface를 확인한다.
-   - timestamp / project / cwd / sessionFile / lineNumber가 어디까지 저장되고 어디서 버려지는지 표로 정리한다.
+0. **No-code baseline (done by Opus, 2026-05-13)**
+   - 현 surface로 11개 sessions time/project query를 측정했다.
+   - 결과: 대부분 `surface_missing`, semantic sentinel은 통과, `entwurf_task_id`는 `metadata_missing`.
+   - raw JSON: `/tmp/sessions_baseline/T*.json`.
 
-2. **Time/project query baseline — no-code first**
-   - 실제 질문 유형을 최소 8~12개로 만든다.
-   - 예: “어제 andenken에서 한 일”, “2026-05-13 오전 세션 임베딩”, “nixos-config 직전 작업”, “pi-shell-acp 담당자에서 하던 일”.
-   - 먼저 현재 surface로만 측정한다. 코드 수정 전 baseline을 llmlog로 남긴다.
-   - 각 query를 semantic-only, stored-signal constrained, two-step 방식으로 비교한다. 단, constrained 방식은 현재 surface에서 가능한 범위와 필요한 API를 분리해 적는다.
+1. **Phase 1 — valuable without reindex: revive stored signals**
+   - 이미 저장된 `timestamp`, `project`, `role`, `source`, `sessionFile`, `lineNumber`를 검색 surface에서 쓸 수 있게 한다.
+   - 대상 surface: `session_search`, `cli.ts search-sessions`, `store.search/fullTextSearch/substringSearch`, `retriever` 호출부.
+   - 후보 API:
+     - `dateFrom` / `dateTo` — caller가 ISO range로 넘김. andenken은 자연어 시간 파싱을 하지 않는다.
+     - `project` — 현재 저장된 basename 기준 exact/OR filter.
+     - `role` — user / assistant / compaction filter.
+     - `sessionFile` — exact 또는 safe substring filter. entwurf 파일 패턴 회수의 단기 우회.
+     - `mode` — `semantic` / `hybrid` / `recent`; `recent`는 hard filter 후 timestamp DESC 중심.
+   - 검증:
+     - baseline 11개를 before/after로 재실행한다.
+     - T1/T2/T3/T4/T5/T6/T10/T11의 `surface_missing`이 줄어드는지 확인한다.
+     - T7/T8 semantic sentinel은 filter 없이 기존 품질이 유지되어야 한다.
+   - 완료 기준: 재색인 없이 저장된 신호만으로 회수 가능한 항목을 끝까지 살리고, 결과를 llmlog와 ROADMAP History 후보로 남긴다.
 
-3. **Gap classification**
-   - 실패를 다음 중 하나로 분류한다.
-     - `metadata_missing` — 저장 자체가 부족
-     - `surface_missing` — 저장되어 있으나 검색 API/CLI에서 못 씀
-     - `ranking_miss` — surface는 있으나 정렬 실패
-     - `chunk_context_miss` — line/session 인접 맥락 복원이 부족
-     - `orchestration_miss` — andenken이 아니라 recall/day-query 라우팅 문제
+2. **Phase 2 — valuable with reindex: add missing session signals**
+   - Phase 1 검증 이후에만 진행한다. 재색인은 두려워서 피하는 것이 아니라, surface revival을 끝낸 뒤 얻는 가치가 명확할 때 한다.
+   - 후보 metadata:
+     - `cwd` / normalized project path — basename `project` 충돌을 줄이고 담당자/경로 축을 강화.
+     - `entwurf_task_id` / `is_entwurf` — `*_entwurf-<taskId>.jsonl` 파일명에서 파싱.
+     - session-level aggregate 후보 — `sessionFile`, start/end timestamp, project/cwd, chunk count, role distribution, hasCompaction, entwurf task id.
+     - optional scalar indexes — `timestamp`, `project`, `cwd`, `role`, `sessionFile` 성능 보강.
+   - 검증:
+     - 재색인 전후 `verify sessions` 통과.
+     - Phase 1 baseline 중 `metadata_missing`이었던 T9류가 개선되는지 확인.
+     - day-query를 흉내내지 않고, 저장된 세션 신호를 더 정확히 노출하는지 확인한다.
 
-4. **Smallest next fix proposal**
-   - 코드 수정 전, 가장 작은 보강안을 하나만 고른다.
-   - 후보: timestamp range filter, project/cwd filter, sessionFile grouping, date+project query mode, recency-aware rerank, session-excerpt 연결.
-   - md golden으로 돌아갈지, sessions surface fix로 이어갈지 GLG가 결정할 수 있게 한다.
+3. **Decision after Phase 2**
+   - sessions surface가 시간축 + 담당자/경로 축으로 충분히 안정화되면 md 의미공간 golden으로 돌아간다.
+   - 아직 sessions gap이 남으면 한 가지 다음 항목만 골라 NEXT를 갱신한다.
 
 ### Non-goal
 
@@ -77,7 +90,8 @@ Do not:
 - org track은 건드리지 않는다.
 - recall orchestrator 전체 설계는 andenken 책임이 아니다. 단, sessions 검색 API가 제공해야 할 계약은 정리한다.
 - day-query 역할을 흡수하지 않는다. andenken은 저장된 세션 신호를 노출하고, 날짜 해석/집계/요약은 호출자 축에 맡긴다.
-- 코드 수정은 no-code baseline 이후 별도 결정으로 한다.
+- Phase 1은 재색인 없이 저장된 신호를 surface로 되살리는 작업이다.
+- Phase 2는 재색인을 전제로 missing metadata를 추가하는 작업이다. 재색인은 비용/시간 때문에 피하지 않는다. 다만 Phase 1 검증 후 가치가 명확할 때 실행한다.
 
 ### Deferred — md 의미공간 golden
 
