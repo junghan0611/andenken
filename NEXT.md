@@ -6,7 +6,7 @@
 
 ## Next — Sessions as time/project memory axis
 
-**단 하나의 현재 우선순위:** 세션 임베딩을 **시간축(time axis) + 담당자/경로(project/cwd axis)** 중심으로 다시 점검하고, 현재 retrieval surface가 이 기대를 충족하지 못하는 지점을 먼저 보강한다.
+**단 하나의 현재 우선순위:** 세션 임베딩을 **시간축(time axis) + 담당자/경로(project/cwd axis)** 중심으로 다시 점검하되, 새 해석기를 만들지 않고 **이미 저장된 신호를 검색 surface에서 살리는 것**에 집중한다.
 
 ### Direction fixed by GLG — 2026-05-13
 
@@ -18,6 +18,24 @@ andenken에는 두 개의 살아있는 임베딩 표면이 있지만 기대하�
 | **md garden** | **의미공간** | public garden 자체는 meta / bib / autholog / botlog / notes 등이 엮인 개념 공간. 시간보다 개념·주제·인명·문헌 연결이 중심이다. |
 
 따라서 B2a md golden은 중요하지만, 지금 우선순위는 md sentinel 확장이 아니다. 세션 임베딩이 “시간축 작업 기억”으로 충분히 동작하는지 먼저 확인한다. 부족하면 sessions 쪽을 선행한다.
+
+### Boundary principle — use stored signals, do not imitate day-query
+
+Sessions track의 1차 목표는 새로운 시간 해석기나 day-query 대체재를 만드는 것이 아니라, 이미 저장된 `timestamp` / `project` / `sessionFile` / `lineNumber` / `role` / `source` 신호를 검색 surface에서 사용할 수 있게 해 작업 기억축을 복원하는 것이다.
+
+Do:
+
+- 저장된 metadata를 명시적 filter / sort / grouping / excerpt readback에 사용한다.
+- `surface_missing`을 우선 해결한다. 저장되어 있는데 못 쓰는 신호가 1순위다.
+- 없는 신호는 억지 추론하지 말고 `metadata_missing`으로 기록한 뒤 별도 indexer 보강 후보로 둔다.
+- natural-language time은 호출자가 ISO range로 변환해 넘긴다고 가정한다.
+
+Do not:
+
+- “어제/지난주/방금” 자연어 시간 파싱을 andenken에 넣지 않는다.
+- git / journal / lifetract / day-query 집계를 따라 하지 않는다.
+- embedding으로 없는 metadata를 추론하지 않는다.
+- 세션 내용을 요약해 시간표처럼 재구성하지 않는다.
 
 ### Why this is next
 
@@ -34,10 +52,11 @@ andenken에는 두 개의 살아있는 임베딩 표면이 있지만 기대하�
    - `session-indexer.ts`, `store.ts`, `retriever.ts`, `cli.ts`, `index.ts`에서 sessions 검색 surface를 확인한다.
    - timestamp / project / cwd / sessionFile / lineNumber가 어디까지 저장되고 어디서 버려지는지 표로 정리한다.
 
-2. **Time/project query baseline**
+2. **Time/project query baseline — no-code first**
    - 실제 질문 유형을 최소 8~12개로 만든다.
    - 예: “어제 andenken에서 한 일”, “2026-05-13 오전 세션 임베딩”, “nixos-config 직전 작업”, “pi-shell-acp 담당자에서 하던 일”.
-   - 각 query를 semantic-only, date/project constrained, two-step 방식으로 비교한다.
+   - 먼저 현재 surface로만 측정한다. 코드 수정 전 baseline을 llmlog로 남긴다.
+   - 각 query를 semantic-only, stored-signal constrained, two-step 방식으로 비교한다. 단, constrained 방식은 현재 surface에서 가능한 범위와 필요한 API를 분리해 적는다.
 
 3. **Gap classification**
    - 실패를 다음 중 하나로 분류한다.
@@ -57,7 +76,8 @@ andenken에는 두 개의 살아있는 임베딩 표면이 있지만 기대하�
 - md golden B2a 구현은 보류. 단, md는 의미공간이라는 방향은 유지한다.
 - org track은 건드리지 않는다.
 - recall orchestrator 전체 설계는 andenken 책임이 아니다. 단, sessions 검색 API가 제공해야 할 계약은 정리한다.
-- 코드 수정은 audit 이후 별도 결정으로 한다.
+- day-query 역할을 흡수하지 않는다. andenken은 저장된 세션 신호를 노출하고, 날짜 해석/집계/요약은 호출자 축에 맡긴다.
+- 코드 수정은 no-code baseline 이후 별도 결정으로 한다.
 
 ### Deferred — md 의미공간 golden
 
