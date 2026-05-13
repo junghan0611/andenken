@@ -62,6 +62,12 @@ Usage: ./run.sh <command> [args]
 
 === Search ===
   search <query> [--limit N]     Search sessions
+                              flags: --source pi|claude|all
+                                     --date-from ISO --date-to ISO
+                                     --project name[,name] --role user[,assistant,compaction]
+                                     --session-file path --session-file-contains substr
+                                     --mode semantic|hybrid|recent
+                              recent = stored-signal scan + timestamp DESC (no NL time parsing)
   search:md <query> [--limit N]  Search md (public garden) — issue #8
   knowledge <query> [--limit N]  Search knowledge base (org — disabled in production)
 

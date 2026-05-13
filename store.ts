@@ -36,6 +36,90 @@ export interface SearchResult {
   score: number;
 }
 
+/**
+ * Phase 1 — stored-signal filters for session search surfaces.
+ *
+ * All fields target columns that ALREADY exist on the LanceDB row
+ * (timestamp, project, role, source, sessionFile) — no reindex required.
+ * Per NEXT.md (commit fe5ebf2), andenken does NOT parse natural language
+ * time, infer missing metadata, or imitate day-query. Callers convert
+ * "어제/지난주" to ISO ranges and pass `dateFrom` / `dateTo` explicitly.
+ *
+ * Backward-compat: search() / fullTextSearch() / substringSearch() still
+ * accept a bare `SessionSource` string for legacy call sites; runtime
+ * normalizes string → `{ source }` automatically.
+ */
+export interface SearchFilters {
+  /** Source filter (single value). Equivalent to legacy `sourceFilter` arg. */
+  source?: SessionSource;
+  /** Inclusive lower bound on `timestamp` (ISO 8601). */
+  dateFrom?: string;
+  /** Exclusive upper bound on `timestamp` (ISO 8601). */
+  dateTo?: string;
+  /** Project name(s). String → equality; array → IN clause. Matches the
+   *  basename `extractProjectName` stores today (no cwd normalization). */
+  project?: string | string[];
+  /** Role filter (any of). Empty array is treated as "no role filter". */
+  role?: Array<"user" | "assistant" | "compaction">;
+  /** Exact `sessionFile` path match. */
+  sessionFile?: string;
+  /** Substring match on `sessionFile`. Short-term entwurf surface:
+   *  `sessionFileContains: "_entwurf-"` recalls task transcripts without
+   *  a dedicated `entwurf_task_id` column (Phase 2 candidate). */
+  sessionFileContains?: string;
+}
+
+/** Convert legacy 4th-arg shape to SearchFilters. */
+function normalizeFilters(
+  arg: SessionSource | SearchFilters | undefined,
+): SearchFilters | undefined {
+  if (arg === undefined) return undefined;
+  if (typeof arg === "string") return { source: arg };
+  return arg;
+}
+
+/** Escape a SQL string literal value (single quotes doubled). */
+function sqlEscape(v: string): string {
+  return v.replace(/'/g, "''");
+}
+
+/**
+ * Build a WHERE clause body from filters. Returns "" when no constraint.
+ * The caller is responsible for AND-merging with any existing WHERE.
+ */
+function buildFilterWhere(f: SearchFilters | undefined): string {
+  if (!f) return "";
+  const parts: string[] = [];
+  if (f.source) parts.push(`source = '${sqlEscape(f.source)}'`);
+  if (f.dateFrom) parts.push(`timestamp >= '${sqlEscape(f.dateFrom)}'`);
+  if (f.dateTo) parts.push(`timestamp < '${sqlEscape(f.dateTo)}'`);
+  if (f.project !== undefined) {
+    const list = Array.isArray(f.project) ? f.project : [f.project];
+    const clean = list.filter((p) => p && p.length > 0);
+    if (clean.length === 1) {
+      parts.push(`project = '${sqlEscape(clean[0])}'`);
+    } else if (clean.length > 1) {
+      parts.push(
+        `project IN (${clean.map((p) => `'${sqlEscape(p)}'`).join(", ")})`,
+      );
+    }
+  }
+  if (f.role && f.role.length > 0) {
+    parts.push(
+      `role IN (${f.role.map((r) => `'${sqlEscape(r)}'`).join(", ")})`,
+    );
+  }
+  if (f.sessionFile) {
+    parts.push(`\`sessionFile\` = '${sqlEscape(f.sessionFile)}'`);
+  }
+  if (f.sessionFileContains) {
+    parts.push(
+      `contains(\`sessionFile\`, '${sqlEscape(f.sessionFileContains)}')`,
+    );
+  }
+  return parts.join(" AND ");
+}
+
 const TABLE_NAME = "session_chunks";
 
 /**
@@ -231,15 +315,18 @@ export class VectorStore {
     queryVector: number[],
     limit: number = 10,
     minScore: number = 0.1,
-    sourceFilter?: SessionSource,
+    filterOrSource?: SessionSource | SearchFilters,
   ): Promise<SearchResult[]> {
     await this.ensureInitialized();
     if (!this.table) return [];
 
+    const filters = normalizeFilters(filterOrSource);
+    const whereBody = buildFilterWhere(filters);
+
     let results;
     try {
       let query = this.table.vectorSearch(queryVector);
-      if (sourceFilter) query = query.where(`source = '${sourceFilter}'`);
+      if (whereBody) query = query.where(whereBody);
       results = await query.limit(limit).toArray();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -270,22 +357,78 @@ export class VectorStore {
   }
 
   /**
+   * Filter-only scan for stored-signal retrieval.
+   *
+   * Used by mode="recent": no embedding, no BM25, no natural-language time
+   * parsing. The caller provides exact stored-signal filters and we return
+   * matching rows for timestamp-DESC sorting upstream. This intentionally
+   * avoids limiting before sort so "recent" really means recent within the
+   * filtered row set, not recent among semantic candidates.
+   */
+  async filterSearch(
+    filterOrSource?: SessionSource | SearchFilters,
+    scanLimit: number = 100_000,
+  ): Promise<SearchResult[]> {
+    await this.ensureInitialized();
+    if (!this.table) return [];
+
+    const filters = normalizeFilters(filterOrSource);
+    const whereBody = buildFilterWhere(filters);
+
+    try {
+      let query = this.table
+        .query()
+        .select([
+          "id",
+          "text",
+          "sessionFile",
+          "project",
+          "lineNumber",
+          "timestamp",
+          "role",
+          "source",
+          "metadata",
+        ]);
+      if (whereBody) query = query.where(whereBody);
+      const results = await query.limit(scanLimit).toArray();
+
+      return results.map((r) => ({
+        id: r.id as string,
+        text: r.text as string,
+        sessionFile: r.sessionFile as string,
+        project: r.project as string,
+        lineNumber: r.lineNumber as number,
+        timestamp: r.timestamp as string,
+        role: r.role as string,
+        source: (r.source as string) ?? "",
+        metadata: JSON.parse(r.metadata as string),
+        score: 0,
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  /**
    * Full-text search (BM25-style via LanceDB FTS)
    * Uses query().fullTextSearch() — not search() which requires embedding functions
    */
   async fullTextSearch(
     query: string,
     limit: number = 10,
-    sourceFilter?: SessionSource,
+    filterOrSource?: SessionSource | SearchFilters,
   ): Promise<SearchResult[]> {
     await this.ensureInitialized();
     if (!this.table) return [];
+
+    const filters = normalizeFilters(filterOrSource);
+    const whereBody = buildFilterWhere(filters);
 
     try {
       let lanceQuery = this.table
         .query()
         .fullTextSearch(query);
-      if (sourceFilter) lanceQuery = lanceQuery.where(`source = '${sourceFilter}'`);
+      if (whereBody) lanceQuery = lanceQuery.where(whereBody);
       const results = await lanceQuery
         .select([
           "id",
@@ -335,17 +478,20 @@ export class VectorStore {
   async substringSearch(
     term: string,
     limit: number = 10,
-    sourceFilter?: SessionSource,
+    filterOrSource?: SessionSource | SearchFilters,
   ): Promise<SearchResult[]> {
     await this.ensureInitialized();
     if (!this.table) return [];
     if (!term) return [];
+
+    const filters = normalizeFilters(filterOrSource);
+    const whereBody = buildFilterWhere(filters);
+
     // Escape single quotes for SQL string literal
-    const safe = term.replace(/'/g, "''");
+    const safe = sqlEscape(term);
+    const baseWhere = `contains(text, '${safe}')`;
+    const where = whereBody ? `${baseWhere} AND ${whereBody}` : baseWhere;
     try {
-      const where = sourceFilter
-        ? `contains(text, '${safe}') AND source = '${sourceFilter}'`
-        : `contains(text, '${safe}')`;
       const results = await this.table
         .query()
         .where(where)

@@ -205,6 +205,29 @@ export function rrfFusion(
     .map(({ result, score }) => ({ ...result, score }));
 }
 
+// --- Timestamp-DESC sort (Phase 1 — mode="recent") ---
+//
+// For timestamp-primary surfaces, the caller has already applied hard
+// filters (dateFrom/dateTo/project/role/source/sessionFile) and now wants
+// results ordered by timestamp DESC. Score is only a tie-break when present;
+// mode="recent" typically feeds filter-only rows with score=0. This is NOT
+// a time decay — it is a primary sort.
+//
+// Empty / unparseable timestamps sort last (treated as epoch 0).
+
+export function sortByTimestampDesc(
+  results: SearchResult[],
+): SearchResult[] {
+  return [...results].sort((a, b) => {
+    const ta = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+    const tb = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+    const tA = isNaN(ta) ? 0 : ta;
+    const tB = isNaN(tb) ? 0 : tb;
+    if (tB !== tA) return tB - tA;
+    return b.score - a.score; // tie-break on relevance
+  });
+}
+
 // --- Temporal Decay (OpenClaw pattern) ---
 
 export function applyRecencyDecay(

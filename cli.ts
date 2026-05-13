@@ -21,9 +21,9 @@ import {
   createMdProviderFromEnv,
   type EmbeddingProvider,
 } from "./embedding-provider.js";
-import { VectorStore, getSessionsDbPath, getOrgDbPath, getMdDbPath, getDataDir, type SearchResult } from "./store.js";
+import { VectorStore, getSessionsDbPath, getOrgDbPath, getMdDbPath, getDataDir, type SearchResult, type SearchFilters } from "./store.js";
 import { findSessionFiles, extractSessionChunks, normalizeSourceFilter } from "./session-indexer.js";
-import { retrieve, expandQueryForBM25, getShortCJKTokens, type MergeStrategy } from "./retriever.js";
+import { retrieve, expandQueryForBM25, getShortCJKTokens, sortByTimestampDesc, type MergeStrategy } from "./retriever.js";
 import { readSessionExcerpt, type SessionExcerpt } from "./session-excerpt.js";
 
 // --- Recall Tracking (memory consolidation stage 2) ---
@@ -159,6 +159,14 @@ interface SessionSearchOpts {
   source?: string;
   withExcerpt?: boolean;
   excerptLimit?: number;
+  // Phase 1 — stored-signal filters
+  dateFrom?: string;
+  dateTo?: string;
+  project?: string | string[];
+  role?: Array<"user" | "assistant" | "compaction">;
+  sessionFile?: string;
+  sessionFileContains?: string;
+  mode?: "semantic" | "hybrid" | "recent";
 }
 
 async function searchSessions(
@@ -169,6 +177,21 @@ async function searchSessions(
   const source = normalizeSourceFilter(opts.source);
   const provider = getSessionsProvider();
   const dim = provider.dimensions || 2560;
+
+  // Phase 1 — assemble filter object from CLI opts. When every filter is
+  // absent and mode is undefined, behavior is identical to pre-Phase-1
+  // (only the source filter applies, exactly as before).
+  const mode = opts.mode ?? "hybrid";
+  const filters: SearchFilters = {};
+  if (source) filters.source = source;
+  if (opts.dateFrom) filters.dateFrom = opts.dateFrom;
+  if (opts.dateTo) filters.dateTo = opts.dateTo;
+  if (opts.project !== undefined) filters.project = opts.project;
+  if (opts.role && opts.role.length > 0) filters.role = opts.role;
+  if (opts.sessionFile) filters.sessionFile = opts.sessionFile;
+  if (opts.sessionFileContains) filters.sessionFileContains = opts.sessionFileContains;
+  const hasUserFilters =
+    !!(opts.dateFrom || opts.dateTo || opts.project || (opts.role && opts.role.length > 0) || opts.sessionFile || opts.sessionFileContains);
 
   const store = new VectorStore(sessionDbPath, dim);
   await store.init();
@@ -197,62 +220,81 @@ async function searchSessions(
     process.exit(1);
   }
 
-  const expanded = dictcliExpand(query);
-  const enrichedQuery =
-    expanded.length > 0 ? `${query} ${expanded.join(" ")}` : query;
+  let expanded: string[] = [];
+  let enrichedQuery = query;
+  let bm25Query = expandQueryForBM25(query);
+  let results: SearchResult[];
 
-  const candidates = Math.min(limit * 4, 200); // openclaw candidateMultiplier pattern
-  const queryVector = await provider.embedQuery(enrichedQuery);
-  const bm25Query = expandQueryForBM25(enrichedQuery); // include dictcli expand terms in FTS
-  const vectorResults = await store.search(queryVector, candidates, 0.1, source);
-  const ftsResults = await store.fullTextSearch(bm25Query, candidates, source);
+  if (mode === "recent") {
+    // Stored-signal mode: no embedding call, no BM25, no dictcli expansion.
+    // The caller has already supplied ISO/project/role/sessionFile filters;
+    // timestamp DESC is the primary retrieval axis.
+    results = sortByTimestampDesc(await store.filterSearch(filters));
+  } else {
+    expanded = dictcliExpand(query);
+    enrichedQuery =
+      expanded.length > 0 ? `${query} ${expanded.join(" ")}` : query;
 
-  // Track 1 — CJK substring fallback (mirrors index.ts session_search path).
-  // Short Hangul tokens like "맘", "갑", "쟈" return 0 hits via LanceDB FTS;
-  // augment via `contains()` so the hybrid merger can still surface them.
-  //
-  // Round-robin interleave (FTS, sub, FTS, sub, ...) so substring hits keep
-  // a real RRF rank rather than being appended past `candidates`.
-  const shortTokens = getShortCJKTokens(query);
-  if (shortTokens.length > 0) {
-    const ftsIds = new Set(ftsResults.map((r) => r.id));
-    const subLists = await Promise.all(
-      shortTokens.map((t) => store.substringSearch(t, candidates, source)),
-    );
-    const subFlat: typeof ftsResults = [];
-    const subSeen = new Set<string>();
-    for (const list of subLists) {
-      for (const r of list) {
-        if (ftsIds.has(r.id) || subSeen.has(r.id)) continue;
-        subFlat.push(r);
-        subSeen.add(r.id);
+    const candidates = Math.min(limit * 4, 200); // openclaw candidateMultiplier pattern
+    const queryVector = await provider.embedQuery(enrichedQuery);
+    bm25Query = expandQueryForBM25(enrichedQuery); // include dictcli expand terms in FTS
+    const vectorResults = await store.search(queryVector, candidates, 0.1, filters);
+    const ftsResults = await store.fullTextSearch(bm25Query, candidates, filters);
+
+    // Track 1 — CJK substring fallback (mirrors index.ts session_search path).
+    // Short Hangul tokens like "맘", "갑", "쟈" return 0 hits via LanceDB FTS;
+    // augment via `contains()` so the hybrid merger can still surface them.
+    //
+    // Round-robin interleave (FTS, sub, FTS, sub, ...) so substring hits keep
+    // a real RRF rank rather than being appended past `candidates`.
+    const shortTokens = getShortCJKTokens(query);
+    if (shortTokens.length > 0) {
+      const ftsIds = new Set(ftsResults.map((r) => r.id));
+      const subLists = await Promise.all(
+        shortTokens.map((t) => store.substringSearch(t, candidates, filters)),
+      );
+      const subFlat: typeof ftsResults = [];
+      const subSeen = new Set<string>();
+      for (const list of subLists) {
+        for (const r of list) {
+          if (ftsIds.has(r.id) || subSeen.has(r.id)) continue;
+          subFlat.push(r);
+          subSeen.add(r.id);
+        }
+      }
+      if (subFlat.length > 0) {
+        const ftsCopy = ftsResults.slice();
+        ftsResults.length = 0;
+        let i = 0;
+        let j = 0;
+        while (i < ftsCopy.length || j < subFlat.length) {
+          if (i < ftsCopy.length) ftsResults.push(ftsCopy[i++]);
+          if (j < subFlat.length) ftsResults.push(subFlat[j++]);
+        }
       }
     }
-    if (subFlat.length > 0) {
-      const ftsCopy = ftsResults.slice();
-      ftsResults.length = 0;
-      let i = 0;
-      let j = 0;
-      while (i < ftsCopy.length || j < subFlat.length) {
-        if (i < ftsCopy.length) ftsResults.push(ftsCopy[i++]);
-        if (j < subFlat.length) ftsResults.push(subFlat[j++]);
-      }
-    }
+
+    results = await retrieve(query, vectorResults, ftsResults, {
+      vectorWeight: 0.7,
+      bm25Weight: 0.3,
+      recencyHalfLifeDays: 14,
+      minScore: 0.001,
+      mergeStrategy: "rrf" as MergeStrategy,
+      mmr: { enabled: false, lambda: 0.7 },
+    });
   }
-
-  let results = await retrieve(query, vectorResults, ftsResults, {
-    vectorWeight: 0.7,
-    bm25Weight: 0.3,
-    recencyHalfLifeDays: 14,
-    minScore: 0.001,
-    mergeStrategy: "rrf" as MergeStrategy,
-    mmr: { enabled: false, lambda: 0.7 },
-  });
 
   // Source filter is pushed down to LanceDB before retrieval so the candidate
   // pool is source-specific. Keep this defensive filter for older DB rows.
   if (source) {
     results = results.filter((r) => r.source === source);
+  }
+
+  // mode=recent: filterSearch already returned stored-signal rows;
+  // keep timestamp DESC as the primary order. Scores are usually 0 in
+  // this mode because no embedding/BM25 call is made.
+  if (mode === "recent") {
+    results = sortByTimestampDesc(results);
   }
 
   // PR-D cross-track fallback (mirrors index.ts session_search).
@@ -262,11 +304,19 @@ async function searchSessions(
   // through `provider` which is the sessions provider — different dim),
   // and confirm dim compatibility before issuing the search. If either
   // boundary fails, sessions results are still returned with a diagnostic.
+  //
+  // Phase 1: disable cross-track fallback whenever the caller passed any
+  // stored-signal filter or chose mode=recent. Falling back to md/org under
+  // those modes would silently break the sessions-only intent.
   let fallback = false;
   let fallbackDiagnostic: string | undefined;
   const topScore = results[0]?.score ?? 0;
   const wantsFallback =
-    !source && fs.existsSync(orgDbPath) && (results.length < 3 || topScore < 0.005);
+    !source &&
+    !hasUserFilters &&
+    mode !== "recent" &&
+    fs.existsSync(orgDbPath) &&
+    (results.length < 3 || topScore < 0.005);
   if (wantsFallback) {
     let orgProvider: EmbeddingProvider | null = null;
     try {
@@ -703,7 +753,9 @@ async function main() {
         console.error(
           JSON.stringify({
             error:
-              "Usage: search-sessions <query> [--limit N] [--source pi|claude|all] [--with-excerpt] [--excerpt-limit N]",
+              "Usage: search-sessions <query> [--limit N] [--source pi|claude|all] [--with-excerpt] [--excerpt-limit N] " +
+              "[--date-from ISO] [--date-to ISO] [--project name[,name]] [--role user|assistant|compaction[,...]] " +
+              "[--session-file path] [--session-file-contains substr] [--mode semantic|hybrid|recent]",
           }),
         );
         process.exit(1);
@@ -715,10 +767,52 @@ async function main() {
         "excerpt-limit" in flags && flags["excerpt-limit"] && !flags["excerpt-limit"].startsWith("--")
           ? parseInt(flags["excerpt-limit"], 10)
           : undefined;
+
+      // Phase 1 stored-signal filters. ISO strings only — andenken does
+      // not parse "어제/지난주" itself. Comma-separated lists for project
+      // and role; everything else exact.
+      const splitCsv = (s: string | undefined): string[] | undefined =>
+        s ? s.split(",").map((x) => x.trim()).filter(Boolean) : undefined;
+      const projectList = splitCsv(flags.project);
+      const roleListRaw = splitCsv(flags.role);
+      const invalidRoles = roleListRaw?.filter(
+        (r) => r !== "user" && r !== "assistant" && r !== "compaction",
+      ) ?? [];
+      if (invalidRoles.length > 0) {
+        console.error(
+          JSON.stringify({
+            error: `invalid --role value(s): ${invalidRoles.join(",")}. Valid: user | assistant | compaction`,
+          }),
+        );
+        process.exit(1);
+      }
+      const roleList: Array<"user" | "assistant" | "compaction"> | undefined =
+        roleListRaw as Array<"user" | "assistant" | "compaction"> | undefined;
+      const modeArg = flags.mode;
+      const mode: "semantic" | "hybrid" | "recent" | undefined =
+        modeArg === "semantic" || modeArg === "hybrid" || modeArg === "recent"
+          ? modeArg
+          : undefined;
+      if (modeArg && !mode) {
+        console.error(
+          JSON.stringify({
+            error: `invalid --mode: ${modeArg}. Valid: semantic | hybrid | recent`,
+          }),
+        );
+        process.exit(1);
+      }
+
       await searchSessions(query, limit, {
         source: flags.source,
         withExcerpt,
         excerptLimit,
+        dateFrom: flags["date-from"],
+        dateTo: flags["date-to"],
+        project: projectList && projectList.length === 1 ? projectList[0] : projectList,
+        role: roleList,
+        sessionFile: flags["session-file"],
+        sessionFileContains: flags["session-file-contains"],
+        mode,
       });
       break;
     }

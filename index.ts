@@ -23,13 +23,13 @@ import {
   CachingProvider,
   type EmbeddingProvider,
 } from "./embedding-provider.js";
-import { VectorStore, getMdDbPath, getDataDir } from "./store.js";
+import { VectorStore, getMdDbPath, getDataDir, type SearchFilters } from "./store.js";
 import {
   findSessionFiles,
   extractSessionChunks,
   normalizeSourceFilter,
 } from "./session-indexer.js";
-import { retrieve, expandQueryForBM25, getShortCJKTokens } from "./retriever.js";
+import { retrieve, expandQueryForBM25, getShortCJKTokens, sortByTimestampDesc } from "./retriever.js";
 import { readSessionExcerpt, type SessionExcerpt } from "./session-excerpt.js";
 
 // Re-declare minimal SearchResult to avoid jiti-incompatible import() type syntax
@@ -389,6 +389,66 @@ export default function (pi: ExtensionAPI) {
           default: 3,
         }),
       ),
+      // --- Phase 1 — stored-signal filters (already-indexed columns) ---
+      // Per NEXT.md (commit fe5ebf2): andenken does NOT parse natural-language
+      // time. The caller (recall orchestrator / day-query) converts
+      // "어제/지난주" to ISO ranges and passes dateFrom/dateTo explicitly.
+      dateFrom: Type.Optional(
+        Type.String({
+          description:
+            "Inclusive lower bound on chunk timestamp (ISO 8601). Caller is responsible for converting natural-language time expressions to ISO; andenken never parses 'yesterday'/'어제' etc.",
+        }),
+      ),
+      dateTo: Type.Optional(
+        Type.String({
+          description:
+            "Exclusive upper bound on chunk timestamp (ISO 8601). Pair with dateFrom for a half-open range [dateFrom, dateTo).",
+        }),
+      ),
+      project: Type.Optional(
+        Type.Union([Type.String(), Type.Array(Type.String())], {
+          description:
+            "Project basename filter (single string for equality or array for IN). Matches the basename `extractProjectName` stored at index time — no cwd normalization in Phase 1.",
+        }),
+      ),
+      role: Type.Optional(
+        Type.Array(
+          Type.Union([
+            Type.Literal("user"),
+            Type.Literal("assistant"),
+            Type.Literal("compaction"),
+          ]),
+          {
+            description:
+              "Role filter — any of user|assistant|compaction. Use ['compaction'] to surface session-summary chunks; combine with withExcerpt to read the surrounding turn flow.",
+          },
+        ),
+      ),
+      sessionFile: Type.Optional(
+        Type.String({
+          description:
+            "Exact sessionFile path to restrict the search to a single JSONL.",
+        }),
+      ),
+      sessionFileContains: Type.Optional(
+        Type.String({
+          description:
+            "Substring filter on sessionFile path. Short-term entwurf surface — e.g. '_entwurf-' to recall task transcripts before a dedicated entwurf_task_id column lands in Phase 2.",
+        }),
+      ),
+      mode: Type.Optional(
+        Type.Union(
+          [
+            Type.Literal("semantic"),
+            Type.Literal("hybrid"),
+            Type.Literal("recent"),
+          ],
+          {
+            description:
+              "Retrieval mode. semantic|hybrid (default): vector+BM25 hybrid with 14d temporal decay. recent: stored-signal scan + timestamp-DESC sort (no embedding/BM25/dictcli; caller should pass filters). Cross-track md fallback is suppressed whenever any filter is set or mode='recent'.",
+          },
+        ),
+      ),
     }),
 
     async execute(_toolCallId, params) {
@@ -424,70 +484,109 @@ export default function (pi: ExtensionAPI) {
 
       const limit = params.limit ?? 10;
 
-      // 3층 dictcli expand — 한글 쿼리 확장
-      const expanded = dictcliExpand(params.query);
-      const enrichedQuery = expanded.length > 0
-        ? `${params.query} ${expanded.join(" ")}`
-        : params.query;
-
-      const candidates = Math.min(limit * 4, 200); // openclaw candidateMultiplier
-      const queryVector = await sessP.embedQuery(enrichedQuery);
+      // Phase 1 — assemble stored-signal filters from optional params.
+      // When every Phase-1 field is absent and mode is undefined, behavior
+      // is identical to the pre-Phase-1 path (source filter still works).
       const sourceFilter = normalizeSourceFilter(params.source);
-      const vectorResults = await getSessionStore().search(queryVector, candidates, 0.1, sourceFilter);
-      const bm25Query = expandQueryForBM25(enrichedQuery); // include dictcli expand terms in FTS
-      const ftsResults = await getSessionStore().fullTextSearch(bm25Query, candidates, sourceFilter);
+      const mode: "semantic" | "hybrid" | "recent" = params.mode ?? "hybrid";
+      const filters: SearchFilters = {};
+      if (sourceFilter) filters.source = sourceFilter;
+      if (params.dateFrom) filters.dateFrom = params.dateFrom;
+      if (params.dateTo) filters.dateTo = params.dateTo;
+      if (params.project !== undefined) filters.project = params.project;
+      if (params.role && params.role.length > 0) filters.role = params.role;
+      if (params.sessionFile) filters.sessionFile = params.sessionFile;
+      if (params.sessionFileContains) filters.sessionFileContains = params.sessionFileContains;
+      const hasUserFilters = !!(
+        params.dateFrom ||
+        params.dateTo ||
+        params.project ||
+        (params.role && params.role.length > 0) ||
+        params.sessionFile ||
+        params.sessionFileContains
+      );
 
-      // Track 1 — CJK substring fallback for tokens LanceDB FTS drops
-      // (1-2 char Hangul like "맘", "갑", "쟈", "맘마"). Augments the FTS
-      // bucket so the hybrid merger sees them. No-op for English-heavy
-      // queries; cheap LanceDB filter scan otherwise.
-      //
-      // Order policy: round-robin interleave (FTS, sub, FTS, sub, ...). RRF
-      // ranks by array position, so appending substring hits at the tail
-      // after FTS has already filled `candidates` makes them effectively
-      // invisible. Interleaving gives short-CJK exact matches a real chance
-      // to surface on mixed queries like "맘 분신" while still letting the
-      // FTS top result keep its rank-0 boost.
-      const shortTokens = getShortCJKTokens(params.query);
-      if (shortTokens.length > 0) {
-        const ftsIds = new Set(ftsResults.map((r) => r.id));
-        const subLists = await Promise.all(
-          shortTokens.map((t) => getSessionStore().substringSearch(t, candidates, sourceFilter)),
-        );
-        const subFlat: typeof ftsResults = [];
-        const subSeen = new Set<string>();
-        for (const list of subLists) {
-          for (const r of list) {
-            if (ftsIds.has(r.id) || subSeen.has(r.id)) continue;
-            subFlat.push(r);
-            subSeen.add(r.id);
+      let expanded: string[] = [];
+      let enrichedQuery = params.query;
+      let results: SearchResult[];
+
+      if (mode === "recent") {
+        // Stored-signal mode: no embedding call, no BM25, no dictcli expansion.
+        // The caller has already supplied ISO/project/role/sessionFile filters;
+        // timestamp DESC is the primary retrieval axis.
+        results = sortByTimestampDesc(await getSessionStore().filterSearch(filters));
+      } else {
+        // 3층 dictcli expand — 한글 쿼리 확장
+        expanded = dictcliExpand(params.query);
+        enrichedQuery = expanded.length > 0
+          ? `${params.query} ${expanded.join(" ")}`
+          : params.query;
+
+        const candidates = Math.min(limit * 4, 200); // openclaw candidateMultiplier
+        const queryVector = await sessP.embedQuery(enrichedQuery);
+        const vectorResults = await getSessionStore().search(queryVector, candidates, 0.1, filters);
+        const bm25Query = expandQueryForBM25(enrichedQuery); // include dictcli expand terms in FTS
+        const ftsResults = await getSessionStore().fullTextSearch(bm25Query, candidates, filters);
+
+        // Track 1 — CJK substring fallback for tokens LanceDB FTS drops
+        // (1-2 char Hangul like "맘", "갑", "쟈", "맘마"). Augments the FTS
+        // bucket so the hybrid merger sees them. No-op for English-heavy
+        // queries; cheap LanceDB filter scan otherwise.
+        //
+        // Order policy: round-robin interleave (FTS, sub, FTS, sub, ...). RRF
+        // ranks by array position, so appending substring hits at the tail
+        // after FTS has already filled `candidates` makes them effectively
+        // invisible. Interleaving gives short-CJK exact matches a real chance
+        // to surface on mixed queries like "맘 분신" while still letting the
+        // FTS top result keep its rank-0 boost.
+        const shortTokens = getShortCJKTokens(params.query);
+        if (shortTokens.length > 0) {
+          const ftsIds = new Set(ftsResults.map((r) => r.id));
+          const subLists = await Promise.all(
+            shortTokens.map((t) => getSessionStore().substringSearch(t, candidates, filters)),
+          );
+          const subFlat: typeof ftsResults = [];
+          const subSeen = new Set<string>();
+          for (const list of subLists) {
+            for (const r of list) {
+              if (ftsIds.has(r.id) || subSeen.has(r.id)) continue;
+              subFlat.push(r);
+              subSeen.add(r.id);
+            }
+          }
+          if (subFlat.length > 0) {
+            const ftsCopy = ftsResults.slice();
+            ftsResults.length = 0;
+            let i = 0;
+            let j = 0;
+            while (i < ftsCopy.length || j < subFlat.length) {
+              if (i < ftsCopy.length) ftsResults.push(ftsCopy[i++]);
+              if (j < subFlat.length) ftsResults.push(subFlat[j++]);
+            }
           }
         }
-        if (subFlat.length > 0) {
-          const ftsCopy = ftsResults.slice();
-          ftsResults.length = 0;
-          let i = 0;
-          let j = 0;
-          while (i < ftsCopy.length || j < subFlat.length) {
-            if (i < ftsCopy.length) ftsResults.push(ftsCopy[i++]);
-            if (j < subFlat.length) ftsResults.push(subFlat[j++]);
-          }
-        }
+
+        results = await retrieve(params.query, vectorResults, ftsResults, {
+          vectorWeight: 0.7,
+          bm25Weight: 0.3,
+          recencyHalfLifeDays: 14,
+          minScore: 0.001,
+          mergeStrategy: "rrf" as const,
+          mmr: { enabled: false, lambda: 0.7 },
+        });
       }
-
-      let results = await retrieve(params.query, vectorResults, ftsResults, {
-        vectorWeight: 0.7,
-        bm25Weight: 0.3,
-        recencyHalfLifeDays: 14,
-        minScore: 0.001,
-        mergeStrategy: "rrf" as const,
-        mmr: { enabled: false, lambda: 0.7 },
-      });
 
       // Source filter is pushed down to LanceDB before retrieval so the candidate
       // pool is source-specific. Keep this defensive filter for older DB rows.
       if (sourceFilter) {
         results = results.filter((r) => r.source === sourceFilter);
+      }
+
+      // mode=recent: filterSearch already returned stored-signal rows;
+      // keep timestamp DESC as the primary order. Scores are usually 0 in
+      // this mode because no embedding/BM25 call is made.
+      if (mode === "recent") {
+        results = sortByTimestampDesc(results);
       }
 
       // Cross-track fallback (knowledge_search graceful degrade).
@@ -503,10 +602,17 @@ export default function (pi: ExtensionAPI) {
       //      and surface a diagnostic — sessions results still return.
       //
       // session_search itself NEVER fails because of md-side issues.
+      // Phase 1: disable cross-track fallback whenever the caller passed any
+      // stored-signal filter or chose mode=recent. Falling back to md/org
+      // under those modes would silently break sessions-only intent.
       const topScore = results[0]?.score ?? 0;
       let fallbackUsed = false;
       let fallbackDiagnostic: string | null = null;
-      const wantsFallback = !sourceFilter && (results.length < 3 || topScore < 0.005);
+      const wantsFallback =
+        !sourceFilter &&
+        !hasUserFilters &&
+        mode !== "recent" &&
+        (results.length < 3 || topScore < 0.005);
       if (wantsFallback) {
         if (!mdReady) {
           fallbackDiagnostic = "knowledge fallback skipped: md store not ready";
