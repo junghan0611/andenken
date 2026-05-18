@@ -4,28 +4,46 @@
 > 이 파일은 **andenken 담당자가 지금 진행 중인 단 하나의 다음 항목**만 잡는다.
 > 완료된 긴 히스토리는 ROADMAP.md / commit log로 보낸다.
 
-## Next — Sessions Phase 2 review: reindex-backed signals
+## Next — Sessions Phase 2: T11 parser fix + targeted reindex
 
-**단 하나의 현재 우선순위:** Phase 1은 끝났다. 바로 구현/재색인으로 뛰지 말고, Phase 2에서 **재색인을 해야 얻는 가치 있는 세션 신호**를 검토해 한 조각으로 자른다.
+**단 하나의 현재 우선순위:** 2026-05-18 audit이 framing을 뒤집었다. "재색인-backed metadata slice"가 아니라, **이미 있는 corpus 신호를 살려내는 parser fix**가 가장 큰 한 걸음.
 
-### Current step — slice 선정용 audit (2026-05-18~)
+### Current step — fix `parsePiLine` compaction schema mismatch
 
-`doctor --sessions` V1이 audit 도구로 들어왔다 (`b37307c`). 다음 단 두 가지를 마치면 slice 결정 가능.
+`session-indexer.ts:110-119` + `:313`이 nested `parsed.compaction.summary`를 기대하지만 **실제 pi corpus는 top-level `parsed.summary`**. 결과: pi 111줄 compaction 전부 drop.
 
-1. **T11 corpus side 진단**
-   - doctor surface에서 `compaction=0 (0.0%)` 확정. 남은 질문: **corpus 부재인가, indexer drop인가.**
-   - 실행: sample pi/Claude JSONL을 직접 grep해서 `"type":"compaction"` 또는 `compaction.summary` 라인이 존재하는지 확인.
-   - 결과 따라:
-     - corpus 부재 → `role=compaction` filter는 영구히 noop. 문서로 정리.
-     - indexer drop → `extractSessionChunks` / `session-sanitize` 어느 단계에서 떨어지는지 추적. 수정 후보 정리.
+1. **Fix**
+   - `PiJsonlMessage` 인터페이스: 실제 형식에 맞게 `summary?: string`을 top-level로.
+   - `parsePiLine` line 313: `parsed.summary`를 우선 사용. 옛 nested 형태가 코퍼스에 정말 없다면 backward-compat 코드 빼고 단일 path로.
+   - 단위 테스트 한 줄: sample compaction JSON line이 chunk role=compaction으로 분류되는지.
 
-2. **slice 정량 비교 → 결정**
-   - 후보 3가지(`cwd`/normalized project, `entwurf_task_id`, `session_kind`)를 doctor surface 신호로 평가.
-   - 평가 기준:
-     - basename collision 규모 (doctor `project` top-N) → `cwd` 후보 강도
-     - entwurf bypass 충족 여부 (doctor entwurf surface 88 files / 333 rows) → `entwurf_task_id` 후보 강도
-     - role/session-kind 미분류 row 비율 → `session_kind` 후보 강도
-   - 한 조각만 선정해서 다음 항목으로 넘어감 (Definition of done §2).
+2. **Targeted reindex**
+   - 영향 파일: pi compaction line 가진 모든 sessions JSONL. `grep -rl '"type":"compaction"' ~/.pi/agent/sessions/` 로 추출.
+   - 그 파일들의 manifest entry를 invalidate (mtime은 안 변하므로 단순 sync로는 안 잡힘). 옵션:
+     - 옵션 A: manifest entry 삭제 후 `sync-sessions`.
+     - 옵션 B: `force=true` 한정 path (file 리스트).
+   - 비용 추정: 영향 파일 수 × 평균 chunk × $0.01/M tokens — pi compaction은 111줄이지만 파일들은 전체 재처리 필요. doctor `compaction` row count로 검증.
+
+3. **Verify**
+   - `doctor --sessions` 재실행: `role=compaction > 0` 으로 surface 변경.
+   - `./run.sh verify sessions` pass.
+   - baseline T11 query (`role=compaction` filter) → honest hits.
+
+### Audit log (B + C) — 2026-05-18
+
+**B. T11 진단 (corpus side):**
+- pi corpus `"type":"compaction"` line 111건 존재. 모두 **top-level `summary`** 형식.
+- nested `compaction.summary` 형식은 0건.
+- `extractSessionChunks` 직접 호출(sample 파일, compaction 1줄): total=13 chunks, **compaction=0**.
+- → **parser bug 확정**. corpus 부재 아님.
+
+**C. slice 정량 비교 결과 (참고용 — Phase 2 metadata slice는 deferred):**
+- TRUE basename collision (same source, same project, >1 dir): **단 1건** (`pi/pi-mono` 41 rows = 0.13%). 나머지 보이는 collision은 pi vs claude 자연 분리로 `source` column이 이미 풀어줌.
+- entwurf: 333 rows / 33 distinct dirs로 이미 정확히 격리. bypass 충분.
+- session_kind: T11 fix 전엔 측정 가치 부재.
+- → 세 후보 모두 즉시 ROI 낮음. Phase 2 metadata slice는 fix 이후로 재평가.
+
+이번 audit이 **doctor V1 surface로 framing 자체를 옳게 바꿔준 패턴** — 가장 큰 가치 있는 발견.
 
 ### Direction fixed by GLG — 2026-05-13
 
@@ -69,36 +87,20 @@ Do not:
 - commit: `0dcba81` — `feat(sessions): add stored-signal search filters`
 - skill doc: agent-config `bf15ba6` — `docs(semantic-memory): document session stored-signal filters`
 
-### Definition of done — Phase 2 review gate
+### Deferred — Phase 2 metadata slice (재평가 시점)
 
-1. **Audit what Phase 1 exposed** — `doctor --sessions` (commit `b37307c`)로 즉시 답 나온 부분 / 남은 부분 분리.
-   - T5 honest empty — doctor `timestamp range`(min/max)로 인덱스 cadence 확인 surface는 생겼다. 실제 cadence 점검은 sync log 비교 단계로 남김.
-   - T11 `role=compaction` 0건 — doctor `compaction=0` 확정. **corpus 부재인지 indexer drop인지**는 Current step §1에서 결판낸다.
-   - T9 `sessionFileContains="_entwurf-"` 우회 — doctor entwurf surface `88 files / 333 rows`로 정확히 격리됨이 보임. 별도 `entwurf_task_id` column이 없어도 검색 surface가 작동한다는 신호. slice 후보 우선순위에 반영.
+T11 fix + 재색인 후 doctor surface가 변경되면 다시 본다. 그때 기준:
 
-2. **Select reindex-backed metadata slice**
-   - 후보 중 **한 조각만** 고른다.
-   - 후보:
-     - `cwd` / normalized project path — basename `project` 충돌을 줄이고 담당자/경로 축 강화.
-     - `entwurf_task_id` / `is_entwurf` — `*_entwurf-<taskId>.jsonl` 파일명에서 파싱.
-     - `session_kind` — normal / entwurf / compaction-bearing 등 파일·row 수준에서 명시 가능한 것만.
-     - scalar indexes — `timestamp`, `project`, `cwd`, `role`, `sessionFile` 성능 보강.
-   - 선택 기준: Phase 1 baseline에서 실제 gap을 줄이는가? day-query 흉내 없이 sessions 검색 계약을 강화하는가?
+- `cwd` / normalized project path — 현재 측정 0.13% collision. fix 후에도 그대로면 추가 안 함.
+- `entwurf_task_id` / `is_entwurf` — 현재 bypass 충분. semantic gap 측정 후 판단.
+- `session_kind` — compaction이 살아난 뒤 의미 가짐.
+- scalar indexes — 검색 latency 측정 후 필요시.
 
-3. **Design before code**
-   - 새 field 이름, source of truth, backward compatibility, manifest/schema handling을 적는다.
-   - 재색인 방식: incremental로 충분한지, sessions force rebuild가 필요한지 판단한다.
-   - 비용/시간 추정 후 실행 계획을 적는다.
-
-4. **Only then implement + reindex**
-   - `session-indexer.ts`가 새 metadata를 명시적으로 산출한다.
-   - `store.ts` row schema / filters가 새 metadata를 안전하게 다룬다.
-   - 재색인 후 `./run.sh verify sessions` 통과.
-   - Phase 1 baseline 중 해당 gap이 개선되는지 확인하고 T7/T8 semantic sentinel을 유지한다.
+가치가 명확한 한 조각만 자른다. 명확하지 않으면 자르지 않는다.
 
 ### Non-goal
 
-- Phase 2 review 없이 여러 metadata를 한꺼번에 추가하지 않는다.
+- T11 fix 한 번에 여러 변화를 묶지 않는다 (parser fix + targeted reindex만).
 - md golden B2a 구현은 보류. 단, md는 의미공간이라는 방향은 유지한다.
 - org track은 건드리지 않는다.
 - recall orchestrator 전체 설계는 andenken 책임이 아니다. 단, sessions 검색 API가 제공해야 할 계약은 정리한다.
