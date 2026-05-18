@@ -8,6 +8,25 @@
 
 **단 하나의 현재 우선순위:** Phase 1은 끝났다. 바로 구현/재색인으로 뛰지 말고, Phase 2에서 **재색인을 해야 얻는 가치 있는 세션 신호**를 검토해 한 조각으로 자른다.
 
+### Current step — slice 선정용 audit (2026-05-18~)
+
+`doctor --sessions` V1이 audit 도구로 들어왔다 (`b37307c`). 다음 단 두 가지를 마치면 slice 결정 가능.
+
+1. **T11 corpus side 진단**
+   - doctor surface에서 `compaction=0 (0.0%)` 확정. 남은 질문: **corpus 부재인가, indexer drop인가.**
+   - 실행: sample pi/Claude JSONL을 직접 grep해서 `"type":"compaction"` 또는 `compaction.summary` 라인이 존재하는지 확인.
+   - 결과 따라:
+     - corpus 부재 → `role=compaction` filter는 영구히 noop. 문서로 정리.
+     - indexer drop → `extractSessionChunks` / `session-sanitize` 어느 단계에서 떨어지는지 추적. 수정 후보 정리.
+
+2. **slice 정량 비교 → 결정**
+   - 후보 3가지(`cwd`/normalized project, `entwurf_task_id`, `session_kind`)를 doctor surface 신호로 평가.
+   - 평가 기준:
+     - basename collision 규모 (doctor `project` top-N) → `cwd` 후보 강도
+     - entwurf bypass 충족 여부 (doctor entwurf surface 88 files / 333 rows) → `entwurf_task_id` 후보 강도
+     - role/session-kind 미분류 row 비율 → `session_kind` 후보 강도
+   - 한 조각만 선정해서 다음 항목으로 넘어감 (Definition of done §2).
+
 ### Direction fixed by GLG — 2026-05-13
 
 andenken에는 두 개의 살아있는 임베딩 표면이 있지만 기대하는 성격이 다르다.
@@ -52,10 +71,10 @@ Do not:
 
 ### Definition of done — Phase 2 review gate
 
-1. **Audit what Phase 1 exposed**
-   - T5 honest empty가 실제로 “인덱스 이후 데이터 없음”인지, sync cadence 문제인지 확인한다.
-   - T11 `role=compaction` 0건의 원인을 확인한다: corpus에 compaction line이 없는가, parser가 놓치는가, sanitizer가 버리는가.
-   - T9 `sessionFileContains="_entwurf-"` 우회가 충분한지, `entwurf_task_id` / `is_entwurf`가 필요한지 판단한다.
+1. **Audit what Phase 1 exposed** — `doctor --sessions` (commit `b37307c`)로 즉시 답 나온 부분 / 남은 부분 분리.
+   - T5 honest empty — doctor `timestamp range`(min/max)로 인덱스 cadence 확인 surface는 생겼다. 실제 cadence 점검은 sync log 비교 단계로 남김.
+   - T11 `role=compaction` 0건 — doctor `compaction=0` 확정. **corpus 부재인지 indexer drop인지**는 Current step §1에서 결판낸다.
+   - T9 `sessionFileContains="_entwurf-"` 우회 — doctor entwurf surface `88 files / 333 rows`로 정확히 격리됨이 보임. 별도 `entwurf_task_id` column이 없어도 검색 surface가 작동한다는 신호. slice 후보 우선순위에 반영.
 
 2. **Select reindex-backed metadata slice**
    - 후보 중 **한 조각만** 고른다.
@@ -107,3 +126,4 @@ md 쪽 다음 항목은 여전히 유효하지만, sessions Phase 2 이후로 �
 | B2-survey | 2026-05-12 | llmlog `20260512T165651` — md 90호출, strong seed 20, date+project failure 일반화 |
 | Fresh index | 2026-05-13 | sessions incremental + md near-full incremental 완료, md Oracle sync + smoke pass |
 | Sessions Phase 1 | 2026-05-13 | `0dcba81` stored-signal filters + `recent` mode, baseline recovered, skill interface documented |
+| Sessions doctor V1 | 2026-05-18 | `b37307c` `doctor --sessions` — provider/DB/manifest/gap + role/source/project/null/timestamp/entwurf distribution. Phase 2 audit 도구로 사용. |
