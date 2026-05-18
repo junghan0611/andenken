@@ -607,6 +607,30 @@ export class VectorStore {
   }
 
   /**
+   * Lightweight column dump for diagnostics — selects the listed columns from
+   * every row in the table. Vector columns are intentionally excluded by the
+   * caller (just don't list them); for `dumpColumns(["role", "project"])` the
+   * payload is metadata strings only, so a 30k-row sessions table runs ~6 MB.
+   *
+   * Intended for `doctor --sessions` style aggregation (group-by, distinct,
+   * fill-rate). Production search paths should never call this — they use
+   * `search()` / `fullTextSearch()` with proper filters.
+   */
+  async dumpColumns<K extends string>(cols: K[]): Promise<Array<Record<K, unknown>>> {
+    await this.ensureInitialized();
+    if (!this.table) return [];
+    if (cols.length === 0) return [];
+    const total = await this.table.countRows();
+    if (total === 0) return [];
+    const rows = await this.table
+      .query()
+      .select(cols as string[])
+      .limit(total)
+      .toArray();
+    return rows as Array<Record<K, unknown>>;
+  }
+
+  /**
    * Cross-track safety guard for the QUERY path.
    *
    * Returns `{ ok: true }` when the table is empty (nothing to corrupt) or

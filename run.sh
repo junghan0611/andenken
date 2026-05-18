@@ -90,6 +90,8 @@ Usage: ./run.sh <command> [args]
   doctor --org --json         JSON output
   doctor --md                 MD triage (V1): explain manifest↔indexed gap
   doctor --md --json          MD triage JSON output
+  doctor --sessions           Sessions triage (V1): gap + stored-signal distribution
+  doctor --sessions --json    Sessions triage JSON output
 
 === Sanitize / Window prototypes (API 0) ===
   sanitize:dryrun [flags]     Parse-only sanitization dry-run over all sessions
