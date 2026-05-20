@@ -12,6 +12,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
 import { execSync } from "node:child_process";
 import {
@@ -263,14 +264,14 @@ function getStaleFiles(
 //   - ghostZoneFiles: DB-present but no manifest entry; preserved from
 //                     `getStaleFiles`'s ghost-zone protection
 //   - newFiles    : not in DB
-interface MdStaleClassification {
+export interface MdStaleClassification {
   newFiles: string[];
   staleByMeta: string[];
   suspectFiles: string[];
   ghostZoneFiles: string[];
 }
 
-function getMdStaleFiles(
+export function getMdStaleFiles(
   files: string[],
   indexed: Set<string>,
   manifest: OrgFileManifest,
@@ -339,7 +340,7 @@ function getMdStaleFiles(
  * fingerprint differently, which is the correct behaviour because the
  * boundaries shape the retrieval vectors.
  */
-function computeMdPayloadHash(chunks: { embeddingInput: string }[]): string {
+export function computeMdPayloadHash(chunks: { embeddingInput: string }[]): string {
   const h = createHash("sha256");
   for (let i = 0; i < chunks.length; i++) {
     if (i > 0) h.update("\n");
@@ -351,16 +352,25 @@ function computeMdPayloadHash(chunks: { embeddingInput: string }[]): string {
 // suspect resolution outcomes — surfaced by indexMd / estimateMd so the
 // status / cost line can explain why N suspects collapsed back to "unchanged"
 // vs how many actually need re-embed.
-type SuspectOutcome =
+//
+// 2026-05-20 review (b37663f follow-up): the previous "baseline_no_prior_hash"
+// outcome trusted size-guard alone and silently recorded the new hash without
+// embedding. That created a permanent false negative whenever a legacy
+// manifest entry (no prior payloadHash) coincided with a body change at the
+// same byte size — the change would never reach LanceDB and subsequent syncs
+// would see "matching hash, no work". md is a freshness-critical surface, so
+// the safer policy is: missing prior hash MUST re-embed. The cost of the
+// first cycle is bounded; the cost of a silent miss is not.
+export type SuspectOutcome =
   | "unchanged_hash_match"   // prior hash present and equal — skip embed
   | "stale_hash_mismatch"    // prior hash present but differs — re-embed
-  | "baseline_no_prior_hash"; // first pass for this entry — record hash, skip embed
+  | "stale_missing_hash";    // no prior hash — re-embed (conservative; legacy migration)
 
-function classifySuspect(
+export function classifySuspect(
   prevHash: string | undefined,
   currentHash: string,
 ): SuspectOutcome {
-  if (!prevHash) return "baseline_no_prior_hash";
+  if (!prevHash) return "stale_missing_hash";
   return prevHash === currentHash ? "unchanged_hash_match" : "stale_hash_mismatch";
 }
 
@@ -721,10 +731,12 @@ async function indexMd(force: boolean) {
   // Resolve suspects via payload-hash probe BEFORE the embedding pass. This is
   // pure-local — chunkMdFile is cheap (line walk + CJK weighting, no API) and
   // sha256 over the joined embeddingInput is microseconds per file. The goal
-  // is to keep mtime-touched-but-payload-identical files out of `toIndex`.
+  // is to keep mtime-touched-but-payload-identical files out of `toIndex`
+  // WITHOUT letting a legacy manifest entry (no prior payloadHash) hide a
+  // genuine same-size body change. See `classifySuspect` for the policy.
   let suspectMatch = 0;        // prior hash present and equal — skip embed
   let suspectMismatch = 0;     // prior hash differs — re-embed
-  let suspectBaseline = 0;     // no prior hash — first-pass aggressive: trust size-guard, record hash, skip embed
+  let suspectMissingHash = 0;  // no prior hash — re-embed (records hash on success)
   const suspectStale: string[] = [];
 
   for (const f of suspectFiles) {
@@ -746,9 +758,17 @@ async function indexMd(force: boolean) {
       suspectStale.push(f);
       continue;
     }
+    if (outcome === "stale_missing_hash") {
+      // Legacy manifest entry without payloadHash. We CANNOT trust size-guard
+      // alone because a same-size body change would slip through forever. The
+      // embedding pass will record the hash on success (see manifestEntry
+      // construction below), so subsequent syncs get the cheap match path.
+      suspectMissingHash++;
+      suspectStale.push(f);
+      continue;
+    }
 
-    // unchanged_hash_match OR baseline_no_prior_hash:
-    // refresh mtime/size and record payloadHash so the next run is cheap.
+    // unchanged_hash_match only — safe to refresh mtime/size in place.
     try {
       const stat = fs.statSync(f);
       manifest.files[f] = {
@@ -759,21 +779,21 @@ async function indexMd(force: boolean) {
         payloadHash: currentHash,
       };
     } catch { /* file vanished between scan and stat — leave entry as-is */ }
-
-    if (outcome === "unchanged_hash_match") suspectMatch++;
-    else suspectBaseline++;
+    suspectMatch++;
   }
 
   const toIndex = [...newFiles, ...staleByMeta, ...ghostZoneFiles, ...suspectStale];
 
-  // Persist suspect-resolution updates immediately so a crash before the
-  // embedding pass still leaves the manifest more accurate than before.
-  if (suspectMatch + suspectBaseline > 0) {
+  // Persist match-only manifest refreshes immediately so a crash before the
+  // embedding pass still leaves the manifest more accurate than before. (We
+  // never pre-update for missing-hash or mismatch — those require a real
+  // embedding pass to land the hash.)
+  if (suspectMatch > 0) {
     saveMdManifest(manifest);
   }
 
   console.log(
-    `MD: ${files.length} | indexed: ${indexed.size} | new: ${newFiles.length} | stale-by-meta: ${staleByMeta.length} | ghost-zone: ${ghostZoneFiles.length} | suspect: ${suspectFiles.length} (match=${suspectMatch} baseline=${suspectBaseline} mismatch=${suspectMismatch}) | concurrency: ${CONCURRENCY}`,
+    `MD: ${files.length} | indexed: ${indexed.size} | new: ${newFiles.length} | stale-by-meta: ${staleByMeta.length} | ghost-zone: ${ghostZoneFiles.length} | suspect: ${suspectFiles.length} (match=${suspectMatch} missing-hash=${suspectMissingHash} mismatch=${suspectMismatch}) | concurrency: ${CONCURRENCY}`,
   );
   if (toIndex.length === 0) {
     console.log("✅ All md files indexed and up-to-date.");
@@ -1851,7 +1871,7 @@ async function estimateMd() {
     suspectTotal: 0,
     suspectMatch: 0,
     suspectMismatch: 0,
-    suspectBaseline: 0,
+    suspectMissingHash: 0,
   };
   if (fullMode) {
     filesToEstimate = allFiles;
@@ -1878,6 +1898,7 @@ async function estimateMd() {
 
       // Resolve suspects locally (chunker only — no API). estimate:md must
       // not mutate the on-disk manifest, so this is a pure dry-run probe.
+      // Missing-hash counts as re-embed cost (matches indexMd policy).
       const suspectStale: string[] = [];
       for (const f of suspectFiles) {
         let chunks;
@@ -1891,10 +1912,11 @@ async function estimateMd() {
         if (outcome === "stale_hash_mismatch") {
           breakdown.suspectMismatch++;
           suspectStale.push(f);
-        } else if (outcome === "unchanged_hash_match") {
-          breakdown.suspectMatch++;
+        } else if (outcome === "stale_missing_hash") {
+          breakdown.suspectMissingHash++;
+          suspectStale.push(f);
         } else {
-          breakdown.suspectBaseline++;
+          breakdown.suspectMatch++;
         }
       }
       filesToEstimate = [...newFiles, ...staleByMeta, ...ghostZoneFiles, ...suspectStale];
@@ -1950,11 +1972,11 @@ async function estimateMd() {
     const skipped = allFiles.length - filesToEstimate.length;
     console.log(`  files to index: ${filesToEstimate.length}` + (skipped > 0 ? ` (${skipped} already indexed → skipped)` : ""));
     console.log(
-      `  ↳ breakdown: new=${breakdown.newFiles} | stale-by-meta=${breakdown.staleByMeta} | ghost-zone=${breakdown.ghostZone} | suspect=${breakdown.suspectTotal} (match=${breakdown.suspectMatch} baseline=${breakdown.suspectBaseline} mismatch=${breakdown.suspectMismatch})`,
+      `  ↳ breakdown: new=${breakdown.newFiles} | stale-by-meta=${breakdown.staleByMeta} | ghost-zone=${breakdown.ghostZone} | suspect=${breakdown.suspectTotal} (match=${breakdown.suspectMatch} missing-hash=${breakdown.suspectMissingHash} mismatch=${breakdown.suspectMismatch})`,
     );
-    if (breakdown.suspectBaseline > 0) {
+    if (breakdown.suspectMissingHash > 0) {
       console.log(
-        `  ↳ ${breakdown.suspectBaseline} suspect files lack a prior payload-hash. First sync:md records the hash and skips re-embed (size-guard trusted); subsequent syncs use hash directly.`,
+        `  ↳ ${breakdown.suspectMissingHash} suspect files lack a prior payload-hash and will re-embed (conservative legacy migration). The next sync after this one records the hash and uses the cheap match path.`,
       );
     }
   }
@@ -1980,43 +2002,52 @@ async function estimateMd() {
 }
 
 // --- Main ---
+//
+// Guard against side-effect execution when this module is imported (e.g.
+// from test.ts for stale-policy unit tests). Only run when invoked directly
+// via `npx tsx indexer.ts <cmd>`.
+const isDirectInvocation =
+  process.argv[1] !== undefined &&
+  import.meta.url === pathToFileURL(process.argv[1]).href;
 
-const args = process.argv.slice(2);
-const cmd = args[0];
-const force = args.includes("--force");
+if (isDirectInvocation) {
+  const args = process.argv.slice(2);
+  const cmd = args[0];
+  const force = args.includes("--force");
 
-switch (cmd) {
-  case "sessions":
-    await indexSessions(force);
-    break;
-  case "md":
-    await indexMd(force);
-    break;
-  case "org":
-    await indexOrg(force);
-    break;
-  case "compact":
-    await compact(args[1] ?? "all");
-    break;
-  case "cleanup":
-    await cleanup(args[1] ?? "org");
-    break;
-  case "verify":
-    await verify(args[1] ?? "all");
-    break;
-  case "status":
-    await status();
-    break;
-  case "estimate":
-    await estimate(args[1] ?? "sessions");
-    break;
-  default:
-    console.log("Usage: npx tsx indexer.ts <sessions|md|org|compact|cleanup|verify|status|estimate> [...]");
-    console.log("  INDEX_CONCURRENCY=2 npx tsx indexer.ts md --force");
-    console.log("  npx tsx indexer.ts compact md      # defragment DB");
-    console.log("  npx tsx indexer.ts cleanup md      # dedup + orphan + manifest repair + compact");
-    console.log("  npx tsx indexer.ts cleanup org --dry-run");
-    console.log("  npx tsx indexer.ts verify all      # post-indexing integrity check (sessions + md)");
-    console.log("  npx tsx indexer.ts status [--json] # status; --json emits machine-readable schema");
-    console.log("  npx tsx indexer.ts estimate md     # API-0 dry-run cost estimate");
+  switch (cmd) {
+    case "sessions":
+      await indexSessions(force);
+      break;
+    case "md":
+      await indexMd(force);
+      break;
+    case "org":
+      await indexOrg(force);
+      break;
+    case "compact":
+      await compact(args[1] ?? "all");
+      break;
+    case "cleanup":
+      await cleanup(args[1] ?? "org");
+      break;
+    case "verify":
+      await verify(args[1] ?? "all");
+      break;
+    case "status":
+      await status();
+      break;
+    case "estimate":
+      await estimate(args[1] ?? "sessions");
+      break;
+    default:
+      console.log("Usage: npx tsx indexer.ts <sessions|md|org|compact|cleanup|verify|status|estimate> [...]");
+      console.log("  INDEX_CONCURRENCY=2 npx tsx indexer.ts md --force");
+      console.log("  npx tsx indexer.ts compact md      # defragment DB");
+      console.log("  npx tsx indexer.ts cleanup md      # dedup + orphan + manifest repair + compact");
+      console.log("  npx tsx indexer.ts cleanup org --dry-run");
+      console.log("  npx tsx indexer.ts verify all      # post-indexing integrity check (sessions + md)");
+      console.log("  npx tsx indexer.ts status [--json] # status; --json emits machine-readable schema");
+      console.log("  npx tsx indexer.ts estimate md     # API-0 dry-run cost estimate");
+  }
 }

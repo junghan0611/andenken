@@ -43,6 +43,12 @@ import {
 } from "./md-chunker.ts";
 import { WriteBuffer, type BufferedRecord } from "./write-buffer.ts";
 import {
+  getMdStaleFiles,
+  computeMdPayloadHash,
+  classifySuspect,
+} from "./indexer.ts";
+import { chunkMdFile } from "./md-chunker.ts";
+import {
   rrfFusion,
   applyRecencyDecay,
   jinaRerank,
@@ -688,6 +694,97 @@ ${para}
   assert(Array.isArray(nope) && nope.length === 0, "findMdFiles returns [] for missing root");
 }
 
+async function testMdStalePolicy() {
+  section("MD Stale Policy (2026-05-20 size-guard + payload-hash)");
+
+  // --- classifySuspect (pure) ---
+  // The most safety-critical helper: a "missing prior hash" outcome must
+  // never collapse to skip-embed, otherwise a legacy manifest entry coupled
+  // with a same-size body change would never reach LanceDB.
+  assert(
+    classifySuspect(undefined, "h1") === "stale_missing_hash",
+    "missing prior hash → stale_missing_hash (conservative re-embed)",
+  );
+  assert(
+    classifySuspect("h1", "h1") === "unchanged_hash_match",
+    "matching prior hash → unchanged_hash_match (skip embed)",
+  );
+  assert(
+    classifySuspect("h1", "h2") === "stale_hash_mismatch",
+    "different prior hash → stale_hash_mismatch (re-embed)",
+  );
+
+  // --- computeMdPayloadHash (pure) ---
+  const h1 = computeMdPayloadHash([{ embeddingInput: "AB" }, { embeddingInput: "CD" }]);
+  const h2 = computeMdPayloadHash([{ embeddingInput: "AB" }, { embeddingInput: "CD" }]);
+  const h3 = computeMdPayloadHash([{ embeddingInput: "ABCD" }]);
+  const h4 = computeMdPayloadHash([{ embeddingInput: "AB" }, { embeddingInput: "C" }, { embeddingInput: "D" }]);
+  assert(h1 === h2, "computeMdPayloadHash deterministic for same chunks");
+  assert(h1 !== h3, "different chunk boundaries → different hash (boundary-sensitive)");
+  assert(h1 !== h4, "different chunk count at same total chars → different hash");
+
+  // --- Integration: legacy entry + same-size body change (Finding 1 regression) ---
+  // Scenario: a manifest carried over from before payloadHash existed has
+  // mtime/size/chunks but no payloadHash. The garden file gets a body edit
+  // that happens to keep byte size identical (e.g. "hello" → "hella").
+  // Expected: getMdStaleFiles classifies the file as suspect, and the
+  // classifier returns stale_missing_hash so the indexer re-embeds.
+  const tmpRoot = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "andenken-md-stale-"));
+  try {
+    const filePath = path.join(tmpRoot, "legacy.md");
+    // Body must be long enough to clear the chunker's min_body floor.
+    // Body must clear chunker thresholds (MIN_FILE_BODY_CHARS=250, MIN_CHUNK_CHARS=100).
+    const bodyOriginal = "본문 텍스트가 충분히 길어서 미니멈을 통과한다. ".repeat(20);
+    const bodyEdited =   "본문 데스트가 충분히 길어서 미니멈을 통과한다. ".repeat(20); // same length, one char differs
+    assert(bodyOriginal.length === bodyEdited.length, "test fixture: edits preserve byte size");
+    const wrap = (body: string) => `---\ntitle: legacy\n---\n\n${body}\n`;
+    fs.writeFileSync(filePath, wrap(bodyOriginal));
+
+    // Hash the ORIGINAL body so we can later verify the edit produces a
+    // different hash through chunkMdFile (the chunker is the SSOT — we do
+    // not pre-compute hashes from raw body to avoid shadowing the test).
+    const originalChunks = chunkMdFile(filePath, { bypassFolderPolicy: true });
+    assert(originalChunks.length > 0, "chunker emits chunks for fixture body");
+    const originalHash = computeMdPayloadHash(originalChunks);
+
+    // Snapshot the legacy manifest entry: mtime/size/chunks present, no
+    // payloadHash. Pretend the entry was recorded an hour ago.
+    const statBefore = fs.statSync(filePath);
+    const legacyEntry = {
+      mtimeMs: statBefore.mtimeMs,
+      size: statBefore.size,
+      chunks: originalChunks.length,
+    };
+    const manifest = { files: { [filePath]: legacyEntry }, lastUpdated: "" };
+
+    // Edit the body in place — same length, different content. Then bump
+    // mtime forward so getMdStaleFiles flags it as suspect.
+    fs.writeFileSync(filePath, wrap(bodyEdited));
+    const futureSecs = (statBefore.mtimeMs / 1000) + 60;
+    fs.utimesSync(filePath, futureSecs, futureSecs);
+    const statAfter = fs.statSync(filePath);
+    assert(statAfter.size === statBefore.size, "edited file: size identical");
+    assert(statAfter.mtimeMs > statBefore.mtimeMs, "edited file: mtime newer");
+
+    // Classify and verify.
+    const indexed = new Set<string>([filePath]);
+    const result = getMdStaleFiles([filePath], indexed, manifest);
+    assert(result.suspectFiles.length === 1 && result.suspectFiles[0] === filePath,
+      "same-size body change goes to suspectFiles (not unchanged, not staleByMeta)");
+    assert(result.staleByMeta.length === 0, "size-same path does not produce staleByMeta");
+
+    const newChunks = chunkMdFile(filePath, { bypassFolderPolicy: true });
+    const newHash = computeMdPayloadHash(newChunks);
+    assert(newHash !== originalHash, "edited body produces different payload hash");
+
+    const outcome = classifySuspect(legacyEntry.payloadHash, newHash);
+    assert(outcome === "stale_missing_hash",
+      "legacy entry (no prior hash) + same-size body change → stale_missing_hash (re-embed required)");
+  } finally {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  }
+}
+
 async function testRetriever() {
   section("Retriever");
 
@@ -1111,6 +1208,7 @@ if (mode === "unit" || mode === "all") {
   await testRetriever();
   await testWriteBuffer();
   await testVectorStore();
+  await testMdStalePolicy();
 }
 
 if (mode === "integration" || mode === "all") {
