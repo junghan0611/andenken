@@ -12,6 +12,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { createHash } from "node:crypto";
 import { execSync } from "node:child_process";
 import {
   createSessionProviderFromEnv,
@@ -98,7 +99,15 @@ const CANDIDATE_MULTIPLIER = 4; // openclaw pattern: fetch 4x candidates for bet
 interface OrgFileManifest {
   // skippedOversize: count of chunks filtered out by ORG_EMBED_MAX_CHARS hard guard during the last index of this file.
   // Omitted when 0. Surfaced by `doctor --org` so the operator can see which files are silently losing content.
-  files: Record<string, { mtimeMs: number; size: number; chunks: number; skippedOversize?: number }>;
+  //
+  // payloadHash: sha256 of the joined `embeddingInput` across all chunks for
+  // this file. Present only for md-track entries (sessions/org do not record
+  // it yet). Used by `getMdStaleFiles` to detect that an mtime touch left the
+  // chunker payload unchanged — Hugo's publish pipeline rewrites every file
+  // on each export, so mtime alone over-counts stale by ~30x on the garden
+  // corpus (verified 2026-05-20: 2154 of 2220 mtime-touched files had zero
+  // git diff). The field is optional so existing manifests migrate lazily.
+  files: Record<string, { mtimeMs: number; size: number; chunks: number; skippedOversize?: number; payloadHash?: string }>;
   lastUpdated: string;
 }
 
@@ -232,6 +241,127 @@ function getStaleFiles(
   }
 
   return { newFiles, staleFiles };
+}
+
+// --- MD-specific stale detection ---
+//
+// `getStaleFiles` (used by sessions/org) treats any mtime newer than the
+// manifest entry as stale. That worked when the producer (the user's editor,
+// or appending session writers) touched mtime exactly when content changed.
+// The md track does not have that property: Hugo's `garden publish` rewrites
+// every exported markdown file on each export pass, so 2154 of 2220 garden
+// files in the 2026-05-20 measurement had a fresh mtime but zero git diff.
+//
+// `getMdStaleFiles` splits the mtime-newer set into:
+//   - staleByMeta : mtime newer AND size also changed → re-embed is justified
+//                   without further checking (size delta is a strong proxy
+//                   for body change since Hugo re-encoding is deterministic)
+//   - suspectFiles: mtime newer AND size identical → defer to a payload-hash
+//                   probe; the caller runs the chunker once and compares the
+//                   joined `embeddingInput` sha256 against `payloadHash` in
+//                   the manifest entry
+//   - ghostZoneFiles: DB-present but no manifest entry; preserved from
+//                     `getStaleFiles`'s ghost-zone protection
+//   - newFiles    : not in DB
+interface MdStaleClassification {
+  newFiles: string[];
+  staleByMeta: string[];
+  suspectFiles: string[];
+  ghostZoneFiles: string[];
+}
+
+function getMdStaleFiles(
+  files: string[],
+  indexed: Set<string>,
+  manifest: OrgFileManifest,
+): MdStaleClassification {
+  const newFiles: string[] = [];
+  const staleByMeta: string[] = [];
+  const suspectFiles: string[] = [];
+  const ghostZoneFiles: string[] = [];
+  const hasManifest = Object.keys(manifest.files).length > 0;
+
+  for (const f of files) {
+    if (!indexed.has(f)) {
+      const entry = manifest.files[f];
+      if (!entry) {
+        newFiles.push(f);
+        continue;
+      }
+      try {
+        const stat = fs.statSync(f);
+        const mtimeNewer = stat.mtimeMs > entry.mtimeMs;
+        const sizeDelta = stat.size !== entry.size;
+        if (mtimeNewer && sizeDelta) {
+          staleByMeta.push(f);
+        } else if (mtimeNewer && !sizeDelta) {
+          // DB-missing + mtime touched + size same: still need to land in the
+          // DB. Treat as suspect so payload-hash decides between embed-now and
+          // record-baseline-only.
+          suspectFiles.push(f);
+        } else if (sizeDelta) {
+          staleByMeta.push(f);
+        }
+      } catch {
+        // File may have been deleted
+      }
+      continue;
+    }
+    if (!hasManifest) continue;
+
+    const entry = manifest.files[f];
+    if (!entry) {
+      // Ghost-zone protection — same as getStaleFiles: chunks landed in DB
+      // but the manifest never recorded the baseline. Re-index unconditionally.
+      ghostZoneFiles.push(f);
+      continue;
+    }
+    try {
+      const stat = fs.statSync(f);
+      if (stat.mtimeMs <= entry.mtimeMs) continue;
+      if (stat.size !== entry.size) {
+        staleByMeta.push(f);
+      } else {
+        suspectFiles.push(f);
+      }
+    } catch {
+      // File may have been deleted
+    }
+  }
+
+  return { newFiles, staleByMeta, suspectFiles, ghostZoneFiles };
+}
+
+/**
+ * Stable file-level fingerprint of what the embedding API would receive for
+ * this file. Joining with a newline keeps the hash sensitive to chunk
+ * boundaries — two files with the same lines but different chunking still
+ * fingerprint differently, which is the correct behaviour because the
+ * boundaries shape the retrieval vectors.
+ */
+function computeMdPayloadHash(chunks: { embeddingInput: string }[]): string {
+  const h = createHash("sha256");
+  for (let i = 0; i < chunks.length; i++) {
+    if (i > 0) h.update("\n");
+    h.update(chunks[i].embeddingInput);
+  }
+  return h.digest("hex");
+}
+
+// suspect resolution outcomes — surfaced by indexMd / estimateMd so the
+// status / cost line can explain why N suspects collapsed back to "unchanged"
+// vs how many actually need re-embed.
+type SuspectOutcome =
+  | "unchanged_hash_match"   // prior hash present and equal — skip embed
+  | "stale_hash_mismatch"    // prior hash present but differs — re-embed
+  | "baseline_no_prior_hash"; // first pass for this entry — record hash, skip embed
+
+function classifySuspect(
+  prevHash: string | undefined,
+  currentHash: string,
+): SuspectOutcome {
+  if (!prevHash) return "baseline_no_prior_hash";
+  return prevHash === currentHash ? "unchanged_hash_match" : "stale_hash_mismatch";
 }
 
 /**
@@ -565,10 +695,10 @@ async function indexMd(force: boolean) {
     : loadMdManifest();
   const hasManifest = Object.keys(manifest.files).length > 0;
 
-  const { newFiles, staleFiles } = force
-    ? { newFiles: files.filter((f) => !indexed.has(f)), staleFiles: [] as string[] }
-    : getStaleFiles(files, indexed, manifest);
-  const toIndex = [...newFiles, ...staleFiles];
+  const classification = force
+    ? { newFiles: files.filter((f) => !indexed.has(f)), staleByMeta: [] as string[], suspectFiles: [] as string[], ghostZoneFiles: [] as string[] }
+    : getMdStaleFiles(files, indexed, manifest);
+  const { newFiles, staleByMeta, suspectFiles, ghostZoneFiles } = classification;
 
   // First run baseline: same trick as indexSessions. Files already in the
   // indexed set get a manifest entry so future mtime changes are detectable.
@@ -588,8 +718,62 @@ async function indexMd(force: boolean) {
     saveMdManifest(manifest);
   }
 
+  // Resolve suspects via payload-hash probe BEFORE the embedding pass. This is
+  // pure-local — chunkMdFile is cheap (line walk + CJK weighting, no API) and
+  // sha256 over the joined embeddingInput is microseconds per file. The goal
+  // is to keep mtime-touched-but-payload-identical files out of `toIndex`.
+  let suspectMatch = 0;        // prior hash present and equal — skip embed
+  let suspectMismatch = 0;     // prior hash differs — re-embed
+  let suspectBaseline = 0;     // no prior hash — first-pass aggressive: trust size-guard, record hash, skip embed
+  const suspectStale: string[] = [];
+
+  for (const f of suspectFiles) {
+    let chunks;
+    try {
+      chunks = chunkMdFile(f);
+    } catch {
+      // chunker failure is rare; fall back to treating as stale so the
+      // embedding pass below produces a real error surface.
+      suspectStale.push(f);
+      continue;
+    }
+    const currentHash = computeMdPayloadHash(chunks);
+    const prevEntry = manifest.files[f];
+    const outcome = classifySuspect(prevEntry?.payloadHash, currentHash);
+
+    if (outcome === "stale_hash_mismatch") {
+      suspectMismatch++;
+      suspectStale.push(f);
+      continue;
+    }
+
+    // unchanged_hash_match OR baseline_no_prior_hash:
+    // refresh mtime/size and record payloadHash so the next run is cheap.
+    try {
+      const stat = fs.statSync(f);
+      manifest.files[f] = {
+        mtimeMs: stat.mtimeMs,
+        size: stat.size,
+        chunks: prevEntry?.chunks ?? chunks.length,
+        ...(prevEntry?.skippedOversize ? { skippedOversize: prevEntry.skippedOversize } : {}),
+        payloadHash: currentHash,
+      };
+    } catch { /* file vanished between scan and stat — leave entry as-is */ }
+
+    if (outcome === "unchanged_hash_match") suspectMatch++;
+    else suspectBaseline++;
+  }
+
+  const toIndex = [...newFiles, ...staleByMeta, ...ghostZoneFiles, ...suspectStale];
+
+  // Persist suspect-resolution updates immediately so a crash before the
+  // embedding pass still leaves the manifest more accurate than before.
+  if (suspectMatch + suspectBaseline > 0) {
+    saveMdManifest(manifest);
+  }
+
   console.log(
-    `MD: ${files.length} | indexed: ${indexed.size} | new: ${newFiles.length} | stale: ${staleFiles.length} | concurrency: ${CONCURRENCY}`,
+    `MD: ${files.length} | indexed: ${indexed.size} | new: ${newFiles.length} | stale-by-meta: ${staleByMeta.length} | ghost-zone: ${ghostZoneFiles.length} | suspect: ${suspectFiles.length} (match=${suspectMatch} baseline=${suspectBaseline} mismatch=${suspectMismatch}) | concurrency: ${CONCURRENCY}`,
   );
   if (toIndex.length === 0) {
     console.log("✅ All md files indexed and up-to-date.");
@@ -618,12 +802,13 @@ async function indexMd(force: boolean) {
   const tasks = toIndex.map((file) => async () => {
     try {
       const chunks = chunkMdFile(file);
+      const payloadHash = chunks.length > 0 ? computeMdPayloadHash(chunks) : undefined;
 
-      let manifestEntry: { mtimeMs: number; size: number; chunks: number } | undefined;
+      let manifestEntry: { mtimeMs: number; size: number; chunks: number; payloadHash?: string } | undefined;
       let mtimeIso = "";
       try {
         const stat = fs.statSync(file);
-        manifestEntry = { mtimeMs: stat.mtimeMs, size: stat.size, chunks: chunks.length };
+        manifestEntry = { mtimeMs: stat.mtimeMs, size: stat.size, chunks: chunks.length, ...(payloadHash ? { payloadHash } : {}) };
         mtimeIso = new Date(stat.mtimeMs).toISOString();
       } catch {
         /* file may have been deleted between scan and stat */
@@ -964,6 +1149,13 @@ interface StatusTrack {
   actual_dim: number | null;
   last_indexed: string | null;
   exists: boolean;
+  // md-track only — present when the suspect breakdown was computed (i.e.
+  // mtime newer + size identical). status() reports these without running
+  // the chunker so the call stays fast; estimate:md resolves them with the
+  // payload-hash probe and prints accurate counts.
+  md_stale_by_meta?: number;
+  md_suspect?: number;
+  md_ghost_zone?: number;
 }
 
 interface StatusJson {
@@ -1031,12 +1223,21 @@ async function collectMdStatus(): Promise<StatusTrack> {
   const manifest = loadMdManifest();
   const manifestEntries = Object.keys(manifest.files).length;
   let newCount = 0;
-  let staleCount = 0;
+  let staleByMetaCount = 0;
+  let suspectCount = 0;
+  let ghostZoneCount = 0;
   if (manifestEntries > 0) {
-    const { newFiles, staleFiles } = getStaleFiles(files, indexedFiles, manifest);
+    const { newFiles, staleByMeta, suspectFiles, ghostZoneFiles } =
+      getMdStaleFiles(files, indexedFiles, manifest);
     newCount = newFiles.length;
-    staleCount = staleFiles.length;
+    staleByMetaCount = staleByMeta.length;
+    suspectCount = suspectFiles.length;
+    ghostZoneCount = ghostZoneFiles.length;
   }
+  // status() must stay fast (no chunker, no API), so we report the worst-case
+  // stale count: every suspect counts as stale here. estimate:md / sync:md
+  // resolve suspects via payload-hash and will print the real cost.
+  const stale = staleByMetaCount + suspectCount + ghostZoneCount;
   const fileSet = new Set(files);
   const deletedCount = Object.keys(manifest.files).filter((f) => !fileSet.has(f)).length;
   return {
@@ -1045,12 +1246,15 @@ async function collectMdStatus(): Promise<StatusTrack> {
     indexed_files: indexedFiles.size,
     manifest_entries: manifestEntries,
     new: newCount,
-    stale: staleCount,
+    stale,
     deleted: deletedCount,
-    to_index: newCount + staleCount,
+    to_index: newCount + stale,
     actual_dim: actualDim,
     last_indexed: manifest.lastUpdated || null,
     exists,
+    md_stale_by_meta: staleByMetaCount,
+    md_suspect: suspectCount,
+    md_ghost_zone: ghostZoneCount,
   };
 }
 
@@ -1170,6 +1374,16 @@ async function status() {
       console.log(
         `   ↳ manifest: ${md.manifest_entries} entries | new: ${md.new} | stale: ${md.stale} | deleted: ${md.deleted} | to-index: ${md.to_index}`,
       );
+      if ((md.md_suspect ?? 0) > 0 || (md.md_stale_by_meta ?? 0) > 0 || (md.md_ghost_zone ?? 0) > 0) {
+        console.log(
+          `   ↳ stale breakdown: by-meta=${md.md_stale_by_meta ?? 0} | suspect (mtime-only)=${md.md_suspect ?? 0} | ghost-zone=${md.md_ghost_zone ?? 0}`,
+        );
+        if ((md.md_suspect ?? 0) > 0) {
+          console.log(
+            `   ↳ suspect = mtime touched but size identical; payload-hash probe in estimate:md / sync:md may collapse most to unchanged`,
+          );
+        }
+      }
       if (md.last_indexed) {
         console.log(`   ↳ last indexed: ${md.last_indexed}`);
       }
@@ -1624,13 +1838,28 @@ async function estimateMd() {
   const fullMode = process.argv.includes("--full");
   const allFiles = findMdFiles();
 
+  // Lazy-import md-chunker so we don't pull it into sessions paths.
+  const { chunkMdFile, estimateStringChars } = await import("./md-chunker.js");
+
   let filesToEstimate: string[];
+  // Breakdown surfaced under the headline (NEXT 2026-05-20: estimate:md must
+  // explain WHY stale, not just how many). Zero for --full.
+  const breakdown = {
+    newFiles: 0,
+    staleByMeta: 0,
+    ghostZone: 0,
+    suspectTotal: 0,
+    suspectMatch: 0,
+    suspectMismatch: 0,
+    suspectBaseline: 0,
+  };
   if (fullMode) {
     filesToEstimate = allFiles;
   } else {
     const manifest = loadMdManifest();
     if (Object.keys(manifest.files).length === 0) {
       filesToEstimate = allFiles;
+      breakdown.newFiles = allFiles.length;
     } else {
       let indexed = new Set<string>();
       const mDbPath = getMdDbPath();
@@ -1640,13 +1869,37 @@ async function estimateMd() {
         indexed = await store.getIndexedFiles();
         await store.close();
       }
-      const { newFiles, staleFiles } = getStaleFiles(allFiles, indexed, manifest);
-      filesToEstimate = [...newFiles, ...staleFiles];
+      const { newFiles, staleByMeta, suspectFiles, ghostZoneFiles } =
+        getMdStaleFiles(allFiles, indexed, manifest);
+      breakdown.newFiles = newFiles.length;
+      breakdown.staleByMeta = staleByMeta.length;
+      breakdown.ghostZone = ghostZoneFiles.length;
+      breakdown.suspectTotal = suspectFiles.length;
+
+      // Resolve suspects locally (chunker only — no API). estimate:md must
+      // not mutate the on-disk manifest, so this is a pure dry-run probe.
+      const suspectStale: string[] = [];
+      for (const f of suspectFiles) {
+        let chunks;
+        try { chunks = chunkMdFile(f); } catch {
+          suspectStale.push(f);
+          breakdown.suspectMismatch++;
+          continue;
+        }
+        const hash = computeMdPayloadHash(chunks);
+        const outcome = classifySuspect(manifest.files[f]?.payloadHash, hash);
+        if (outcome === "stale_hash_mismatch") {
+          breakdown.suspectMismatch++;
+          suspectStale.push(f);
+        } else if (outcome === "unchanged_hash_match") {
+          breakdown.suspectMatch++;
+        } else {
+          breakdown.suspectBaseline++;
+        }
+      }
+      filesToEstimate = [...newFiles, ...staleByMeta, ...ghostZoneFiles, ...suspectStale];
     }
   }
-
-  // Lazy-import md-chunker so we don't pull it into sessions paths.
-  const { chunkMdFile, estimateStringChars } = await import("./md-chunker.js");
 
   let totalChunks = 0;
   let totalChars = 0;
@@ -1696,6 +1949,14 @@ async function estimateMd() {
   } else {
     const skipped = allFiles.length - filesToEstimate.length;
     console.log(`  files to index: ${filesToEstimate.length}` + (skipped > 0 ? ` (${skipped} already indexed → skipped)` : ""));
+    console.log(
+      `  ↳ breakdown: new=${breakdown.newFiles} | stale-by-meta=${breakdown.staleByMeta} | ghost-zone=${breakdown.ghostZone} | suspect=${breakdown.suspectTotal} (match=${breakdown.suspectMatch} baseline=${breakdown.suspectBaseline} mismatch=${breakdown.suspectMismatch})`,
+    );
+    if (breakdown.suspectBaseline > 0) {
+      console.log(
+        `  ↳ ${breakdown.suspectBaseline} suspect files lack a prior payload-hash. First sync:md records the hash and skips re-embed (size-guard trusted); subsequent syncs use hash directly.`,
+      );
+    }
   }
   console.log(`  chunks (chunker output): ~${totalChunks.toLocaleString()}`);
   if (filesToEstimate.length > 0) {
