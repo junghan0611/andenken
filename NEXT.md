@@ -21,6 +21,8 @@
 
 2b는 측정-우선이다. 임계값 후보별로 **빠지는 세션 수 / row 수 / 검색 결과 영향**을 정량 비교한 뒤 2a 재색인에 통합한다.
 
+2026-05-26 사용자 검토 의견도 여기로 합친다: 최근 sessions sync에서 `new 95`가 한 번에 들어올 정도로 세션량이 늘었고, 이제는 **너무 짧거나 의미 없는 세션을 판별해 인덱스에서 정리하는 로직**이 필요하다. 이번 단계는 그 요구를 바로 코드로 박기보다, 어떤 임계값이 실제로 low-signal chatter / ping-pong / tool-noise를 줄이면서도 작업 기억을 해치지 않는지 먼저 수치로 보자는 단계다.
+
 후보 dimension:
 
 | 후보 | 의미 | 시뮬레이션 출력 |
@@ -33,6 +35,7 @@
 산출물:
 - 시뮬레이션 스크립트 (read-only) 또는 `doctor --sessions --quality-sim` 옵션
 - 각 후보 + 조합의 정량 결과
+- 특히 "짧고 의미 없는 sessions"가 얼마나 빠지는지에 대한 사람이 읽을 수 있는 샘플 세트
 - GLG가 임계값 한 세트 선택 → 2a fix와 함께 적용
 
 ### Boundary principle — use explicit session signals, do not imitate day-query
