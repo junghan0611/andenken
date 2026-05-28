@@ -8,17 +8,17 @@
 
 **단 하나의 현재 우선순위:** 2026-05-28 doomemacs-config 측 wrapper
 (`andenken-search-sessions-today/this-week`)를 사용자가 매일 쓰려고
-처음 잡았다. 즉시 결과 미달. 실측으로 surface shape 문제 확정 (어제
+처음 시도했다. 즉시 결과 미달. 실측으로 surface shape 문제 확정 (어제
 KST 윈도우 / limit 30 / mode=recent):
 
 | 축 | 분포 | 해석 |
 |---|---|---|
-| project | pi-shell-acp 25 / forge-config 5 | project 다양성 박살 |
-| sessionFile | 한 세션이 17/30 (57%) | 세션 다양성 박살 |
-| timestamp | 100%가 UTC 10:40~11:00 (KST 19:40~20:00 마지막 1시간) | **시간 다양성 박살 — 가장 critical** |
+| project | pi-shell-acp 25 / forge-config 5 | project 다양성 붕괴 |
+| sessionFile | 한 세션이 17/30 (57%) | 세션 다양성 붕괴 |
+| timestamp | 100%가 UTC 10:40~11:00 (KST 19:40~20:00 마지막 1시간) | **시간 다양성 붕괴 — 가장 critical** |
 
 `mode=recent`는 stored-signal scan + timestamp DESC라 윈도우 끝 N분이
-결과를 다 점령한다. 사용자가 보고 싶은 "어제 24h 전체 자리"가 실제로는
+결과를 다 점령한다. 사용자가 보고 싶은 "어제 24h 전체 흐름"이 실제로는
 **1/24만** 보인다. 인덱싱이 아니라 retriever surface shape 문제.
 
 ### Two consumers, one surface
@@ -36,8 +36,8 @@ KST 윈도우 / limit 30 / mode=recent):
 
 | 단계 | 내용 | 상태 |
 |---|---|---|
-| **2e** | Multi-axis balanced windowed view — `(sessionFile, time-bucket)` group + project balancing tier. retriever module + `cli.ts` + `index.ts` parity. 인덱싱 무변경 | **현재 진입점** |
-| **2b** | Corpus noise threshold — simulation 병행 (read-only). 임계값 박기는 2e 안정 후 | 시뮬만 |
+| **2e** | Multi-axis balanced windowed view — `(sessionFile, time-bucket)` group + project balancing tier. retriever module + `cli.ts` + `index.ts` parity. 인덱싱 무변경 | **현재 시작점** |
+| **2b** | Corpus noise threshold — simulation 병행 (read-only). 임계값 확정은 2e 안정 후 | 시뮬만 |
 | **2a** | parsePiLine compaction schema fix + targeted reindex (Phase 1 stored signals 결손 채움) | 2e 다음 |
 | **2c** | Golden quality 측정 — query #3 / #6 / #8. **2e 비차단** (regression check만 머지 직전) | pending |
 | **2d** | Derived signals 인덱싱 (entwurf_task_id / commit_sha / slash_command) — 2c 결과 보고 결정 | deferred |
@@ -54,13 +54,13 @@ KST 윈도우 / limit 30 / mode=recent):
 
 Step 0 정의:
 
-1. fileDedup이 sessionFile id에 안 먹는 것 확인 (가설 검증, GPT 자리)
+1. fileDedup이 sessionFile id에 안 먹는 것 확인 (가설 검증, GPT 관점)
 2. **Session track에서 fileDedup 우회 분기 또는 `maxPerFile` 대폭 증가
    (limit×10 이상)** — per-session truncation 방지
 3. balance 책임은 전적으로 Step 1 scheduler에 위임
 
-이거 함께 안 박으면 17/30 풀어도 깊은 세션이 토막나서 다른 모양으로
-박살. **수술 1줄 아님**.
+이거 함께 안 하면 17/30 독점이 풀려도 깊은 세션이 토막나서 다른 형태의
+붕괴가 생긴다. **수술 1줄 아님**.
 
 #### Step 1 — Selection scheduler (sort 아님)
 
@@ -166,7 +166,7 @@ sessionFile filename pattern: `<parent_id>_entwurf-<childId>.jsonl`.
 시간 윈도우는 caller가 잡는다 (emacs wrapper나 `recall` / `session_search`).
 andenken은 그 안에서 **세션 중복 없는 / project 다양성 있는 / 시간 분포
 균형 잡힌** 결과를 노출. 윈도우 자연어 파싱과 git/journal/bib 통합은
-day-query / recall 자리.
+day-query / recall 영역.
 
 ### Non-goal
 
@@ -196,8 +196,8 @@ day-query / recall 자리.
 
 이 작업 영역(windowed sessions retrieval, scheduler 설계, dual-consumer
 surface)은 2026-05-28 첫 자문에서 Gemini-3.1-pro가 결정적 발견을 줬다
-— 특히 fileDedup 역설은 직전 자문(GPT-5.5)의 답을 정면 반박해 박살을
-한 단계 더 깊이서 막았다. 다음 라운드에서도 같은 자리에서 막히면 우선
+— 특히 fileDedup 역설은 직전 자문(GPT-5.5)의 답을 정면 반박하며 문제를
+한 단계 더 깊이에서 막았다. 다음 라운드에서도 같은 지점에서 막히면 우선
 Gemini로:
 
 ```
@@ -207,5 +207,5 @@ cwd 옵션으로 AGENTS.md inject
 cost: subscription-backed (낮음)
 ```
 
-다른 자리(예: corpus noise threshold 2b, derived signals 2d)에서는
-이번 신호가 자동 적용되지 않는다 — 그 자리는 다시 처음부터 자문.
+다른 영역(예: corpus noise threshold 2b, derived signals 2d)에서는
+이번 신호가 자동 적용되지 않는다 — 그 영역은 다시 처음부터 자문.

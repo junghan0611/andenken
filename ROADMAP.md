@@ -31,7 +31,7 @@
 
 | 축 | 우리 상태 | 처리 방향 |
 |----|-----------|-----------|
-| **active memory** | 미보유 | **나중에 유사물 도입 예정** (slot 비워둠) |
+| **active memory** | 미보유 | **나중에 유사물 도입 예정** (공간만 비워둠) |
 | memory layer (active / short / long / dream) | 미보유 | OpenClaw 단독. andenken은 단축 담당이라 의도적 미보유. |
 | **품질 측정 로직** | 미보유 | **OpenClaw에서 이식 예정** |
 | 봇별 분리 corpus | 미보유 (전체 통합) | 의도적 — corpus 단위가 다름 |
@@ -73,7 +73,7 @@
 - **2026-05-08** — OpenClaw 측 Qwen3-Embedding-8B 변경 테스트 시작 (nixos-config 담당자). andenken은 결과 보고 적용 여부 검토 — NEXT.md *외부 의존 대기* 항목으로 등록. matryoshka 2560d truncate 옵션이 있어 schema 무변경 가능.
 - **2026-05-08** — andenken 문서 정리. MEMORY.md 폐기. ROADMAP.md(한글, 비교표 중심) 신설을 핵심 문서로. NEXT.md는 *지금 하려는 한 가지*만 담는 좁은 surface로 재정의 (라운드 큐 폐기). 임베딩 단축 담당 명시.
 - **2026-05-08** — NEXT.md를 sanitization-first로 갈아끼움 (이전 안: 평가 도구). 같은 pi JSONL을 OpenClaw가 0.45–57%까지 정제하는데 andenken은 line-based로 거의 전부 통과시킨다는 5/8 baseline 발견 반영. 평가 도구는 sanitization 끝난 후 다음 NEXT로.
-- **2026-05-08** — OpenClaw 5.7 baseline 박힘 (nixos-config 담당자, commit `58844b9`). sessions chunks 1306 → 3747 (+187%, transcript-hygiene). 같은 모델 / 차원 / tokenizer / chunking / MMR / decay로 horizontal 정렬. → andenken과의 retrieval 튜닝 우위 차이 사라짐.
+- **2026-05-08** — OpenClaw 5.7 baseline 적용됨 (nixos-config 담당자, commit `58844b9`). sessions chunks 1306 → 3747 (+187%, transcript-hygiene). 같은 모델 / 차원 / tokenizer / chunking / MMR / decay로 horizontal 정렬. → andenken과의 retrieval 튜닝 우위 차이 사라짐.
 - **2026-05-07** — sessions live tier 승격. ollama 로컬 fast path + hourly cadence. doctor `reasons[]`, CJK boundary guard, recalls.jsonl persistence 가동. commits `32478c3`, `76d9703`, `1b99dbf`, `10ffa53`.
 - **2026-04-30** — gpu2i를 VOS chat-completion으로 전환. embedding은 gpu1i 단일.
 - **2026-04-22** — `doctor --org` stage 1 (retrieval / chunk / structure 진단).
