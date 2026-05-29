@@ -1,12 +1,12 @@
 # NEXT — andenken
 
 > 정체성 / 비교표 / 변화 기록 / 운영 신호 / 역할 분담은 [ROADMAP.md](./ROADMAP.md).
-> 이 파일은 **andenken 담당자가 지금 진행 중인 단 하나의 다음 항목**만 잡는다.
+> 이 파일은 **andenken에서 다음에 할 것들 / 잠시 주차한 것들**을 적는다.
 > 완료된 긴 히스토리는 ROADMAP.md / commit log로 보낸다.
 
 ## Next — Windowed sessions retrieval that survives daily use
 
-**단 하나의 현재 우선순위:** 2026-05-28 doomemacs-config 측 wrapper
+**현재 주요 우선순위:** 2026-05-28 doomemacs-config 측 wrapper
 (`andenken-search-sessions-today/this-week`)를 사용자가 매일 쓰려고
 처음 시도했다. 즉시 결과 미달. 실측으로 surface shape 문제 확정 (어제
 KST 윈도우 / limit 30 / mode=recent):
@@ -209,3 +209,20 @@ cost: subscription-backed (낮음)
 
 다른 영역(예: corpus noise threshold 2b, derived signals 2d)에서는
 이번 신호가 자동 적용되지 않는다 — 그 영역은 다시 처음부터 자문.
+
+## Parked — Sessions cleanup after pruning sub-100KB transcripts
+
+2026-05-29 사용자가 `100KB` 이하 세션 JSONL을 대거 삭제했다. 다음
+세션에서 정리 방향 결정 필요.
+
+- 현황: `deleted=860`, `to-index=44`
+- dry-run: `cleanup sessions --dry-run` → `orphan files=812`, `orphan rows=2979`
+- dry-run 실측: **~0.73s**
+- 주의: 증분 `sync-sessions`만으로는 삭제된 세션 임베딩이 자동 제거되지 않음
+
+다음 시작 순서:
+
+1. `./run.sh status --json`
+2. `pnpm exec tsx indexer.ts cleanup sessions --dry-run`
+3. 목표가 검색면 정리면 `./run.sh cleanup sessions`
+4. DB + manifest까지 완전 청소면 `scripts/rebuild-sessions-full.sh`

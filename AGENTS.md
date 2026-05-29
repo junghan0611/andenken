@@ -264,7 +264,7 @@ workflow. Implications:
 |--------|---------|
 | **Core document — comparison, history, maintenance, boundaries (Korean)** | **[ROADMAP.md](./ROADMAP.md)** |
 | **Detailed sessions + md matrix vs OpenClaw** | **[COMPARISON.md](./COMPARISON.md)** |
-| **Next single thing this agent is doing** | **[NEXT.md](./NEXT.md)** |
+| **Next / parked items this agent should return to** | **[NEXT.md](./NEXT.md)** |
 | Rules that must stay true | [INVARIANT.md](./INVARIANT.md) |
 | Public framing / naming | [README.md](./README.md) |
 | "What can I run?" | `./run.sh` |
@@ -287,10 +287,10 @@ Concretely:
 - **No round queue.** ROADMAP.md is a comparison table + history + maintenance
   + role boundaries. Round / micro-fix / chase-list framing is rejected at
   this level — micro-fixes belong in commits, not in a top-level queue.
-- **`NEXT.md` holds exactly one thing.** The next item this agent-in-charge
-  is about to do, with the *why*. When done, the change is stamped into
-  ROADMAP History and `NEXT.md` is overwritten with the next item. Never
-  appended, never queued multiple items.
+- **`NEXT.md` is the working queue.** It can hold the immediate next item
+  and also parked follow-ups that are not being done right now. Put things
+  there so the next session can resume without guesswork. When an item is
+  done, remove it and stamp durable outcomes into ROADMAP History / commits.
 - **Doctor signals are maintenance, not roadmap items.** `./run.sh doctor`
   output triggers fixes; it does not shape the comparison table.
 - **GLG decisions** that affect andenken arrive as direct prompts. They do not
