@@ -4,6 +4,24 @@
 > 이 파일은 **andenken에서 다음에 할 것들 / 잠시 주차한 것들**을 적는다.
 > 완료된 긴 히스토리는 ROADMAP.md / commit log로 보낸다.
 
+## Watching — pi-shell-acp 1.0.0 (session-identity 2차 정렬 예상)
+
+0.9.0 garden-native identity 정렬은 끝났다 (`b77713d`). 그런데 0.9.0
+changelog가 직접 예고하듯 **resident · entwurf · 1.0.0 meta-bridge가
+하나의 garden session ontology로 수렴**한다 — 즉 1.0.0에서 세션 정체성/이름/
+헤더 표면이 **또 바뀔 수 있다.** GLG가 지금 pi-shell-acp 1.0.0 작업 중이고,
+끝나면 결과를 가지고 andenken과 논의 예정.
+
+andenken 측 함의 (지금 착수 금지, 1.0.0 결과 본 뒤):
+
+- **2d entwurf parent/child threading은 1.0.0 결과를 기다린다.** 헤더 `id` +
+  `entwurf`/`control` 태그를 인덱싱하는 schema 결정인데, 1.0.0이 meta-bridge로
+  그 표면을 또 바꾸면 지금 설계한 게 두 번 깨진다. 0.9.0에서 한 번 깨진 걸로
+  충분 — threading은 1.0.0 session 표면이 굳은 뒤 한 번에 설계.
+- 1.0.0이 landing하면: (1) 세션 파일명/헤더/이름 grammar diff 확인,
+  (2) session-indexer.ts 파일명·헤더 가정 재점검, (3) AGENTS.md
+  "Session corpus sources" 절 재정렬.
+
 ## Next — Windowed sessions retrieval that survives daily use
 
 **현재 주요 우선순위:** 2026-05-28 doomemacs-config 측 wrapper
@@ -246,3 +264,30 @@ cost: subscription-backed (낮음)
 2. `pnpm exec tsx indexer.ts cleanup sessions --dry-run`
 3. 목표가 검색면 정리면 `./run.sh cleanup sessions`
 4. DB + manifest까지 완전 청소면 `scripts/rebuild-sessions-full.sh`
+
+## Parked — openclaw v2026.6.1 memory-axis 동기화 검토 (2026-06-05, 결론: 포팅 없음)
+
+`~/repos/3rd/openclaw`를 stable `v2026.6.1` (2026-06-03)로 checkout하고
+우리가 포팅해온 기억축 로직과 대조했다. **andenken이 채택할 알고리즘적
+retrieval/chunking 개선은 없다.** 재조사를 막기 위해 결론을 박아둔다.
+
+- **한국어 particle/stem 로직**: `query-expansion.ts`의 `KO_TRAILING_PARTICLES`
+  / `stripKoreanTrailingParticle` / `isUsefulKoreanStem`가 우리 `retriever.ts`
+  포팅본과 **완전히 동일**. drift 없음, 새 particle 없음 → in sync.
+- **CJK tokenizer 개선** (#56707 configurable FTS5 unicode61/trigram,
+  #80613/#86645 dreaming dedupe CJK tokenizer): **SQLite FTS5 / dreaming
+  axis 전용**. andenken은 LanceDB(tantivy)라 비적용 — 같은 "짧은 CJK 토큰
+  드롭" 실패모드는 이미 `getShortCJKTokens` + `substringSearch`로 대응 중.
+- **STOP_WORDS_KO 필터**: openclaw `tokenize`는 stopword를 거르지만 그건
+  FTS-only fallback / 인덱싱 tokenize 경로용. andenken은 항상 임베딩(8B)이
+  있어 BM25는 hybrid의 한 팔이고, query-side는 dual-emit(원본+stem)이 의도.
+  gap 아님.
+- **5.22→6.1 memory 커밋 대다수**: 방어적 하드닝(bound/cap/validate
+  timeout·retry·JSON size)과 qmd salvage. qmd는 우리가 #8에서 retire,
+  나머지는 openclaw runtime(remote worker/batch) 전용 → 비이식.
+
+유일한 하드닝 후보 (committed task 아님, 다음에 우리 코드 확인만):
+- `#85704 prevent silent vector index degradation when provider temporarily
+  unavailable` — provider가 런 도중 죽을 때 degraded row를 조용히 쓰지 않게.
+  andenken은 wrong-dim preflight + hard guard로 *시작 전* 차단은 있으나
+  *런 도중 provider down* 각도는 미확인. 우려되면 indexer 경로 한 번 점검.
