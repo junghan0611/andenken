@@ -40,7 +40,7 @@ KST 윈도우 / limit 30 / mode=recent):
 | **2b** | Corpus noise threshold — simulation 병행 (read-only). 임계값 확정은 2e 안정 후 | 시뮬만 |
 | **2a** | parsePiLine compaction schema fix + targeted reindex (Phase 1 stored signals 결손 채움) | 2e 다음 |
 | **2c** | Golden quality 측정 — query #3 / #6 / #8. **2e 비차단** (regression check만 머지 직전) | pending |
-| **2d** | Derived signals 인덱싱 (entwurf_task_id / commit_sha / slash_command) — 2c 결과 보고 결정 | deferred |
+| **2d** | Derived signals 인덱싱 — 헤더 `id`(garden sessionId) + `entwurf`/`control` 이름 태그 / commit_sha / slash_command. **0.9.0 이후 entwurf parent/child threading은 여기로 흡수** (파일명 공짜 소멸, 인덱싱 필수). 2c 결과 보고 결정 | deferred |
 
 ### Current step — 2e Multi-axis balanced view
 
@@ -111,17 +111,34 @@ Hybrid mode 추가:
 - session view에서 MMR off — `(bucket, sessionFile, project)` balance가
   더 직접적 diversity.
 
-#### Step 2 — Entwurf parent/child threading
+#### Step 2 — (제거됨) Entwurf 세션은 평범한 garden 세션으로 처리
 
-sessionFile filename pattern: `<parent_id>_entwurf-<childId>.jsonl`.
+**결정 (2026-06-05, 0.9.0 정렬).** 원래 Step 2는 entwurf 자식 세션을
+별종으로 특별 취급(own-row vs fold, `[entwurf:<id>]` badge)하려 했고, 그
+전제는 `<parent_id>_entwurf-<childId>.jsonl` 파일명에 부모-자식 링크가
+박혀있다는 것이었다. pi-shell-acp 0.9.0 garden-native identity 릴리즈가
+이 전제를 **두 방향에서 동시에 무너뜨렸다**:
 
-- recent/empty: `chunks ≥ 3` 자식만 own row. 작은 자식은 같은
-  `(project, bucket)` 대표 row에 fold, 그런 row 없으면 own row.
-- hybrid/non-empty: 작은 자식이라도 score 높으면 promote. cutoff보다
-  query relevance가 우선.
-- candidate line에 `[entwurf:<id>]` 또는 `[+N tiny]` badge.
-- parent file 확정은 schema 변경 없이는 정확하지 않음 → "같은 bucket
-  대표"로 fold가 안전한 근사.
+1. **구현 근거 소멸.** 파일명이 `<created-at>_<sessionId>.jsonl`로 바뀌어
+   파일명에 부모 링크가 없다. entwurf 정체성은 JSONL 헤더 `id` + 세션
+   이름의 `entwurf` 태그로 이동했는데, andenken이 현재 인덱싱하는 컬럼엔
+   둘 다 없다. 즉 retrieval 시점에 "이 세션이 entwurf 자식인가"를
+   **공짜로 알 방법이 사라졌다** (파일명 substring 탐지가 유일한 경로였음).
+2. **철학적 정렬.** 0.9.0의 선언은 "entwurf 세션을 worker artifact의
+   별종으로 취급하지 않는다 — resident · entwurf · 1.0.0 meta-bridge가
+   하나의 garden session ontology로 수렴한다". andenken retrieval이
+   entwurf를 별종 분기로 다루는 것은 upstream 의도와 정면으로 어긋난다.
+
+따라서 **2e ship에서 entwurf 특별 취급을 들어낸다.** Step 1 balance
+스케줄러는 entwurf 세션을 그냥 평범한 garden 세션으로 다룬다 —
+`(sessionFile, bucket)` dedup + project 다양성으로 동일하게 균형 잡힌다.
+별도 fold/badge/threading 없음. 이건 타협이 아니라 0.9.0과의 정렬이다.
+
+**threading을 정말 살리려면 → 2d로 강등.** 헤더 `id`(garden sessionId)와
+`entwurf` 태그를 파생 신호로 **인덱싱해야** 가능하다. 파일명 공짜는 끝났고,
+이제 진짜 schema 결정이다. 부모 링크 후보 소스는 entwurf-message
+custom_message의 `sender_info`/`receiver_info` (session-excerpt.ts 346–348,
+현재 excerpt 표시 레벨만 — 인덱싱 안 됨). 2d 본격화 시 재설계.
 
 #### Acceptance — 2단계 ship
 
@@ -138,6 +155,9 @@ sessionFile filename pattern: `<parent_id>_entwurf-<childId>.jsonl`.
    - 같은 옵션 동일한 balance 행동
 3. **Regression spot check** (2c 본 단계 전):
    - #3 entwurf 결과 / #6 multi-repo 의미연결 / #8 entwurf 흐름 한 번
+   - **0.9.0 정렬:** entwurf 세션이 평범한 garden 세션으로 surface하면
+     통과 (별종 threading/badge 기대 안 함 — Step 2 제거). entwurf
+     transcript가 balance 윈도우에 정상 포함되는지만 확인.
    - 머지 직전 통과 확인 — quality tuning은 별 단계
 
 #### Code location

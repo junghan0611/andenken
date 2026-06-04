@@ -433,7 +433,7 @@ export default function (pi: ExtensionAPI) {
       sessionFileContains: Type.Optional(
         Type.String({
           description:
-            "Substring filter on sessionFile path. Short-term entwurf surface — e.g. '_entwurf-' to recall task transcripts before a dedicated entwurf_task_id column lands in Phase 2.",
+            "Substring filter on sessionFile path. Generic path filter — narrow to a directory or filename fragment when project/time is not enough.",
         }),
       ),
       mode: Type.Optional(

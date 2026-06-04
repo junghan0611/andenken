@@ -114,12 +114,15 @@ Sessions index exactly two harness sources:
 | `pi` | `~/.pi/agent/sessions` | pi JSONL (`type="message"`, `message.role`) |
 | `claude` | `~/.claude/projects` | Claude Code JSONL (`type="user" | "assistant"`) |
 
-Entwurf sessions are **not a third source**. A spawned/resumed entwurf that writes
-`*_entwurf-<taskId>.jsonl` under `~/.pi/agent/sessions/<project>/` is indexed by
-the normal `pi` source path, with project inferred from the cwd-shaped session
-directory. Saved task metadata / control sockets are not separately embedded;
-only the transcript JSONL that lands under the pi sessions tree participates in
-`sessions.lance`.
+Entwurf sessions are **not a third source**. Since pi-shell-acp 0.9.0 the old
+`*_entwurf-<taskId>.jsonl` filename species is gone — a spawned/resumed entwurf
+is just a garden-native session written as `<created-at>_<sessionId>.jsonl`
+(sessionId `YYYYMMDDTHHMMSS-[0-9a-f]{6}`, with the `entwurf` identity carried in
+the JSONL header / session name tag, not in the filename) under
+`~/.pi/agent/sessions/<project>/`. It is indexed by the normal `pi` source path,
+with project inferred from the cwd-shaped session directory. Saved task metadata /
+control sockets are not separately embedded; only the transcript JSONL that lands
+under the pi sessions tree participates in `sessions.lance`.
 
 Do **not** index `~/.pi/agent/claude-config-overlay/projects`. That directory
 is pi-shell-acp's Claude overlay, not a third memory source. Its work is already

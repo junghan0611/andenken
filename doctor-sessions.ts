@@ -8,7 +8,7 @@
  * Scope (V1):
  *   - Provider / DB / manifest / filesystem coverage check (mirrors doctor-md).
  *   - Stored-signal distribution: role, project (top N), timestamp range,
- *     null fill rate per column, entwurf file pattern count.
+ *     null fill rate per column.
  *   - Zero-chunk manifest entries: count + sample paths (no deep skip-reason
  *     classification — sessions skips are line-level inside extractSessionChunks
  *     and re-running that for every file is too heavy for V1).
@@ -33,7 +33,6 @@ import { createSessionProviderFromEnv } from "./embedding-provider.js";
 
 const SAMPLE_TOP_N = 5;
 const PROJECT_TOP_N = 8;
-const ENTWURF_PATTERN = "_entwurf-";
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -97,11 +96,6 @@ interface StoredSignals {
   nullCounts: Record<string, number>;
   // Min / max timestamp seen in the table (ISO strings).
   timestampRange: { min: string | null; max: string | null };
-  // Number of rows whose sessionFile path contains the entwurf pattern.
-  entwurfRowCount: number;
-  // Distinct sessionFile values containing the entwurf pattern (= entwurf
-  // session count).
-  entwurfFileCount: number;
 }
 
 interface SessionsDoctorReport {
@@ -257,8 +251,6 @@ async function probeStoredSignals(store: VectorStore | null): Promise<StoredSign
     projectDistinctCount: 0,
     nullCounts: {},
     timestampRange: { min: null, max: null },
-    entwurfRowCount: 0,
-    entwurfFileCount: 0,
   };
   if (!store) return empty;
 
@@ -283,8 +275,6 @@ async function probeStoredSignals(store: VectorStore | null): Promise<StoredSign
   };
   let minTs: string | null = null;
   let maxTs: string | null = null;
-  let entwurfRowCount = 0;
-  const entwurfFiles = new Set<string>();
 
   for (const r of rows) {
     const role = r.role as string | null | undefined;
@@ -302,9 +292,6 @@ async function probeStoredSignals(store: VectorStore | null): Promise<StoredSign
     const sessionFile = r.sessionFile as string | null | undefined;
     if (isNullish(sessionFile)) {
       nullCounts.sessionFile++;
-    } else if ((sessionFile as string).includes(ENTWURF_PATTERN)) {
-      entwurfRowCount++;
-      entwurfFiles.add(sessionFile as string);
     }
 
     const timestamp = r.timestamp as string | null | undefined;
@@ -329,8 +316,6 @@ async function probeStoredSignals(store: VectorStore | null): Promise<StoredSign
     projectDistinctCount: projectCounts.size,
     nullCounts,
     timestampRange: { min: minTs, max: maxTs },
-    entwurfRowCount,
-    entwurfFileCount: entwurfFiles.size,
   };
 }
 
@@ -538,11 +523,6 @@ function renderPretty(report: SessionsDoctorReport): void {
   const ts = report.signals.timestampRange;
   console.log(
     `       timestamp      : min=${ts.min ?? "(none)"}  max=${ts.max ?? "(none)"}`,
-  );
-
-  // Entwurf
-  console.log(
-    `       entwurf surface: ${fmt(report.signals.entwurfFileCount)} files, ${fmt(report.signals.entwurfRowCount)} rows (sessionFileContains="${ENTWURF_PATTERN}")`,
   );
 
   console.log("─".repeat(70));

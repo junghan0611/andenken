@@ -248,8 +248,8 @@ async function main() {
 
   // Sessions triage mode — V1 dispatch (read-only, local-only). Mirrors
   // doctor-md gap analysis and adds stored-signal distribution (role,
-  // project, timestamp, null fill, entwurf pattern) so Phase 2 audit gates
-  // have a single surface to start from.
+  // project, timestamp, null fill) so audit gates have a single surface to
+  // start from.
   if (process.argv.includes("--sessions")) {
     const exitCode = await runSessionsDoctor({
       json: jsonMode,

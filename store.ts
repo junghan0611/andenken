@@ -63,9 +63,8 @@ export interface SearchFilters {
   role?: Array<"user" | "assistant" | "compaction">;
   /** Exact `sessionFile` path match. */
   sessionFile?: string;
-  /** Substring match on `sessionFile`. Short-term entwurf surface:
-   *  `sessionFileContains: "_entwurf-"` recalls task transcripts without
-   *  a dedicated `entwurf_task_id` column (Phase 2 candidate). */
+  /** Substring match on `sessionFile`. Generic path filter — narrow a search
+   *  to a directory or filename fragment when project/time is not enough. */
   sessionFileContains?: string;
 }
 
