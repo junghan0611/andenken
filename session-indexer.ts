@@ -10,6 +10,13 @@
  * - claude: ~/.claude/projects/-project/*.jsonl
  *           type="user" | type="assistant" (role merged into type)
  *
+ * Indexing exclusions (both runtimes):
+ * - tmp/test/probe project dirs (pi `--tmp…--`, claude `-tmp…`) — never indexed.
+ * - sessions at or below MIN_SESSION_SIZE_BYTES (300KB floor, `size > MIN`).
+ * - pi only: pre-0.9.0 filename species (`_<uuid>`, `_entwurf-…`, `_delegate-…`).
+ *   Only garden-native `<created-at>_<YYYYMMDDTHHMMSS>-<suffix>.jsonl` is indexed.
+ *   Claude filenames are always UUIDs → no filename filter (tmp + size only).
+ *
  * Chunks extracted:
  * - USER messages (what the user asked/instructed)
  * - Compaction summaries (session-level context)
@@ -71,8 +78,11 @@ export interface SessionChunk {
 }
 
 // --- Quality Filters ---
-// Minimum session file size to index (skip trivial 1-2 message sessions)
-const MIN_SESSION_SIZE_BYTES = 2048;
+// Session file size floor. Real working sessions run tens to hundreds of KB
+// (pi non-tmp median ≈ 300KB); test/probe sessions are a few KB. Keep only
+// strictly-larger sessions ("아주 핵심만"): GLG policy is "300KB 이하 제외", so
+// the filter is `size > MIN` (300KB exactly is excluded) on both runtimes.
+const MIN_SESSION_SIZE_BYTES = 300 * 1024;
 
 // Patterns that indicate noise (tool errors, delegate failures, smoke tests).
 // Exported for sanitize-dryrun and any other parity-checking caller; if you
@@ -141,6 +151,29 @@ function getClaudeProjectsDir(): string {
 }
 
 /**
+ * Throwaway project dirs, excluded from indexing on both runtimes. Match is
+ * tmp-prefix only: pi `--tmp…--` and claude `-tmp…` normalize to a name
+ * starting with "tmp" once wrapping hyphens are stripped. In practice every
+ * probe/release-gate/v2matrix scratch dir is itself named `tmp-*`, so the
+ * tmp-prefix rule already captures them — no separate test/probe predicate.
+ */
+function isExcludedProjectDir(subdir: string): boolean {
+  return subdir.replace(/^-+|-+$/g, "").startsWith("tmp");
+}
+
+/**
+ * Post-0.9.0 garden-native pi session filename:
+ * `<created-at>_<sessionId>.jsonl` where sessionId matches pi-shell-acp SSOT
+ * `SESSION_ID_RE = /^\d{8}T\d{6}-[0-9a-f]{6}$/`. Pre-0.9.0 species (`_<uuid>`,
+ * `_entwurf-…`, `_delegate-…`) are retired and not indexed. Anchored to the
+ * full sessionId so a future naming drift fails fast (drop) rather than
+ * silently false-including. Claude is exempt (always UUIDs).
+ */
+function isGardenNativePiFile(file: string): boolean {
+  return /_\d{8}T\d{6}-[0-9a-f]{6}\.jsonl$/.test(file);
+}
+
+/**
  * Find all JSONL session files from both runtimes.
  * Filters out trivial sessions below MIN_SESSION_SIZE_BYTES.
  */
@@ -149,7 +182,7 @@ export function findSessionFiles(baseDir?: string): string[] {
     ? scanDir(baseDir)
     : [...scanDir(getPiSessionsDir()), ...scanClaudeDir(getClaudeProjectsDir())];
   return raw.filter(f => {
-    try { return fs.statSync(f).size >= MIN_SESSION_SIZE_BYTES; } catch { return false; }
+    try { return fs.statSync(f).size > MIN_SESSION_SIZE_BYTES; } catch { return false; }
   }).sort();
 }
 
@@ -159,7 +192,7 @@ export function findSessionFiles(baseDir?: string): string[] {
 export function findSessionFilesBySource(source: SessionSource): string[] {
   const raw = source === "pi" ? scanDir(getPiSessionsDir()) : scanClaudeDir(getClaudeProjectsDir());
   return raw.filter(f => {
-    try { return fs.statSync(f).size >= MIN_SESSION_SIZE_BYTES; } catch { return false; }
+    try { return fs.statSync(f).size > MIN_SESSION_SIZE_BYTES; } catch { return false; }
   });
 }
 
@@ -167,10 +200,11 @@ function scanDir(dir: string): string[] {
   if (!fs.existsSync(dir)) return [];
   const files: string[] = [];
   for (const subdir of fs.readdirSync(dir)) {
+    if (isExcludedProjectDir(subdir)) continue;
     const subdirPath = path.join(dir, subdir);
     if (!fs.statSync(subdirPath).isDirectory()) continue;
     for (const file of fs.readdirSync(subdirPath)) {
-      if (file.endsWith(".jsonl")) {
+      if (file.endsWith(".jsonl") && isGardenNativePiFile(file)) {
         files.push(path.join(subdirPath, file));
       }
     }
@@ -182,6 +216,7 @@ function scanClaudeDir(dir: string): string[] {
   if (!fs.existsSync(dir)) return [];
   const files: string[] = [];
   for (const subdir of fs.readdirSync(dir)) {
+    if (isExcludedProjectDir(subdir)) continue;
     const subdirPath = path.join(dir, subdir);
     if (!fs.statSync(subdirPath).isDirectory()) continue;
     // Top-level .jsonl files (main sessions)

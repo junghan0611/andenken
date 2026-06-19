@@ -39,6 +39,46 @@ andenken 측 함의 (지금 착수 금지, 1.0.0 결과 본 뒤):
   (2) session-indexer.ts 파일명·헤더 가정 재점검, (3) AGENTS.md
   "Session corpus sources" 절 재정렬.
 
+## Now — Session corpus tightening: 핵심 세션만 임베딩 (2026-06-19, GLG 결정)
+
+세션 임베딩을 "아주 핵심만"으로 좁힌다. 검토에서 tmp 폴더가 제외 없이 임베딩
+되고 있었음을 실증(매니페스트에 tmp 19개, 디스크엔 다음 sync 시 유입될 tmp
+`.jsonl` 509개). 가드 3종을 `session-indexer.ts`에 구현 완료(빌드/141테스트 green):
+
+- **tmp 디렉토리 제외 (양 런타임)** — pi `--tmp…--` / claude `-tmp…` →
+  `isExcludedProjectDir`. md 축(md-chunker)과 동일 규율.
+- **300KB 미만 제외 (양 런타임)** — `MIN_SESSION_SIZE_BYTES` 2048 → 300×1024.
+  pi non-tmp median이 ≈300KB라 진짜 작업 세션만 통과.
+- **pi 구형 파일명 제외 (pi 한정)** — 0.9.0 이전 종(`_<uuid>`/`_entwurf-`/
+  `_delegate-`) 버리고 garden-native `_YYYYMMDDTHHMMSS-<suffix>` 만 →
+  `isGardenNativePiFile`. claude는 항상 UUID라 파일명 필터 비적용(tmp+size만).
+
+**코퍼스 영향 (실측)**: pi 1041→**94**, claude 786→**282**, total→**376** 파일.
+누수 0 (tmp/구형/sub-300KB 각 0).
+
+**시퀀싱**: 가드 머지 → GLG가 세션 메모리싱크 **완전 새로**(full fresh rebuild)
+→ tmp/구형/단편이 처음부터 배제. 기존 DB(2,077세션, tmp 포함)는 rebuild로 소멸,
+별도 prune 불필요.
+
+**GPT 공동검토 반영분 (2026-06-19, 분신 `20260619T095519-55dcb9` / gpt-5.5)**:
+- pi regex **anchoring 적용**: `/_\d{8}T\d{6}-/` → `/_\d{8}T\d{6}-[0-9a-f]{6}\.jsonl$/`
+  (pi-shell-acp SSOT `SESSION_ID_RE`와 정합, future drift fail-fast). 현 94개 탈락 0.
+- size 필터 `>= MIN` → **`> MIN`** (GLG 원문 "300KB 이하 제외" 정확화).
+- tmp 주석 정확화(구현은 tmp-prefix only; probe/release-gate/v2matrix가 전부
+  `tmp-*`라 자동 포함). 재빌드 + 141테스트 green, 누수 여전히 0.
+- claude 비대칭(282 vs 94)은 **의도 범위**(pi에만 legacy filename cull 추가). 균형은
+  index policy 아니라 retrieval policy(2e source/project balancing)에서 다룬다.
+
+**delegate golden 제거 완료** (2026-06-19, GLG 승인): `golden-queries.ts`의
+"delegate session directory" 쿼리 삭제. delegate는 구형 `_delegate-` + <300KB라
+새 코퍼스에서 빠지므로 타겟 상실 → 제거 확정. (교체 후보였던 garden citizen /
+garden-native session id / meta-bridge mailbox 겨냥 쿼리는 필요 시 추후 추가.)
+
+**시퀀싱(GPT 강조)**: incremental sync는 구 DB/manifest의 excluded rows를 남긴다.
+반드시 **full rebuild script 경로로 cutover** (incremental 금지). 2e windowed retrieval:
+코퍼스 축소로 noise↓(scheduler 유리)지만 active day가 sub-300KB 위주면 bucket
+sparsity↑ → sparse fallback 중요도 상승. `mode=recent` 끝시간 독점은 여전 → 2e 필요.
+
 ## Next — Windowed sessions retrieval that survives daily use
 
 **현재 주요 우선순위:** 2026-05-28 doomemacs-config 측 wrapper

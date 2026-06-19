@@ -139,14 +139,6 @@ const GOLDEN_QUERIES: GoldenQuery[] = [
     db: "both",
   },
   {
-    query: "delegate session directory",
-    description: "영어 기술 쿼리 — delegate 세션 관리",
-    category: "sanity",
-    expectMinResults: 1,
-    expectKeywords: ["delegate", "session"],
-    db: "session",
-  },
-  {
     query: "디지털 가든 공진화",
     description: "힣의 방향성 — AI와 인간의 공진화",
     category: "sanity",
