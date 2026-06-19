@@ -43,6 +43,51 @@ andenken 측 함의 (지금 착수 금지, 1.0.0 결과 본 뒤):
 > `v2026.6.19`로 닫혔다 → [CHANGELOG.md](./CHANGELOG.md). 아래는 그 위에서
 > 이어지는 retrieval 품질 작업.
 
+## Now — Post-rebuild 품질 개선안 (2026-06-19, GPT 검수 반영) ⟵ 다음 에이전트 시작점
+
+full rebuild 후 1차 검수(golden 세션 8/10, doctor 분포) + GPT 분신
+(`20260619T095519-55dcb9` gpt-5.5) 검수 결론: **rebuild는 성공("핵심만"
+정책 정상 작동). 지금 손댈 건 threshold 완화가 아니라 (1) golden 계약 정리
+(2) 2e retrieval balancing (3) read-only 민감도 계측.** 300KB는 유지.
+
+검수 사실:
+- 세션 15,581청크/376파일, md 10,404/2217, verify 로컬 clean (oracle orphan은
+  raw 소스 미보유 host-locality 아티팩트).
+- **compaction=0**: GPT가 로컬 raw 확인 — pi compaction 107개 전부
+  garden-native=false라 정책상 정상 제외. 94개 신형 파일엔 `type=compaction`
+  자체가 없음 → **parser 고쳐도 즉시 복구 안 됨.** legacy 재유입 금지.
+- 분포 skew: source claude 89.5%/pi 10.5%, project pi-shell-acp 37.1%.
+
+### 우선순위 1 — Golden contract cleanup (작고 즉시)
+- `delegate session directory` 제거 ✅ (v2026.6.19에서 완료).
+- `봇멘트 remark42`: session golden에서 제거 또는 md/skill-doc golden으로 이동
+  (세션 tightening의 의도적 손실 — botment 운영지식이면 skill docs/md/botlog로 승격).
+- `남은 작업 뭐지`: strict session golden에서 제외 → recall/NEXT workflow test로
+  분리("two-step recall required" 케이스). golden 8/10의 2 탈락은 *의도된 손실*이라
+  현 golden 수치가 오해를 부름 → 기대치를 코퍼스에 맞춰 정정.
+
+### 우선순위 2 — 2e balanced windowed retrieval (아래 § 상세설계에 파라미터 주입)
+GPT 권장 파라미터 (인덱스 아니라 retriever에서 skew 해소):
+- `baseCandidates` ≥ `limit×10` (가능하면 `×20`). 코퍼스 작아져 후보 넉넉히 잡아도 부담↓.
+- **score floor 먼저**: hybrid/semantic은 `score ≥ topScore×0.6`(또는 normalized floor)
+  안에서만 diversity 강제 — relevance 망치지 않게.
+- project **soft cap** `ceil(limit×0.25)` (limit=30 → project당 ~8), sparse fallback에선 초과 허용.
+- source **minority rescue**: 50/50 강제 금지(pi 약하면 쓰레기 끌어올림). base 후보에 양
+  source 있으면 minority를 최대 `ceil(limit×0.2~0.3)`까지 rescue.
+- **sparse fallback** 강화: bucket round-robin 후 결과가 `limit`의 40~60% 미만이면
+  active bucket 안에서 `(sessionFile, project)`-balanced fill.
+- skew 수치(claude 89.5 / pi-shell-acp 37.1)를 **regression fixture**로 박을 것.
+
+### 우선순위 3 — Read-only quality audit (threshold 변경 전 필수)
+- 300/250/200KB dry-run 비교표: 파일 수·chunk 수·project/source 분포·golden 회복·
+  noise 회귀. threshold 변경은 이 표 보고 **GLG decision**.
+- 2a `parsePiLine` compaction schema fix: old schema는 top-level `type:"compaction",
+  summary:...`인데 parser는 `parsed.compaction?.summary`만 봄 → `summary` top-level
+  fallback 추가(비용 작고 future/legacy 안전). 단 compaction 복구 이유로 pre-0.9.0
+  재유입 금지. 추후 "derived session summary chunk"(header/name + first/last user turn
+  + NEXT link)는 별도 설계.
+- doctor metric 추가: "compaction records filtered by filename policy"를 설명 가능하게.
+
 ## Next — Windowed sessions retrieval that survives daily use
 
 **현재 주요 우선순위:** 2026-05-28 doomemacs-config 측 wrapper
