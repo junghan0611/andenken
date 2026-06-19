@@ -4,6 +4,23 @@
 > 이 파일은 **andenken에서 다음에 할 것들 / 잠시 주차한 것들**을 적는다.
 > 완료된 긴 히스토리는 ROADMAP.md / commit log로 보낸다.
 
+## Watching — OKF (Open Knowledge Format, Google knowledge-catalog)
+
+따라갈 대상 아님. 중심은 andenken. 다만 **알아두면 고도화 유연성**이 된다 —
+독불장군식으로 뻗지 않고 외부 표준과 손잡을 수 있는 export target 후보.
+
+- **현 판단**: OKF v0.1은 schema-less·중앙권위 없음 → 포맷이 더 움직일 가능성.
+  지금 denote↔OKF 컨버터 착수 금지. andenken md 축이 이미 가든 markdown
+  (`~/repos/gh/notes/content`)을 임베딩 → OKF bundle에 ~90% 근접. ingestion이
+  아니라 interchange/proof 표면.
+- **우리 우위**: OKF concept ID는 경로 기반(파일 이동 시 깨짐). durable Denote
+  ID가 그 약점을 이미 해결. 우리가 OKF에 맞추는 게 아니라 OKF가 우리 쪽으로.
+- **트리거 (이때 재검토)**: OKF가 v0.1을 벗어나 schema/durable-ID 도입 시 →
+  (1) denote↔OKF 매핑 정밀화, (2) andenken md export를 OKF bundle 표면으로
+  노출 검토. "path-based ID라 깨진다" claim은 그때 SPEC 직접 확인.
+- 맥락 노트: [[botlog]] `20260406T140411` §andenken — llm-wiki·OKF·EKG 수렴.
+  EKG/semext(ahyatt) 동행 좌표도 거기.
+
 ## Watching — pi-shell-acp 1.0.0 (session-identity 2차 정렬 예상)
 
 0.9.0 garden-native identity 정렬은 끝났다 (`b77713d`). 그런데 0.9.0
@@ -265,11 +282,23 @@ cost: subscription-backed (낮음)
 3. 목표가 검색면 정리면 `./run.sh cleanup sessions`
 4. DB + manifest까지 완전 청소면 `scripts/rebuild-sessions-full.sh`
 
-## Parked — openclaw v2026.6.1 memory-axis 동기화 검토 (2026-06-05, 결론: 포팅 없음)
+## Parked — openclaw memory-axis 동기화 검토 (baseline `v2026.6.8`, 결론: 포팅 없음)
 
-`~/repos/3rd/openclaw`를 stable `v2026.6.1` (2026-06-03)로 checkout하고
-우리가 포팅해온 기억축 로직과 대조했다. **andenken이 채택할 알고리즘적
-retrieval/chunking 개선은 없다.** 재조사를 막기 위해 결론을 박아둔다.
+`~/repos/3rd/openclaw`를 stable **`v2026.6.8`** (2026-06-19 재정비, 직전 baseline
+`v2026.6.1`)로 checkout하고 우리가 포팅해온 기억축 로직과 대조했다.
+**andenken이 채택할 알고리즘적 retrieval/chunking 개선은 없다.** 재조사를
+막기 위해 결론을 박아둔다.
+
+- **6.1→6.8 재검수 (2026-06-19)**: 2,652 커밋 / 16,831 파일 변경이지만 우리
+  의존 표면은 무변경. `memory-host-sdk` md 청킹/임베딩은 **로직 0 변경**(98파일
+  diff 대부분이 JSDoc 주석 스위프). embeddings는 `nodeLlamaCppImportUrl` 런타임
+  주입 옵션만 가산(우리는 remote OpenRouter Qwen3 → 무관). sqlite-vec는
+  robustness 하드닝(vec_version 헬스체크 + 플랫폼 변형 폴백 / 우리는 LanceDB →
+  정보성). active-memory `agent-runner-memory.ts`는 우리 검색 API **계약 무변경**
+  (변경분은 followup CLI-runtime alias 판별 + compaction-notice phase, openclaw
+  내부 오케스트레이션). → COMPARISON.md 재정렬 불요.
+
+아래는 5.22→6.1 검토 당시 결론 (여전히 유효):
 
 - **한국어 particle/stem 로직**: `query-expansion.ts`의 `KO_TRAILING_PARTICLES`
   / `stripKoreanTrailingParticle` / `isUsefulKoreanStem`가 우리 `retriever.ts`
