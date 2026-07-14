@@ -1016,56 +1016,17 @@ async function testVectorStore() {
 }
 
 // --- Integration Tests (needs API) ---
-
-async function testGeminiEmbeddings() {
-  section("Gemini Embeddings (API)");
-
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    skip("GEMINI_API_KEY not set");
-    return;
-  }
-
-  const { embedQuery, embedDocument, embedDocumentBatch } = await import(
-    "./gemini-embeddings.js"
-  );
-  const config = { apiKey, model: "gemini-embedding-2-preview" };
-
-  try {
-    // Single query embed
-    const qVec = await embedQuery("NixOS 설정 방법", config);
-    assert(qVec.length === 768, `embedQuery: ${qVec.length} dims`);
-    assert(typeof qVec[0] === "number", "embedQuery: values are numbers");
-
-    // Single document embed
-    const dVec = await embedDocument("NixOS 설정 가이드 문서", config);
-    assert(dVec.length === 768, `embedDocument: ${dVec.length} dims`);
-
-    // Batch embed
-    const batch = await embedDocumentBatch(
-      ["첫 번째 문장", "두 번째 문장", "세 번째 문장"],
-      config,
-    );
-    assert(batch.length === 3, `embedBatch: ${batch.length} vectors`);
-    assert(batch[0].length === 768, `embedBatch[0]: ${batch[0].length} dims`);
-
-    // Empty batch
-    const empty = await embedDocumentBatch([], config);
-    assert(empty.length === 0, "embedBatch empty: 0 vectors");
-
-    // Matryoshka dimensions
-    const config768 = { ...config, dimensions: 768 as const };
-    const smallVec = await embedQuery("test", config768);
-    assert(smallVec.length === 768, `Matryoshka 768: ${smallVec.length} dims`);
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes("429") || msg.includes("spending")) {
-      skip(`API rate limited: ${msg.slice(0, 80)}`);
-    } else {
-      assert(false, `Gemini API error: ${msg.slice(0, 120)}`);
-    }
-  }
-}
+//
+// The Gemini embedding suite is retired (2026-07-14). Nothing live embeds through
+// Gemini: model-presets.ts carries no gemini preset, and both axes — sessions and the
+// garden md index — run OpenRouter Qwen3-Embedding-8B at 4096d. gemini-embeddings.ts
+// and GeminiProvider survive only as an unreferenced back-compat shim.
+//
+// The suite pinned 768d ("outputDimensionality: fixed 768d (cost control)"). Gemini
+// later changed that default to 3072, so the assertions went red and stayed red — no
+// live consumer noticed, because there is no live consumer. A gate that always fails
+// teaches you to ignore the gate, which is how a real failure gets to walk past. So it
+// goes, rather than being nursed against an API this repo no longer calls.
 
 async function testLiveSearch() {
   section("Live Search (existing DB)");
@@ -1212,7 +1173,6 @@ if (mode === "unit" || mode === "all") {
 }
 
 if (mode === "integration" || mode === "all") {
-  await testGeminiEmbeddings();
   await testJinaRerank();
   await testLiveSearch();
 }
