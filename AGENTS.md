@@ -221,8 +221,9 @@ Specific operations worth knowing by name:
   contract; do not leave ad-hoc rsync snippets outside `run.sh` / AGENTS.md.
 - `scripts/sync-sessions.sh` — sessions-only incremental path through
   OpenRouter Qwen3-Embedding-8B 4096d. Wrong-dim aborts before API; no-work
-  exits with API 0; optional `--push` to oracle. Used by the agent-config
-  `memory-sync` skill.
+  exits with API 0; optional `--push` to oracle, which rsyncs
+  `data/sessions.lance/` **and** `data/session-manifest.json` (both, always —
+  see INVARIANT 6.6). Used by the agent-config `memory-sync` skill.
 - `scripts/rebuild-sessions-full.sh` — sessions-only full rebuild. Estimate →
   explicit confirmation → 4096d preflight → destroy sessions index → rebuild
   → verify. Human-driven and paid-remote gated.
@@ -260,6 +261,10 @@ workflow. Implications:
   rebuild and oracle full-sync stay human-only.
 - Verify still runs through `./run.sh verify sessions` after any sync that
   shows non-trivial chunk delta. Skill output alone is not verification.
+- **The local canonical host is the only indexing node. Oracle is a query
+  replica** — it holds session JSONLs of its own, but running the indexer there
+  forks the corpus and the next canonical `--push` (`rsync --delete`) discards
+  the fork. Push from here; never index there. See INVARIANT 7.1.
 
 ## Pointers
 

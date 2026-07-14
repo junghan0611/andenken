@@ -122,6 +122,14 @@ if [ "$PUSH" = "1" ]; then
       data/sessions.lance/ \
       oracle:/home/junghan/repos/gh/andenken/data/sessions.lance/ \
       2>&1 | tail -3
+
+    # Manifest must travel with the DB: oracle is a replica, and a stale remote
+    # manifest would make a local run there skip files the pushed DB no longer has.
+    echo "== rsync session-manifest.json → oracle =="
+    rsync -az \
+      data/session-manifest.json \
+      oracle:/home/junghan/repos/gh/andenken/data/session-manifest.json \
+      2>&1 | tail -3
   else
     echo "⚠ skipping --push: index step did not complete cleanly"
   fi

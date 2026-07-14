@@ -212,6 +212,18 @@ The final flush at end-of-run still flushes before `saveSessionManifest()`
 for the same reason. Helper `checkpointIfNeeded()` in `indexSessions()`
 encodes this discipline explicitly.
 
+### 6.6 Replication ships the DB and its manifest together
+
+Oracle replication (`scripts/sync-md-to-oracle.sh`, `scripts/sync-sessions.sh
+--push`) must rsync **both** the `.lance` directory and its manifest. Pushing
+the DB alone leaves the remote manifest claiming files the pushed DB no longer
+contains, so any indexing run on the replica skips them forever — the same
+silent-strand failure as 6.4, arriving over the wire.
+
+Observed 2026-07-14: `--push` shipped `sessions.lance` without
+`session-manifest.json`, and oracle kept a manifest from a local run five days
+older than the DB it now held.
+
 ## 7. Single-writer invariant
 
 Invariant:
@@ -226,6 +238,25 @@ If you change write buffering, preserve:
 - delete-by-file once per file
 - no duplicate inserts from interleaved flushes
 - zero-chunk file deletion path
+
+### 7.1 Oracle is a query replica, not an indexing node
+
+The single writer is the **local canonical host** (currently thinkpad). Oracle
+serves queries from a pushed DB and must not run the indexer against its own
+session transcripts.
+
+Invariant:
+- indexing writes happen on the canonical host; oracle receives them by rsync
+- the DB is replaced, never merged — `rsync --delete` on the canonical push is
+  correct, and rows the replica indexed on its own are expected to disappear
+
+Oracle owns session JSONLs of its own (it runs agents too), so a local indexing
+run there silently forks the corpus: the replica ends up with canonical rows
+*plus* oracle-native rows that no push can reconcile. That happened between
+2026-06-19 and 2026-07-06 (oracle drifted to 27,966 chunks / 667 files against
+the canonical 24,882 / 624) and was resolved by re-establishing the canonical
+push. If oracle-native sessions ever need to be searchable, they must reach the
+canonical host as source files — not as replica-side embeddings.
 
 ## 8. Test invariants
 
