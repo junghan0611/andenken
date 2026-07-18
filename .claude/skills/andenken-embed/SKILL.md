@@ -126,8 +126,12 @@ Only when a whole rebuild (not incremental) is required:
 
 ## single-writer
 
-- **One writer per track at a time.** Two instances syncing/compacting the same
-  track → index race. Check first: `pgrep -af 'sync-sessions|indexer.ts'`.
+- **One writer per track at a time.** `sync:sessions` takes a non-blocking flock
+  (`data/.sync-sessions.lock`), so a second sessions sync — cron or manual — backs
+  off cleanly ("already running") instead of racing. compact/cleanup and md are
+  not yet lock-guarded, so still avoid running two of those on the same track at once.
+- Check by hand with a self-match-safe pattern: `pgrep -af '[s]ync-sessions'`
+  (a plain `pgrep -af sync-sessions` also matches its own command line).
 - Don't re-launch a background sync out of impatience. Wait for the completion signal.
 
 ## Quick reference

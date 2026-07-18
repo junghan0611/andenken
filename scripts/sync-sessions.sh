@@ -34,6 +34,22 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# --- Single-writer lock (flock) ---
+# The sessions index is a single-writer LanceDB store. The hourly cron and a
+# manual memory-sync (or ./run.sh sync:sessions) can otherwise run at once and
+# race the writer. Take a non-blocking exclusive lock; if another sync already
+# holds it, exit cleanly — that run indexes the same pending files, so no work
+# is lost. The lock auto-releases when this process exits (fd 9 closes). The
+# lockfile lives under data/ (gitignored), so it never enters version control.
+LOCKFILE="data/.sync-sessions.lock"
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$LOCKFILE"
+  if ! flock -n 9; then
+    echo "⚠ another sync-sessions is already running (lock: $LOCKFILE) — exiting"
+    exit 0
+  fi
+fi
+
 # --- env: SESSIONS namespace ONLY ---
 # Org / legacy env: never set, never unset, never read by this script.
 # Price precedence: explicit session env > OpenRouter alias > 0.01 default.
