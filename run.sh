@@ -16,6 +16,23 @@ load_env() {
   fi
 }
 
+# LanceDB `table.optimize()` (compact/cleanup) hands the whole host to its Rust
+# rayon/tokio pools — on a 16-core box that pins every core to 100%. rayon/tokio
+# size their default pools from available_parallelism() (sched_getaffinity), so
+# pinning CPU affinity to a few cores is the robust, provider-agnostic throttle:
+# no env-var guessing about which internal pool to cap. Override the core set
+# with ANDENKEN_COMPACT_CPUS (taskset -c syntax, e.g. "0-3" or "0,2,4,6").
+COMPACT_CPUS="${ANDENKEN_COMPACT_CPUS:-0-3}"
+
+run_pinned() {
+  if command -v taskset >/dev/null 2>&1; then
+    taskset -c "$COMPACT_CPUS" "$@"
+  else
+    echo "⚠ taskset not found — running compact without CPU pinning (may saturate all cores)" >&2
+    "$@"
+  fi
+}
+
 help() {
   cat << 'EOF'
 andenken — recollective thinking
@@ -31,8 +48,8 @@ Usage: ./run.sh <command> [args]
   index:md [--force]          Index public garden Markdown (issue #8)
   index:org [--force]         Index org-mode KB (disabled in production — upstream R&D)
   sync:md                     md incremental (alias for index:md without --force)
-  compact [sessions|md|org]   Defragment LanceDB
-  cleanup [sessions|md|org]   Dedup + orphan removal + manifest repair + compact
+  compact [sessions|md|org]   Defragment LanceDB (CPU-pinned to ANDENKEN_COMPACT_CPUS, default 0-3)
+  cleanup [sessions|md|org]   Dedup + orphan removal + manifest repair + compact (CPU-pinned)
   cleanup [target] --dry-run  Dry-run (report only)
   verify [sessions|md|org|all] Post-indexing integrity check
   status                      Show index statistics (text)
@@ -135,9 +152,9 @@ case "${1:-help}" in
   index:org)
     shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts org "$@" ;;
   compact)
-    shift; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts compact "${1:-all}" ;;
+    shift; cd "$SCRIPT_DIR" && run_pinned pnpm exec tsx indexer.ts compact "${1:-all}" ;;
   cleanup)
-    shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts cleanup "${1:-org}" "${@:2}" ;;
+    shift; load_env; cd "$SCRIPT_DIR" && run_pinned pnpm exec tsx indexer.ts cleanup "${1:-org}" "${@:2}" ;;
   verify)
     shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts verify "${1:-all}" ;;
   status)

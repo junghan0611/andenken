@@ -10,3 +10,7 @@ data/org-manifest.json
 data/bakeoff-qwen4b/
 data
 .review/
+
+# Claude Code / pi: share skills, keep local runtime state out of git
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
