@@ -299,14 +299,21 @@ async function searchSessions(
 
   // PR-D cross-track fallback (mirrors index.ts session_search).
   //
-  // When sessions results are thin, supplement with hits from the org corpus.
-  // Two safety boundaries: re-embed the query through orgProvider (NOT
-  // through `provider` which is the sessions provider — different dim),
-  // and confirm dim compatibility before issuing the search. If either
-  // boundary fails, sessions results are still returned with a diagnostic.
+  // When sessions results are thin, supplement with hits from the public
+  // garden md corpus. Two safety boundaries: re-embed the query through
+  // mdProvider (NOT through `provider`, the sessions provider — coupling
+  // tracks is wrong even though both are 4096d today), and confirm dim
+  // compatibility before issuing the search. If either boundary fails,
+  // sessions results are still returned with a diagnostic — session search
+  // never fails because of md-side issues.
+  //
+  // The org corpus is production-disabled (dim mismatch) and must NEVER be
+  // the fallback target. This path used to reach org.lance and got silently
+  // skipped on every query ("org dim incompatible"). Knowledge fallback = md,
+  // identical to index.ts session_search.
   //
   // Phase 1: disable cross-track fallback whenever the caller passed any
-  // stored-signal filter or chose mode=recent. Falling back to md/org under
+  // stored-signal filter or chose mode=recent. Falling back to md under
   // those modes would silently break the sessions-only intent.
   let fallback = false;
   let fallbackDiagnostic: string | undefined;
@@ -315,46 +322,46 @@ async function searchSessions(
     !source &&
     !hasUserFilters &&
     mode !== "recent" &&
-    fs.existsSync(orgDbPath) &&
+    fs.existsSync(mdDbPath) &&
     (results.length < 3 || topScore < 0.005);
   if (wantsFallback) {
-    let orgProvider: EmbeddingProvider | null = null;
+    let mdProvider: EmbeddingProvider | null = null;
     try {
-      orgProvider = createOrgProviderFromEnv();
+      mdProvider = getMdProvider();
     } catch (err) {
       fallbackDiagnostic = `knowledge fallback skipped: ${err instanceof Error ? err.message.slice(0, 120) : String(err)}`;
     }
-    if (!orgProvider) {
-      fallbackDiagnostic = fallbackDiagnostic ?? "knowledge fallback skipped: no org provider";
+    if (!mdProvider) {
+      fallbackDiagnostic = fallbackDiagnostic ?? "knowledge fallback skipped: no md provider";
     } else {
-      const orgDim = orgProvider.dimensions || 2560;
-      const orgStore = new VectorStore(orgDbPath, orgDim);
-      await orgStore.init();
-      const dimCheck = await orgStore.checkCompatibleDim();
+      const mdDim = mdProvider.dimensions || 4096;
+      const mdStore = new VectorStore(mdDbPath, mdDim);
+      await mdStore.init();
+      const dimCheck = await mdStore.checkCompatibleDim();
       if (!dimCheck.ok) {
-        fallbackDiagnostic = `knowledge fallback skipped: ${dimCheck.reason ?? "org dim incompatible"}`;
-        await orgStore.close();
+        fallbackDiagnostic = `knowledge fallback skipped: ${dimCheck.reason ?? "md dim incompatible"}`;
+        await mdStore.close();
       } else {
-        const orgCandidates = Math.min(limit * 4, 200);
-        const orgQueryVector = await orgProvider.embedQuery(enrichedQuery);
-        const orgVec = await orgStore.search(orgQueryVector, orgCandidates, 0.05);
-        const orgFts = await orgStore.fullTextSearch(bm25Query, orgCandidates);
-        const orgResults = await retrieve(query, orgVec, orgFts, {
+        const mdCandidates = Math.min(limit * 4, 200);
+        const mdQueryVector = await mdProvider.embedQuery(enrichedQuery);
+        const mdVec = await mdStore.search(mdQueryVector, mdCandidates, 0.05);
+        const mdFts = await mdStore.fullTextSearch(bm25Query, mdCandidates);
+        const mdResults = await retrieve(query, mdVec, mdFts, {
           vectorWeight: 0.7,
           bm25Weight: 0.3,
-          recencyHalfLifeDays: 90,
+          recencyHalfLifeDays: 0,
           minScore: 0.05,
           mmr: { enabled: true, lambda: 0.7 },
           mergeStrategy: "weighted" as MergeStrategy,
         });
-        if (orgResults.length > 0) {
+        if (mdResults.length > 0) {
           results = [
             ...results.slice(0, limit - 3),
-            ...orgResults.slice(0, 3),
+            ...mdResults.slice(0, 3),
           ];
           fallback = true;
         }
-        await orgStore.close();
+        await mdStore.close();
       }
     }
   }
