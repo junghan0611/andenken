@@ -78,37 +78,89 @@ GPT 분신이 `--db session` 실행에서 "📡 Org provider: gemini (768d)" 출
 실패 2건은 아래 결함 1·3이며 둘 다 의도적으로 열어 둔 것이다.
 실행 시간은 전체 스코프 기준 약 10분(md 인덱스 573MB, 쿼리마다 유료 임베딩 1회).
 
+### ⚠️ 먼저 읽을 것 — 이 절의 초안은 교차검수로 정정됐다
+
+같은 날 GPT(`20260727T165615-b9acf6`)와 dictcli 담당(`20260727T171701-026e1e`)의
+검수로 **아래 결함 서술 중 여러 사실이 틀린 것으로 확인됐다.** 정정 전문은
+[COMPARISON.md §12](./COMPARISON.md). 다음 세션은 **§12를 먼저 읽고** 이 절로 올 것.
+
+한 줄 요약: **결함 판정은 유지, 원인 설명의 용어와 수치는 다시 잡아야 한다.**
+
 ### 다음 — 결함 1: 희소 고유어 회수 실패 (weightedMerge 상대 정규화)
 
 golden `피투성` ❌로 고정해 뒀다. 통과시키려 기대치를 낮추지 말 것 — 이건 진짜 결함이다.
+검수 측이 단계별로 재현했고, 기대 파일은 **MMR on/off 무관하게 22위**이며 `minScore`도
+통과한다. 탈락 지점은 병합 단계가 맞다.
 
-- 가든에 "피투성"은 2파일(`botlog/20260310T140114`, `journal/20260323T000000`)뿐이고
-  둘 다 인덱싱되어 있다. FTS는 8건을 정확히 회수한다.
-- 그런데 최종 top-5에 한 건도 안 남는다. `weightedMerge`가 max 기준 상대 정규화라
-  **무관한 벡터 결과(코사인 0.69 밴드)가 `vecNorm≈1.0` 만점**을 받고, BM25-only 정답은
-  `0.3 × 0.78 ≈ 0.235`로 밀린다. "벡터가 아무것도 못 찾았다"는 정보가 정규화에서 소멸.
-  `minScore: 0.05`는 절대 코사인이 아니라 병합 후 점수라 방어가 안 된다.
-- `Geworfenheit`(라틴 문자, 4파일)는 통과 → 한글 토큰화가 아니라 **merge 단계** 문제임이
-  대조로 확인됐다.
-- 후보 대책: (a) 벡터 절대 유사도 floor를 정규화 **전에** 적용, (b) 벡터 상위군이
-  평평하면(top1−topN 스프레드가 작으면) `bm25Weight` 상향, (c) FTS-only 후보에 rank
-  기반 보정(md에도 RRF 혼용). 어느 쪽이든 golden `피투성` + `Geworfenheit` 동시 통과가 수용 기준.
+- 최종 top-5에 한 건도 안 남는 이유: `weightedMerge`가 max 기준 상대 정규화라
+  **무관한 벡터 후보가 `vecNorm≈1.0` 만점**을 받고 BM25-only 정답을 밀어낸다.
+  "벡터가 아무것도 못 찾았다"는 정보가 정규화에서 소멸한다.
+- ⚠️ **초안의 "코사인 0.69 밴드"는 틀렸다** (§12.1). `store.ts:353`은 L2 거리를
+  `1/(1+d)`로 접은 값이라 코사인이 아니다. raw 벡터 점수는 **0.4336 → 0.4236**이고,
+  0.69~0.70은 **이미 `0.7 × score/maxVec`가 된 병합 후 값**이다.
+  → **"cosine floor 0.75" 안은 폐기한다.** 현재 표현계에서 모든 결과를 자른다.
+- ⚠️ **"가든에 2파일뿐"도 부정확하다** (§12.5). FTS 1위였던
+  `botlog/20260319T110800`은 **인덱스에만 남은 유령 본문**이다(manifest 39,247 bytes
+  vs 디스크 12,848, 현재 소스에 "피투성" 0건). **md sync 후 재측정이 선행되어야
+  fixture를 믿을 수 있다.**
+- `Geworfenheit`(라틴 문자)는 통과 → 한글 토큰화가 아니라 merge 단계 문제라는 대조는
+  유효하다. **형태소도 해법이 아니다**: Kiwi는 "피투성이"를 `["피","개념"]`으로 쪼개고
+  우리 `isUsefulKoreanStem`(retriever.ts:493)이 1음절을 버린다(§12.6).
+- 후보 대책(§12.8 5단계에서 고른다): (a) 양수 BM25 단조 압축 `s/(c+s)`,
+  (b) RRF/ordinal fusion, (c) **exact lexical hit에 top-K quota 또는 override**,
+  (d) 벡터 채널이 평평할 때 weight/gate 조정. 희소 exact-term 계약에는 (c)가 가장
+  직접적이다. ⚠️ **openclaw `bm25RankToScore`를 그대로 이식하면 안 된다** — 우리
+  Lance `_score`는 양수 high-is-good이라 `1/(1+s)`가 **순서를 뒤집는다**(§12.2).
+  판정은 두 케이스가 아니라 **expected rank / MRR**로.
 
-### 다음 — 결함 2: md scaffold damping 부재
+### 다음 — 결함 2: md scaffold damping 부재 (단, 관측치부터 다시)
 
 - `isScaffoldChunk()` 마커는 org 인용문 형식(`> History`)이라 md에서 **0건 매치**.
   가든 Hugo export는 `## 히스토리 {#히스토리}` 헤딩이다 (실측: 히스토리 862파일,
-  관련메타 864, History 586, BIBLIOGRAPHY 1570).
-- md golden 23행 중 11행이 top-K에 scaffold 지배 chunk(비율>50%)를 포함. 최대 3/5
-  (`어쏠로지스트 뉴스레터`).
-- `applyScaffoldDamping`을 `MD_SCAFFOLD_MARKERS`까지 확장할지 결정. 단, 가든 chunk는
-  `> [!abstract]` 본문과 `## 히스토리`가 한 chunk에 섞여 있어 boolean damping은 유용한
-  chunk까지 죽인다 → `mdScaffoldRatio` 기반 비례 damping을 먼저 검토.
+  관련메타 864, History 586, BIBLIOGRAPHY 1570). 이 사실은 유효하다.
+- ⚠️ **"23행 중 11행" 수치는 무효다** (§12.4). golden이 `text.slice(0,500)` 한
+  excerpt에 대고 재고, `mdScaffoldRatio()`가 첫 마커부터 **문자열 끝까지** 세는데
+  실제 파일은 그 뒤에 실질 H2가 다시 온다 → 과대계상. 재측정은 marker 섹션의 다음
+  same-or-higher heading까지만 span으로, excerpt가 아니라 **full chunk**에서.
+- `md-chunker.ts:660 stripBibliographyTail()`이 이미 후반 50% 이후의
+  CITATIONS/BIBLIOGRAPHY/REFERENCES/RELATED-NOTES를 `embeddingInput`에서 제거한다.
+  **기존 정책과의 중복·충돌 표를 먼저 만들 것.**
+- 전면 제외는 반대. History는 실제 시간/운영 질의 신호다. `chunkKind =
+  content|history|related|bibliography` 같은 구조 신호를 두고 definition 질의에는
+  감쇠, history/recovery 질의에는 살리는 쪽. **모든 H2를 경계로 되돌리는 것은 금지**
+  (과청킹 회귀).
 
 ### 다음 — 결함 3: `dual GPU 인덱싱 튜닝` 0 results (session)
 
 - v2026.6.19 이전부터 실패 중. 세션 tightening의 의도적 손실인지 회수 실패인지 미확정.
   아래 우선순위 1의 "기대치를 코퍼스에 맞춰 정정"과 같은 판단이 필요하다.
+
+### 다음 — 결함 4: `설계했다`는 계약이 허구다
+
+- description이 "한국어 어간 '설계' — Kiwi stem이 동작해야"인데 **검색 경로는 stem을
+  부르지 않는다**(`batchStem`은 `indexOrg`에만 있고 `indexMd`에는 없다, §12.6).
+  이 PASS는 아무것도 증명하지 않는다.
+- **기대치 자체("설계"가 회수되어야)는 정당하다.** dictcli 담당 확인 결과 expand의
+  빈칸은 정책이 아니라 미수집이다. 잘못된 건 description과 판정 방식이다.
+- 검수 권고: 문구만 바꾸고 끝내지 말 것. **canonical path/content rank로 검증할 명확한
+  retrieval 계약이 없으면 `suspicious` / `weak` 케이스로 두는 편이 안전하다.**
+- ⚠️ **dictcli 개선을 기다리지 말 것** — GLG가 직접 조율하는 별도 라인이다(§12.6 말미).
+
+### 실행 순서 — fusion은 마지막 (§12.8 전문)
+
+1. corpus/index sync provenance 정합 (md sync → `피투성` fixture 재측정)
+2. **관측 스키마·용어 계약 확정 — behavior 불변** (raw field 이름 그대로:
+   `_distance` / `distanceMetric=l2` / `similarityTransform=1/(1+d)` / Lance `_score` /
+   `higherIsBetter=true`. `vectorScore`·`cosine`·`rank` 같은 섞인 이름 금지)
+3. raw component 계측 (raw distance와 transformed score를 **둘 다**, raw FTS score와
+   fallback 여부를 **둘 다**, `vectorRank`/`ftsRank`/`inBoth`/`expectedRank`)
+4. 계측값으로 empirical semantics/calibration 결정 + 같은 후보셋 **in-process replay**
+   (shell candidate마다 유료 임베딩 반복 금지)
+5. calibrated transform / fusion behavior 변경
+6. golden 판정을 `pass`/`weak-pass`/`fail`로 확장 (anchor 있으면 그 rank가 최종 판정)
+
+원칙은 **raw vocabulary → telemetry → interpretation**. 2번이 *이름만* 고치는
+단계라는 것이 이 순서가 성립하는 조건이다.
 
 ## Next — Post-rebuild 품질 개선안 (2026-06-19, GPT 검수 반영)
 
