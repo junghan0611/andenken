@@ -33,7 +33,7 @@ andenken agent-in-charge.
 |-------|------------|-------|
 | **sessions** | Parity with openclaw session memory | Load-bearing for agent continuity. Regression here is a real incident. Closed/stable as of 2026-05-11. |
 | **md (public garden)** | Immediately usable knowledge retrieval for agents | Current production knowledge axis. Direct Markdown embedding over `~/repos/gh/notes/content`. Ports OpenClaw builtin md memory logic (`~/repos/3rd/openclaw/packages/memory-host-sdk/src/host/`) onto the same LanceDB backend used by sessions. First production cut closed on 2026-05-12; current work is B2 retrieval quality / golden baseline. |
-| **org** | Currently disabled | Source track over 3,000+ Denote notes. Doctor / chunker / incremental work is upstream R&D. Not consumed by agents in production. Do not run `index:org` unless explicitly working on the org track. |
+| **org** | Currently disabled | Source track over 3,000+ Denote notes. Doctor / chunker / incremental work is upstream R&D. Not consumed by agents in production. Do not run `index:org` unless explicitly working on the org track. Removed from the golden gate on 2026-07-27: `ANDENKEN_ORG_*` is commented out, so `createOrgProviderFromEnv()` falls through to a legacy 768d Gemini provider that dim-mismatches the 2560d index — the default `./run.sh golden` aborted before running one query. |
 
 **Split of effort.** The agent-in-charge separates *what we ship to agents now*
 (sessions + md) from *upstream development* (org). Org is rich but messy;
@@ -53,6 +53,7 @@ embedding-provider.ts   EmbeddingProvider interface + vLLM impl + factory
 model-presets.ts        Qwen3-Embedding-4B/8B / bge-m3 / Gemini presets
 store.ts                LanceDB vector store (sessions.lance + md.lance + org.lance)
 retriever.ts            Hybrid retrieval (weighted/RRF + decay + MMR)
+md-search.ts            md retrieval core shared by cli.ts search-md + golden
 session-indexer.ts      pi + Claude Code JSONL parser
 md-chunker.ts           Markdown-aware chunker + analyzeMdFile SSOT classifier
 org-chunker.ts          Org-aware 2-tier chunker (disabled track — upstream R&D)
@@ -235,8 +236,13 @@ Specific operations worth knowing by name:
   skip reasons (`noembed_tag`, `min_body`, etc.).
 - `./run.sh doctor --org` — org triage (read-only, local-only). Upstream R&D
   only since the org track is disabled in production.
-- `./run.sh golden` — search quality baseline (regression gate); current NEXT
-  item is md-specific golden coverage.
+- `./run.sh golden` — search quality baseline (regression gate). Covers the two
+  live tracks: `--db session` and `--db md`. The org track was removed from the
+  gate on 2026-07-27 (see below). `both` queries are evaluated once per track
+  and reported as separate rows — session (RRF) and md (weighted) scores are not
+  comparable, so merging them let md win every slot and grade itself twice.
+  The md track calls `searchMdCore()` from `md-search.ts`, the same function
+  `cli.ts search-md` runs, so tuning cannot drift away from what the gate sees.
 
 Retired:
 

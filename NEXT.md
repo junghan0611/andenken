@@ -43,7 +43,74 @@ andenken 측 함의 (지금 착수 금지, 1.0.0 결과 본 뒤):
 > `v2026.6.19`로 닫혔다 → [CHANGELOG.md](./CHANGELOG.md). 아래는 그 위에서
 > 이어지는 retrieval 품질 작업.
 
-## Now — Post-rebuild 품질 개선안 (2026-06-19, GPT 검수 반영) ⟵ 다음 에이전트 시작점
+## Now — md golden gate 신설 + 희소어 회수 결함 (2026-07-27) ⟵ 다음 에이전트 시작점
+
+GPT 분신이 `--db session` 실행에서 "📡 Org provider: gemini (768d)" 출력을 보고
+"표시만 잘못된 것, org 검색은 실행되지 않았다"고 판단한 데서 출발. 표층은 맞지만
+**게이트 자체가 죽어 있었다.**
+
+### 확정된 사실
+
+- `.env.local`의 `ANDENKEN_ORG_*`는 전부 주석 처리인데 `createOrgProviderFromEnv()`가
+  legacy Gemini 768d로 폴백한다. org.lance는 2560d(마지막 인덱싱 2026-05-07) →
+  **인자 없는 `./run.sh golden`이 쿼리 하나도 못 돌리고 dim mismatch로 즉사.**
+  `--db session`만 살아 있었고, 그마저 아무도 쓰지 않는 org provider를 출력했다.
+- golden 26개 중 org 전용이 16개 = 실질 검수는 session 10개뿐이었다.
+- **프로덕션 지식축(md.lance 10,533청크 / 2,221파일)에 golden이 0개.** AGENTS.md는
+  `./run.sh golden`을 regression gate로 소개하고 있었다.
+
+### 세운 것
+
+- **md 트랙 신설.** org 가든 쿼리를 md로 이전 + 신규 케이스. `--db md`.
+- **org 트랙 은퇴.** `--db org`는 명시적 에러로 거부.
+- **`md-search.ts` 코어 추출.** `cli.ts search-md`와 golden이 같은 `searchMdCore()`를
+  호출한다. 이전 org 분기는 golden이 파이프라인을 따로 구현해 `recencyHalfLifeDays: 90`
+  (cli는 0)을 재고 있었다 — 아무도 쓰지 않는 파라미터를 게이트로 삼던 상태.
+- **트랙별 독립 평가.** session은 RRF(실측 0.008~0.053), md는 weighted(0.94~1.10)로
+  스케일이 비교 불가인데 한 리스트로 정렬 병합했다 → `both` 5개 쿼리가 md를 두 번
+  채점하고 session은 한 번도 안 봤다. 이제 (쿼리 × 트랙) 행으로 분리 집계.
+- 새 계약: `expectFiles`(희소어 정답을 Denote ID로 고정) / `topKMaxPerFile`(노트 단위
+  다양성 — MMR은 chunk만 본다) / `top1MdScaffoldMax`(md scaffold 비율).
+- `retriever.ts`에 `MD_SCAFFOLD_MARKERS` / `mdScaffoldRatio` 추가 — **관측 전용**,
+  랭킹 동작은 건드리지 않았다.
+
+**baseline (2026-07-27): 전체 31/33 — session 9/10 · md 22/23.**
+실패 2건은 아래 결함 1·3이며 둘 다 의도적으로 열어 둔 것이다.
+실행 시간은 전체 스코프 기준 약 10분(md 인덱스 573MB, 쿼리마다 유료 임베딩 1회).
+
+### 다음 — 결함 1: 희소 고유어 회수 실패 (weightedMerge 상대 정규화)
+
+golden `피투성` ❌로 고정해 뒀다. 통과시키려 기대치를 낮추지 말 것 — 이건 진짜 결함이다.
+
+- 가든에 "피투성"은 2파일(`botlog/20260310T140114`, `journal/20260323T000000`)뿐이고
+  둘 다 인덱싱되어 있다. FTS는 8건을 정확히 회수한다.
+- 그런데 최종 top-5에 한 건도 안 남는다. `weightedMerge`가 max 기준 상대 정규화라
+  **무관한 벡터 결과(코사인 0.69 밴드)가 `vecNorm≈1.0` 만점**을 받고, BM25-only 정답은
+  `0.3 × 0.78 ≈ 0.235`로 밀린다. "벡터가 아무것도 못 찾았다"는 정보가 정규화에서 소멸.
+  `minScore: 0.05`는 절대 코사인이 아니라 병합 후 점수라 방어가 안 된다.
+- `Geworfenheit`(라틴 문자, 4파일)는 통과 → 한글 토큰화가 아니라 **merge 단계** 문제임이
+  대조로 확인됐다.
+- 후보 대책: (a) 벡터 절대 유사도 floor를 정규화 **전에** 적용, (b) 벡터 상위군이
+  평평하면(top1−topN 스프레드가 작으면) `bm25Weight` 상향, (c) FTS-only 후보에 rank
+  기반 보정(md에도 RRF 혼용). 어느 쪽이든 golden `피투성` + `Geworfenheit` 동시 통과가 수용 기준.
+
+### 다음 — 결함 2: md scaffold damping 부재
+
+- `isScaffoldChunk()` 마커는 org 인용문 형식(`> History`)이라 md에서 **0건 매치**.
+  가든 Hugo export는 `## 히스토리 {#히스토리}` 헤딩이다 (실측: 히스토리 862파일,
+  관련메타 864, History 586, BIBLIOGRAPHY 1570).
+- md golden 23행 중 11행이 top-K에 scaffold 지배 chunk(비율>50%)를 포함. 최대 3/5
+  (`어쏠로지스트 뉴스레터`).
+- `applyScaffoldDamping`을 `MD_SCAFFOLD_MARKERS`까지 확장할지 결정. 단, 가든 chunk는
+  `> [!abstract]` 본문과 `## 히스토리`가 한 chunk에 섞여 있어 boolean damping은 유용한
+  chunk까지 죽인다 → `mdScaffoldRatio` 기반 비례 damping을 먼저 검토.
+
+### 다음 — 결함 3: `dual GPU 인덱싱 튜닝` 0 results (session)
+
+- v2026.6.19 이전부터 실패 중. 세션 tightening의 의도적 손실인지 회수 실패인지 미확정.
+  아래 우선순위 1의 "기대치를 코퍼스에 맞춰 정정"과 같은 판단이 필요하다.
+
+## Next — Post-rebuild 품질 개선안 (2026-06-19, GPT 검수 반영)
 
 full rebuild 후 1차 검수(golden 세션 8/10, doctor 분포) + GPT 분신
 (`20260619T095519-55dcb9` gpt-5.5) 검수 결론: **rebuild는 성공("핵심만"

@@ -68,6 +68,66 @@ export function isScaffoldChunk(text: string): boolean {
   return SCAFFOLD_MARKERS.some((m) => text.includes(m));
 }
 
+/**
+ * Markdown-track scaffold markers (public garden, `~/repos/gh/notes/content`).
+ *
+ * The org markers above are blockquote-shaped (`> History`) because that is how
+ * Denote org files carry their generated sections. The Hugo export rewrites the
+ * same sections as markdown headings (`## 히스토리 {#히스토리}`), so
+ * `isScaffoldChunk()` matches NOTHING on the md track — measured 2026-07-27
+ * against md.lance: 862 garden files carry `## 히스토리`, 864 `## 관련메타`,
+ * 586 `## History`, 1570 `## BIBLIOGRAPHY`, and none were being detected.
+ *
+ * Kept as a SEPARATE list rather than merged into SCAFFOLD_MARKERS: merging
+ * would silently change `applyScaffoldDamping()` behaviour for every track at
+ * the same time as the golden eval that is supposed to measure it. This list is
+ * observation-only for now — `golden-queries.ts` reports md scaffold density so
+ * a damping change can be argued from numbers instead of intuition.
+ */
+export const MD_SCAFFOLD_MARKERS: readonly string[] = Object.freeze([
+  "## History",
+  "## Related-Notes",
+  "## Related Notes",
+  "## KEYWORDS",
+  "## BIBLIOGRAPHY",
+  "## CITATIONS",
+  "## References",
+  "## NEWNOTES",
+  "## UPDATENOTES",
+  "## PREVIOUS",
+  "## PREV",
+  "## REFILED",
+  "## ARCHIVE",
+  "## 히스토리",
+  "## 관련메타",
+  "## 관련노트",
+  "## 연결노트",
+]);
+
+export function isMdScaffoldChunk(text: string): boolean {
+  return MD_SCAFFOLD_MARKERS.some((m) => text.includes(m));
+}
+
+/**
+ * Fraction of a chunk occupied by generated scaffold.
+ *
+ * Garden chunks routinely mix real prose with scaffold — a note's `> [!abstract]`
+ * summary and its `## 히스토리` log land in the same chunk. A flat boolean would
+ * condemn genuinely useful chunks, so retrieval quality is judged on how much of
+ * the chunk is scaffold: everything from the FIRST scaffold heading to the end.
+ * Returns 0 when no marker is present.
+ */
+export function mdScaffoldRatio(text: string): number {
+  if (text.length === 0) return 0;
+  let firstIdx = -1;
+  for (const m of MD_SCAFFOLD_MARKERS) {
+    const i = text.indexOf(m);
+    if (i >= 0 && (firstIdx < 0 || i < firstIdx)) firstIdx = i;
+  }
+  if (firstIdx < 0) return 0;
+  return (text.length - firstIdx) / text.length;
+}
+
 // Definition intent: "누구였지", "뭐였지", "시작점", "왜 중요", "소개", "이란",
 // or query ending with bare "뭐지/누구지".
 const DEFINITION_INTENT_RE =

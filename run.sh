@@ -95,7 +95,7 @@ Usage: ./run.sh <command> [args]
   test:search "query"         Live search test
 
 === Benchmark ===
-  golden [--db session|org]   Golden queries search quality test
+  golden [--db session|md]    Golden queries search quality test
   bench                       Full benchmark (needs API)
   bench:dry                   Dry run
 
