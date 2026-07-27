@@ -2,6 +2,8 @@
 
 > andenken은 **임베딩 기억축 1개**를 담당합니다.
 > 다축 맥락 복원(recap)은 GLG가 직접 합니다 — andenken 담당자의 책임이 아닙니다.
+> The canonical timeline is the compass: it owns when and what happened;
+> andenken restores why it mattered and where continuity resumes.
 >
 > **이 문서가 andenken의 핵심 문서입니다.** 비교표 + 변화 기록 + 운영 신호 +
 > 역할 분담. 라운드 / 마이크로 픽스 / 추격 항목은 들어오지 않습니다.
@@ -33,7 +35,7 @@
 |----|-----------|-----------|
 | **active memory** | 미보유 | **나중에 유사물 도입 예정** (공간만 비워둠) |
 | memory layer (active / short / long / dream) | 미보유 | OpenClaw 단독. andenken은 단축 담당이라 의도적 미보유. |
-| **품질 측정 로직** | 미보유 | **OpenClaw에서 이식 예정** |
+| **품질 측정 로직** | transitional vocabulary-heavy golden exists | Rebuild around timeline-grounded evidence rank; OpenClaw rank/weak-pass is a technique, not the goal |
 | 봇별 분리 corpus | 미보유 (전체 통합) | 의도적 — corpus 단위가 다름 |
 | sqlite-vec / SQLite FTS5 백엔드 | 미보유 (LanceDB) | 의도적 |
 
@@ -44,7 +46,8 @@
 | **org corpus** | ~45,000 chunks / 2,198 files | org-mode KB. 차별점의 본체이지만 **현재 production에서는 disable**. 업스트림 R&D로 분리. |
 | **md corpus (public garden)** | 2,218 .md / ~27MB | 가든 export를 직접 임베딩. 통제된 surface라 튜닝 빠름. 에이전트가 당장 쓰는 지식축. |
 | pi sessions + Claude Code 통합 | 1,600+ sessions / 28,537 chunks | OpenClaw는 봇별 transcript. 우리는 *나*의 모든 세션. 2026-05-11 sessions track 안정화 종료. |
-| **denote graph** | denotecli sidecar | back-link / 카테고리 / 시간축 |
+| **canonical personal timeline** | agent-config `timeline` skill | KST event coordinates across timelog/journal/agenda/note/git; andenken consumes its windows and refs but does not own it |
+| **denote graph** | denotecli sidecar | back-link / 카테고리 / exact note navigation |
 | 한국어 형태소 | dictcli sidecar | Kiwi stem + 한↔영 expand |
 | bibliography | bibcli sidecar | citation graph (`#+reference:` + `[cite:@key]`) |
 
@@ -52,6 +55,7 @@
 
 다축 recap 설계 흐름 안에서 GLG가 결정합니다. andenken이 단독으로 결정하지 않습니다.
 
+- **time → meaning / meaning → time traversal** — timeline exact slices and andenken semantic evidence meet in the harness. Start without a new event embedding track; add a derived timeline index only if real scenarios prove it necessary.
 - **org × sessions 교차 retrieval** — 같은 query에 두 corpus 결과가 동시에 뜨는 경험. OpenClaw는 자체 corpus가 없어 불가.
 - **org-native 구조 활용** — 카테고리(journal / botlog / llmlog / notes / bib / meta)별 가중치, heading hierarchy, citation/back-link graph 통합.
 - **agent-as-author signal** — llmlog / botlog가 sessions의 "결정 인덱스"로 작동.
@@ -61,6 +65,7 @@
 
 새 변화는 위에 추가. 시간 역순.
 
+- **2026-07-27** — Quality direction reset around the canonical time axis. Generic vocabulary probes such as `보편 학문` and `설계했다` are no longer the north-star definition of embedding quality. `timeline` owns exact KST coordinates, event identity, source status, and provenance; andenken keeps sessions + md as the semantic evidence layer for two turns: time→meaning and meaning→time. Existing score-semantics / fusion findings remain valid component work, but implementation follows real timeline scenarios and canonical evidence anchors. No `timeline.lance` is presumed.
 - **2026-05-21** — md legacy migration 첫 사이클 완료 + sessions oracle push 누락 발견. md: 2217 files / 10178 chunks / 31.6분 / $0.080 / errors 0 (예측 $0.0961에서 -17%). 직후 `estimate:md` 재실행에서 `missing-hash=0`, `to_index=0` 확인 — 5/20 정책(payload-hash + size-guard)이 의도대로 작동, 다음 publish 사이클부터는 mtime-touched 파일이 hash-match path로 빠져 비용이 0 근처로 수렴할 예정. sessions: 35 incremental / 746 chunks / $0.003. oracle sync 중 `sync-md-to-oracle.sh`는 있지만 `sync-sessions-to-oracle.sh`는 없는 정책 누락 발견 — oracle sessions DB가 5/11 fresh full rebuild 이후 stale (31546 chunks, 10일치 1819 file). 즉시 ad-hoc rsync로 동기화 (1.5GB → 100MB delta, manifest 1969 entries 포함). 부수 신호 2개 검출 (해결 필요 별 항목): (1) `verify sessions`가 query-only oracle 호스트를 가정하지 않아 279 orphan false alarm. (2) oracle 자체 fs에 별도 session JSONL이 누적되어 status에 `new=577 deleted=287` — oracle에서도 claude/pi-shell-acp 세션이 생성됨 신호.
 - **2026-05-20** — md incremental stale policy (size-guard + payload-hash). 5/20 sync에서 `new 3 / stale 2214 / ~$0.08 / 2205 calls`로 측정. `~/repos/gh/notes`를 추적해보니 publish commit (`c31fc0b2`)의 git-changed content/*.md는 66건인데 working tree mtime은 2220/2225이 publish 시각 ±5분 안 — Hugo가 변경 여부와 무관하게 모든 파일을 재기록하는 동작 확정. 이전 stale 판정이 mtime만 보던 것에 size-guard(`stat.size !== entry.size`)와 payload-hash(`sha256(joined embeddingInput)`)를 함께 적용. md 전용 분류기 `getMdStaleFiles` 도입: `staleByMeta` / `suspectFiles` (mtime newer + size same) / `ghostZoneFiles` / `newFiles`. suspect는 chunker로 payload-hash 비교: 일치=skip, 불일치=re-embed, 이전 hash 없음=size-guard 신뢰 + hash 기록만(첫 sync aggressive baseline). 4-way 분류 dry-run 검증 통과(synthetic backdate). `estimate:md` / `status` / `status:json`에 "why stale" breakdown 추가 — `stale-by-meta` / `suspect (match=… baseline=… mismatch=…)` / `ghost-zone`. sessions/org 트랙은 영향 없음(기존 `getStaleFiles` 보존).
 - **2026-05-13** — sessions Phase 1 stored-signal surface revival. GLG 방향: sessions는 의미공간만이 아니라 **시간축 + 담당자/경로 축**이고, md garden은 의미공간. Phase 1은 재색인 없이 이미 저장된 `timestamp` / `project` / `role` / `source` / `sessionFile` / `lineNumber` 신호를 검색 surface로 되살림. `session_search` / CLI `search-sessions`에 `dateFrom/dateTo`, `project`, `role`, `sessionFile`, `sessionFileContains`, `mode=semantic|hybrid|recent` 추가. `recent`는 embedding/BM25/dictcli 없이 stored-signal scan + timestamp DESC; 자연어 시간 파싱과 day-query 집계는 하지 않는다. 검증: `npm run build`, `npm run test:unit` 125/125, `./run.sh verify sessions`, 11 baseline 재측정(T1/T2/T3/T4/T6/T9/T10 recovered, T5/T11 honest empty, T7/T8 semantic sentinel 유지). agent-config `semantic-memory` skill 문서도 새 interface와 boundary를 반영.
@@ -104,9 +109,10 @@
 
 | 누구 | 책임 |
 |------|------|
-| **andenken** (이 repo) | 임베딩 기억축 + md 트랙으로 에이전트에게 지식축 제공. corpus / index / retrieval 운영. OpenClaw 비교 SSOT 유지. **org 트랙은 disable / 업스트림 R&D**로 분리. |
+| **andenken** (이 repo) | Embedding evidence layer over sessions + md. Owns corpus / index / retrieval quality needed to restore meaning around canonical time coordinates. **org remains disabled / upstream R&D.** |
 | **GLG** | 다축 맥락 복원(recap) 설계. 담당자 간 인터페이스. 모든 commit 최종 결정. |
-| **agent-config** | semantic-memory 스킬을 모든 surface(pi / Claude Code / Codex / Gemini)에 노출. memory-sync 스킬 (sessions 증분). |
+| **agent-config `timeline`** | Canonical KST time axis: event coordinates, identities, source status, provenance, and exact slices. It does not delegate temporal truth to embeddings. |
+| **agent-config harness surfaces** | Expose semantic-memory / memory-sync and compose timeline slices with andenken evidence. |
 | **denotecli** | org 구조 그래프 (Layer 2). dblock / backlink. |
 | **dictcli** | 한국어 형태소 + 한↔영 확장 (Layer 3). |
 | **bibcli** | bibliography (citation graph). |

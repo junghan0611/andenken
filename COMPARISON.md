@@ -2,6 +2,12 @@
 
 This document compares the **embedding surfaces** only.
 
+As of 2026-07-27, comparison parity and generic vocabulary recall are not the
+quality direction. The canonical KST timeline is the compass: andenken must
+recover session and garden evidence that explains dated events and restores
+continuity. Sections 11–12 remain a valid component-level retrieval audit; §13
+records the product-level direction that governs what gets implemented next.
+
 It does **not** try to restate OpenClaw's whole memory stack. Active memory,
 short/long/dream orchestration, and harness-side recall remain out of scope
 except where they change corpus boundaries or operator expectations.
@@ -115,7 +121,7 @@ better than **garden-specific relevance over time**.
 | Index integrity | SQLite/schema/runtime tests and doctor coverage | `./run.sh verify sessions`, `./run.sh verify md`, manifest accounting | A skewed corpus makes recall silently lie |
 | Search relevance regression | General runtime memory behavior is exercised, but not against GLG's public garden as a named golden corpus. A rank-based retrieval eval exists but sits **unmerged** on `mariano/qa-memory-retrieval-eval` | md golden landed 2026-07-27 (`85a38f4`): baseline 31/33 = session 9/10 · md 22/23, per-track scoring, `searchMdCore` shared with the CLI. Judgement is still boolean top-K, not rank-based — see §11.2 | `/recall` quality is mostly a ranking problem, not only an indexing problem |
 | Repairability / explainability | `doctor --fix`, recall-store repair, dreaming artifact repair | `doctor --md` explains manifest ↔ indexed gaps, but not yet retrieval misses | Operators need to know *why* recall failed |
-| End-user recovery scenarios | Per-agent continuity and session runtime context are covered as product behavior | Manual smoke + real usage; no md recall benchmark yet | The target is fast continuation, not just passing unit tests |
+| End-user recovery scenarios | Per-agent continuity and session runtime context are covered as product behavior | Transitional vocabulary-heavy md golden exists; no timeline-grounded evidence case pack yet | The target is dated evidence and useful continuation, not generic term recall |
 
 A crucial OpenClaw note from its own testing docs: **live transport gateway
 lanes disable memory search; memory behavior stays covered by QA parity
@@ -125,34 +131,42 @@ strength is broad runtime QA, not a GLG-specific garden relevance benchmark.
 ## 5. Recall usefulness bar
 
 A comparison document is only useful if it says what counts as success for the
-actual operator workflow.
+actual operator workflow. The canonical timeline supplies temporal truth;
+andenken must supply the semantic evidence around it.
 
-### Session recall must prove
+### Session retrieval must prove
 
-- A concrete repo/task query recovers the last meaningful work in **top-3**.
-- Recent shipped work beats generic old chatter.
+- Given an exact KST window, decisions and turning points are recovered without
+  collapsing a day or week into its final busy hour.
+- Expected session-file/project/source anchors rank high enough to explain the
+  event and restore the next thread.
 - Source filters (`pi`, `claude`) do not cross-contaminate results.
 - A one-turn or smoke session does not masquerade as the main thread.
 
-### MD recall must prove
+### MD retrieval must prove
 
-- A concept/person/work query returns the intended note in **top-5**.
-- A day-specific query like `2026-05-11 andenken` can recover the actual day's
-  working note instead of generic `andenken`-heavy notes.
-- Korean↔English conceptual retrieval works without exact-title dependency.
-- Skipped files are explainable (`noembed_tag`, `min_body`, etc.), never silent.
+- A timeline note event can reach the intended dated garden file / Denote ID.
+- Durable interpretation complements the event without pretending that the
+  public garden is the complete lived record.
+- Skipped files and honest corpus misses are explainable (`noembed_tag`,
+  `min_body`, etc.), never silently relabeled as ranking failures.
+- Vocabulary and sparse lexical probes protect components, but do not define
+  product success.
 
-### Cross-axis recall must prove
+### Timeline-grounded recall must prove
 
-- If session recall is thin, the shift to md knowledge is explicit, not hidden.
-- `/recall` can reach the "next turn as a one-liner" goal without the operator
-  reverse-engineering the retrieval stack.
-- Once the golden baseline lands, failure cases should be classifiable as one
-  of: corpus miss, ranking miss, source-boundary mistake, or operator-surface
-  mistake.
+- `2026-02-07` is not called empty merely because artifact depths are silent.
+- `2026-07-11` preserves timelog + journal evidence while honestly reporting no
+  depth-2/3 artifact residue.
+- time→meaning starts from structured coordinates; meaning→time ends with
+  timeline confirmation.
+- `/recall` can reach the next useful turn without the operator reverse-
+  engineering the retrieval stack.
+- failures are classifiable as timeline/source-status, corpus miss, ranking
+  miss, join mistake, or synthesis mistake.
 
 This is the real bar for andenken. Not "does search return something," but
-"does recall restore the operator's next move quickly and honestly?"
+"does dated evidence restore meaning and continuity quickly and honestly?"
 
 ## 6. What is intentionally different
 
@@ -545,3 +559,68 @@ Claude 쪽에서 코드로 재확인한 것만 적는다 — 검수 주장을 �
 pattern`은 오해를 부른다. OpenClaw는 `vec_distance_cosine` 후 `1 - dist`이므로
 **계산이 같지 않다.** `andenken legacy transform` 류로 바꿔야 SSOT가 정직해진다.
 (이번 문서 라운드에서는 코드를 건드리지 않았다.)
+
+---
+
+## 13. 2026-07-27 direction reset — embedding as a lens over the time axis
+
+The score audit above found real defects, but it also exposed a larger problem:
+the fixture set had made generic terms such as `보편 학문` and `설계했다` look
+like the purpose of andenken. They are not. The purpose is recollection on a
+time axis: recovering what GLG lived and made, why it mattered, and where the
+thread continues.
+
+### 13.1 Ownership
+
+| Surface | Owns | Must not claim |
+|---|---|---|
+| agent-config `timeline` | Canonical KST coordinates, native event identity, depth 0/1/2/3, source status, provenance, exact slices | Semantic interpretation of the event |
+| andenken `sessions` | Decisions, reasons, conversation continuity, stored time/project/source/file signals | That a similarity score establishes when something happened |
+| andenken `md` | Durable public interpretation in dated garden notes | That the public garden is the full lived record |
+| harness / recall | Natural-language time resolution and composition of timeline facts with semantic evidence | Ownership of either underlying corpus |
+
+The interface is bidirectional:
+
+1. **time → meaning:** timeline date/window → events and refs → sessions/md
+   evidence around the canonical coordinate.
+2. **meaning → time:** semantic evidence → candidate timestamps/files/entities
+   → timeline confirmation and the surrounding depth context.
+
+Explicit time windows use structured retrieval first. A semantic hit becomes a
+time claim only after timeline confirmation.
+
+### 13.2 Evaluation hierarchy
+
+A single golden runner must not pretend to prove all layers.
+
+- **Timeline fidelity** belongs to the timeline skill. Its golden days include
+  `2026-02-07` (depth 0 only) and `2026-07-11` (timelog + journal, no artifact
+  residue). An answer that calls either day empty is wrong before embeddings
+  are considered.
+- **Embedding retrieval** belongs here. It should grade canonical evidence
+  anchors: expected date/window, session file, Denote ID/path, event ref, and
+  rank. It must report an honest corpus miss separately from a ranking miss.
+- **Synthesis and next-move recovery** belong to harness recall. That layer
+  proves whether factual slices and semantic evidence become a useful answer.
+
+Loose `expectKeywords` may remain as smoke diagnostics, but it is not a
+product-quality verdict. Sparse lexical cases such as `피투성` can continue to
+protect a hybrid-merge component without directing the roadmap.
+
+### 13.3 Start without a timeline embedding track
+
+No `timeline.lance` is implied by this direction. Existing surfaces already
+provide exact timeline slices, session `dateFrom/dateTo` and stored-signal
+filters, md paths / Denote IDs, and git SHAs. The next design pass must exercise
+those joins first. A derived event index is justified only if real
+meaning→time scenarios cannot find a candidate coordinate through sessions and
+md; if added, it references canonical `event_id` records and never becomes a
+second time axis.
+
+### 13.4 Consequence for §§11–12
+
+The metric/sign corrections, raw-component telemetry, same-candidate replay,
+and fusion defect remain valid engineering work. Their order changes only in
+one respect: real timeline-grounded cases define the acceptance surface before
+fusion is tuned. OpenClaw remains a source of techniques; parity with it is not
+the destination.

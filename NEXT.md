@@ -43,252 +43,91 @@ andenken 측 함의 (지금 착수 금지, 1.0.0 결과 본 뒤):
 > `v2026.6.19`로 닫혔다 → [CHANGELOG.md](./CHANGELOG.md). 아래는 그 위에서
 > 이어지는 retrieval 품질 작업.
 
-## Now — md golden gate 신설 + 희소어 회수 결함 (2026-07-27) ⟵ 다음 에이전트 시작점
+## Now — derive embedding quality from the canonical time axis
 
-GPT 분신이 `--db session` 실행에서 "📡 Org provider: gemini (768d)" 출력을 보고
-"표시만 잘못된 것, org 검색은 실행되지 않았다"고 판단한 데서 출발. 표층은 맞지만
-**게이트 자체가 죽어 있었다.**
+The direction changed on 2026-07-27 after reviewing the harness-side
+`timeline` contract (`~/repos/gh/agent-config/skills/timeline/README.md`). The
+previous md golden work exposed real component defects, but generic vocabulary
+queries are not the reason andenken exists. The north-star question is:
 
-### 확정된 사실
+> What did GLG live, what did GLG make, why did it happen, and where should
+> continuity resume now?
 
-- `.env.local`의 `ANDENKEN_ORG_*`는 전부 주석 처리인데 `createOrgProviderFromEnv()`가
-  legacy Gemini 768d로 폴백한다. org.lance는 2560d(마지막 인덱싱 2026-05-07) →
-  **인자 없는 `./run.sh golden`이 쿼리 하나도 못 돌리고 dim mismatch로 즉사.**
-  `--db session`만 살아 있었고, 그마저 아무도 쓰지 않는 org provider를 출력했다.
-- golden 26개 중 org 전용이 16개 = 실질 검수는 session 10개뿐이었다.
-- **프로덕션 지식축(md.lance 10,533청크 / 2,221파일)에 golden이 0개.** AGENTS.md는
-  `./run.sh golden`을 regression gate로 소개하고 있었다.
+### Boundary to preserve
 
-### 세운 것
+- `timeline` owns exact KST coordinates, event identity, source status,
+  provenance, and the distinction between an honest zero and a missing source.
+- andenken owns semantic evidence over **sessions + md**: decisions, reasons,
+  durable interpretation, and the next thread.
+- the harness composes them. andenken does not parse natural-language dates,
+  rebuild the timeline collector, or let similarity scores override temporal
+  facts.
+- do **not** create `timeline.lance` by assumption. Start with timeline exact
+  slices plus existing session stored-signal filters and md file/Denote IDs.
+  Add a derived event index only if real meaning→time scenarios prove a gap.
 
-- **md 트랙 신설.** org 가든 쿼리를 md로 이전 + 신규 케이스. `--db md`.
-- **org 트랙 은퇴.** `--db org`는 명시적 에러로 거부.
-- **`md-search.ts` 코어 추출.** `cli.ts search-md`와 golden이 같은 `searchMdCore()`를
-  호출한다. 이전 org 분기는 golden이 파이프라인을 따로 구현해 `recencyHalfLifeDays: 90`
-  (cli는 0)을 재고 있었다 — 아무도 쓰지 않는 파라미터를 게이트로 삼던 상태.
-- **트랙별 독립 평가.** session은 RRF(실측 0.008~0.053), md는 weighted(0.94~1.10)로
-  스케일이 비교 불가인데 한 리스트로 정렬 병합했다 → `both` 5개 쿼리가 md를 두 번
-  채점하고 session은 한 번도 안 봤다. 이제 (쿼리 × 트랙) 행으로 분리 집계.
-- 새 계약: `expectFiles`(희소어 정답을 Denote ID로 고정) / `topKMaxPerFile`(노트 단위
-  다양성 — MMR은 chunk만 본다) / `top1MdScaffoldMax`(md scaffold 비율).
-- `retriever.ts`에 `MD_SCAFFOLD_MARKERS` / `mdScaffoldRatio` 추가 — **관측 전용**,
-  랭킹 동작은 건드리지 않았다.
+### The two retrieval turns
 
-**baseline (2026-07-27): 전체 31/33 — session 9/10 · md 22/23.**
-실패 2건은 아래 결함 1·3이며 둘 다 의도적으로 열어 둔 것이다.
-실행 시간은 전체 스코프 기준 약 10분(md 인덱스 573MB, 쿼리마다 유료 임베딩 1회).
+1. **time → meaning** — canonical date/window → timeline events/refs → session
+   and md evidence around that window.
+2. **meaning → time** — semantic evidence → candidate timestamps/files/entities
+   → timeline confirmation and surrounding depth-0/1/2/3 context.
 
-### ⚠️ 먼저 읽을 것 — 이 절의 초안은 교차검수로 정정됐다
+Start with time→meaning because its coordinate is already exact. Meaning→time
+comes second and must end by pivoting back to the timeline.
 
-같은 날 GPT(`20260727T165615-b9acf6`)와 dictcli 담당(`20260727T171701-026e1e`)의
-검수로 **아래 결함 서술 중 여러 사실이 틀린 것으로 확인됐다.** 정정 전문은
-[COMPARISON.md §12](./COMPARISON.md). 다음 세션은 **§12를 먼저 읽고** 이 절로 올 것.
+### Next session — design before code
 
-한 줄 요약: **결함 판정은 유지, 원인 설명의 용어와 수치는 다시 잡아야 한다.**
+1. Build a small case pack from real temporal recovery jobs, beginning with the
+   two timeline golden days:
+   - `2026-02-07`: depth 0 proves a lived day while journal/agenda/git/note
+     residue is silent.
+   - `2026-07-11`: timelog + `장염 복통` + `인간 환멸` explain a day with no
+     depth-2/3 artifacts.
+2. Add work-continuity cases with canonical anchors, for example a cost
+   incident and the operating rule that followed it. Expected values are dates,
+   event IDs/refs, session files, Denote IDs, and evidence ranks — not loose
+   keyword presence.
+3. Inventory the joins already available before adding storage:
+   `dateFrom/dateTo`, project/source/role/sessionFile, chunk timestamps, Denote
+   IDs, note paths, full git SHA, and timeline native identity.
+4. Define three separate proof layers:
+   - timeline fidelity belongs to the timeline skill;
+   - embedding retrieval grades canonical evidence rank and honest corpus gaps;
+   - final synthesis/continuity belongs to the harness.
+5. Only after the cases expose a retrieval failure, continue the raw-component
+   telemetry and fusion work documented in `COMPARISON.md` §11–12.
 
-### 다음 — 결함 1: 희소 고유어 회수 실패 (weightedMerge 상대 정규화)
+### Acceptance for the design
 
-golden `피투성` ❌로 고정해 뒀다. 통과시키려 기대치를 낮추지 말 것 — 이건 진짜 결함이다.
-검수 측이 단계별로 재현했고, 기대 파일은 **MMR on/off 무관하게 22위**이며 `minScore`도
-통과한다. 탈락 지점은 병합 단계가 맞다.
+- A day with no commits is never answered as a day with no life.
+- `empty`, `stale`, `partial`, and `unreadable` are not collapsed into zero.
+- An explicit time window uses structured retrieval before semantic ranking.
+- A semantic hit does not become temporal truth until the timeline confirms it.
+- The answer can show not only what happened, but the decision/interpretation
+  and the next thread when the evidence exists.
 
-- 최종 top-5에 한 건도 안 남는 이유: `weightedMerge`가 max 기준 상대 정규화라
-  **무관한 벡터 후보가 `vecNorm≈1.0` 만점**을 받고 BM25-only 정답을 밀어낸다.
-  "벡터가 아무것도 못 찾았다"는 정보가 정규화에서 소멸한다.
-- ⚠️ **초안의 "코사인 0.69 밴드"는 틀렸다** (§12.1). `store.ts:353`은 L2 거리를
-  `1/(1+d)`로 접은 값이라 코사인이 아니다. raw 벡터 점수는 **0.4336 → 0.4236**이고,
-  0.69~0.70은 **이미 `0.7 × score/maxVec`가 된 병합 후 값**이다.
-  → **"cosine floor 0.75" 안은 폐기한다.** 현재 표현계에서 모든 결과를 자른다.
-- ⚠️ **"가든에 2파일뿐"도 부정확하다** (§12.5). FTS 1위였던
-  `botlog/20260319T110800`은 **인덱스에만 남은 유령 본문**이다(manifest 39,247 bytes
-  vs 디스크 12,848, 현재 소스에 "피투성" 0건). **md sync 후 재측정이 선행되어야
-  fixture를 믿을 수 있다.**
-- `Geworfenheit`(라틴 문자)는 통과 → 한글 토큰화가 아니라 merge 단계 문제라는 대조는
-  유효하다. **형태소도 해법이 아니다**: Kiwi는 "피투성이"를 `["피","개념"]`으로 쪼개고
-  우리 `isUsefulKoreanStem`(retriever.ts:493)이 1음절을 버린다(§12.6).
-- 후보 대책(§12.8 5단계에서 고른다): (a) 양수 BM25 단조 압축 `s/(c+s)`,
-  (b) RRF/ordinal fusion, (c) **exact lexical hit에 top-K quota 또는 override**,
-  (d) 벡터 채널이 평평할 때 weight/gate 조정. 희소 exact-term 계약에는 (c)가 가장
-  직접적이다. ⚠️ **openclaw `bm25RankToScore`를 그대로 이식하면 안 된다** — 우리
-  Lance `_score`는 양수 high-is-good이라 `1/(1+s)`가 **순서를 뒤집는다**(§12.2).
-  판정은 두 케이스가 아니라 **expected rank / MRR**로.
+### What happened to the 2026-07-27 word-oriented work
 
-### 다음 — 결함 2: md scaffold damping 부재 (단, 관측치부터 다시)
+The md gate, independent track scoring, shared `searchMdCore()`, stale-index
+finding, score-semantics correction, and `weightedMerge` defect remain valid
+engineering evidence. `피투성` may remain a low-level sparse lexical regression
+case. `보편 학문` and `설계했다` are no longer quality-direction cases; dictcli
+continues on its own vocabulary contract and does not block this plan.
 
-- `isScaffoldChunk()` 마커는 org 인용문 형식(`> History`)이라 md에서 **0건 매치**.
-  가든 Hugo export는 `## 히스토리 {#히스토리}` 헤딩이다 (실측: 히스토리 862파일,
-  관련메타 864, History 586, BIBLIOGRAPHY 1570). 이 사실은 유효하다.
-- ⚠️ **"23행 중 11행" 수치는 무효다** (§12.4). golden이 `text.slice(0,500)` 한
-  excerpt에 대고 재고, `mdScaffoldRatio()`가 첫 마커부터 **문자열 끝까지** 세는데
-  실제 파일은 그 뒤에 실질 H2가 다시 온다 → 과대계상. 재측정은 marker 섹션의 다음
-  same-or-higher heading까지만 span으로, excerpt가 아니라 **full chunk**에서.
-- `md-chunker.ts:660 stripBibliographyTail()`이 이미 후반 50% 이후의
-  CITATIONS/BIBLIOGRAPHY/REFERENCES/RELATED-NOTES를 `embeddingInput`에서 제거한다.
-  **기존 정책과의 중복·충돌 표를 먼저 만들 것.**
-- 전면 제외는 반대. History는 실제 시간/운영 질의 신호다. `chunkKind =
-  content|history|related|bibliography` 같은 구조 신호를 두고 definition 질의에는
-  감쇠, history/recovery 질의에는 살리는 쪽. **모든 H2를 경계로 되돌리는 것은 금지**
-  (과청킹 회귀).
+The full forensic record is in `COMPARISON.md` §11–12 and commits
+`85a38f4..bef9536`; it does not belong as the active queue here.
 
-### 다음 — 결함 3: `dual GPU 인덱싱 튜닝` 0 results (session)
+## Parked evidence — windowed sessions retrieval for time → meaning
 
-- v2026.6.19 이전부터 실패 중. 세션 tightening의 의도적 손실인지 회수 실패인지 미확정.
-  아래 우선순위 1의 "기대치를 코퍼스에 맞춰 정정"과 같은 판단이 필요하다.
+This 2026-05-28 design is no longer the active implementation queue. Its raw
+failure remains directly relevant: a KST day window sorted by timestamp DESC
+collapsed a 24-hour day into its final hour. Keep the measurements and scheduler
+proposal below as evidence for the new timeline-grounded case pack. Do not ship
+the scheduler until those cases establish the required output shape.
 
-### 다음 — 결함 4: `설계했다`는 계약이 허구다
 
-- description이 "한국어 어간 '설계' — Kiwi stem이 동작해야"인데 **검색 경로는 stem을
-  부르지 않는다**(`batchStem`은 `indexOrg`에만 있고 `indexMd`에는 없다, §12.6).
-  이 PASS는 아무것도 증명하지 않는다.
-- **기대치 자체("설계"가 회수되어야)는 정당하다.** dictcli 담당 확인 결과 expand의
-  빈칸은 정책이 아니라 미수집이다. 잘못된 건 description과 판정 방식이다.
-- 검수 권고: 문구만 바꾸고 끝내지 말 것. **canonical path/content rank로 검증할 명확한
-  retrieval 계약이 없으면 `suspicious` / `weak` 케이스로 두는 편이 안전하다.**
-- ⚠️ **dictcli 개선을 기다리지 말 것** — GLG가 직접 조율하는 별도 라인이다(§12.6 말미).
-
-### 코퍼스 제약 — 가든 영어 태그는 **통제 어휘**다 (2026-07-27, GLG 통보)
-
-다음 세션이 반드시 알아야 할 상류(上流) 변경. andenken이 만든 게 아니라 **가든
-내보내기 쪽에서 조인 것**이다.
-
-- doomemacs-config의 가든 export가 **org 문서의 태그를 무시하고 meta 노트에 등록된
-  영어 태그만** md front matter로 내보낸다. org 쪽은 영어 태그 단복수조차 정리가
-  안 된 상태라 그 혼란을 하류로 흘리지 않으려는 조치다.
-- 그 결과 가든 영어 태그가 **약 1,243개**로 수렴했다
-  (`~/repos/gh/notes/content/index.md` §택소노미의 `tags index (1243)`).
-  andenken 쪽 실측(2026-07-27)은 front matter 유니크 **1,253개**, 태그 부착
-  총 **8,457건**.
-- **한글은 자유, 영어는 통제.** GLG 원칙: 한글 표현은 마음대로 쓰되 영어는 쌍으로
-  어휘를 제한한다. 이것이 **임베딩과 dictcli 양쪽에서 유효해야 한다.**
-
-#### andenken 함의 (측정 결과)
-
-`Tags:` 는 chunk의 **저장 `text`** 에 들어가고 `embeddingInput`(body-only)에는
-들어가지 않는다(§12.3).
-
-⚠️ **여기서 문서 쪽과 쿼리 쪽이 비대칭이라는 점을 놓치지 말 것.** "통제 어휘는
-벡터가 아니라 FTS 축의 성질"은 **문서 쪽만 본 반쪽 서술이다**:
-
-| | 태그/확장어가 벡터에 들어가나 |
-|---|---|
-| 문서 쪽 `embeddingInput` | **아니오** — body only |
-| 쿼리 쪽 `enrichedQuery` | **예** — `md-search.ts:104` `provider.embedQuery(enrichedQuery)` |
-
-즉 dictcli 확장어는 tag FTS만 건드리는 게 아니라 **query embedding 자체를 바꾼다.**
-계측에서 `tag hit` / `body·title FTS hit` / `vector-only lift`를 구분하지 않으면
-"태그 축 착지"와 "확장어의 semantic lift"가 다시 섞인다.
-
-dictcli `:trans` 영어 출력(1,950개)과 가든 태그(1,253개)의 정렬도 실측:
-
-| 구분 | 개수 | 뜻 |
-|---|---|---|
-| 교집합 | **661** | expand 결과가 태그 축에 실제로 착지 |
-| 가든에만 (dictcli 미등록) | **592** | 그 태그로 가는 한→영 경로 없음 |
-| dictcli에만 (가든 태그 아님) | **1,289** | expand 출력의 66%가 태그 축에서는 헛돔 |
-
-빈도 가중이 더 아프다. **미등록 592개가 태그 부착 3,723건 / 8,457건 = 44%를
-차지한다.** 미등록 상위를 보면 성격이 분명하다:
-
-- 구조 태그 — `bib(985)`, `meta(498)`
-- 도구·고유명사 — `orgmode(63)`, `doomemacs(22)`, `quarto(20)`, `gptel(17)`, `nixos(7)`
-- 최근 AI 실무어 — `llm(33)`, `anthropic(16)`, `vibecoding(13)`, `mcp(12)`, `rag(10)`
-- 힣 고유어 — `hangul(40)`, `metameta(40)`, `entwurf(16)`, `emacsian(12)`
-
-dictcli 담당자가 짚은 "`practical.edn` 92줄, 실무어가 통째로 빠짐"과 정확히 겹친다.
-
-**단, 44%가 전부 손실은 아니다.** 도구명·고유명사는 사용자가 영어로 직접 질의하므로
-한→영 경로가 없어도 FTS가 잡는다. 실제 손실은 **한글로 질의될 법한데 영어 태그만
-있는 개념**(예: "한글" → `hangul`)에 한정된다. 그 부분집합을 분리 계량하는 것이
-다음 라운드 과제다. ⚠️ **dictcli 시드 확장을 기다리지 말 것**(§12.6 말미) — 이
-측정은 andenken 쪽 계약을 정직하게 쓰기 위한 것이지, 저쪽 작업의 선행조건이 아니다.
-
-#### golden 함의 — 계약을 **둘로 나눠야** 한다
-
-태그 축에 착지하지 못하는 expand 결과가 `expectKeywords`를 우연히 만족시킬 수 있다
-(본문에 그 단어가 있으면). 결함 4(`설계했다`)와 같은 계열의 가짜 통과다.
-
-그런데 **anchor rank로 옮기는 것만으로는 이게 닫히지 않는다.** anchor rank는
-"올바른 문서를 찾았다"는 계약은 닫지만 "dictcli 확장이 controlled-tag 축을 통해
-**기여했다**"는 계약은 증명하지 않는다 — 같은 anchor가 원래 한글 본문이나 벡터로도
-잡힐 수 있기 때문이다. 반대로 확장된 영어어가 body에서 맞은 것도 **전체 retrieval
-관점에서는 정당한 성공**이며, 다만 "영어 태그로 확장해야"라는 channel-specific 설명을
-증명하지 못했을 뿐이다.
-
-그래서 케이스를 둘로 쪼갠다:
-
-1. **제품 retrieval 계약** — canonical anchor의 expected rank로 판정.
-   body / vector / tag 어느 경로든 정답이면 성공.
-2. **expansion / tag-bridge 계약** — no-expand 대비 expand의 **anchor rank delta**
-   \+ expanded term이 anchor의 `metadata.tags`에 **실제 존재하는지** + FTS/vector
-   component 변화까지 계측. **단순 `expectKeywords` 금지.**
-
-`보편 학문`처럼 description이 "dictcli expand가 영어 태그로 확장해야"라고 쓰인
-케이스는 전부 2번으로 가야 하고, 지금은 1번 방식으로 채점되고 있다.
-
-### 실행 순서 — fusion은 마지막 (§12.8 전문)
-
-1. corpus/index sync provenance 정합 (md sync → `피투성` fixture 재측정)
-2. **관측 스키마·용어 계약 확정 — behavior 불변** (raw field 이름 그대로:
-   `_distance` / `distanceMetric=l2` / `similarityTransform=1/(1+d)` / Lance `_score` /
-   `higherIsBetter=true`. `vectorScore`·`cosine`·`rank` 같은 섞인 이름 금지)
-3. raw component 계측 (raw distance와 transformed score를 **둘 다**, raw FTS score와
-   fallback 여부를 **둘 다**, `vectorRank`/`ftsRank`/`inBoth`/`expectedRank`)
-4. 계측값으로 empirical semantics/calibration 결정 + 같은 후보셋 **in-process replay**
-   (shell candidate마다 유료 임베딩 반복 금지)
-5. calibrated transform / fusion behavior 변경
-6. golden 판정을 `pass`/`weak-pass`/`fail`로 확장 (anchor 있으면 그 rank가 최종 판정)
-
-원칙은 **raw vocabulary → telemetry → interpretation**. 2번이 *이름만* 고치는
-단계라는 것이 이 순서가 성립하는 조건이다.
-
-## Next — Post-rebuild 품질 개선안 (2026-06-19, GPT 검수 반영)
-
-full rebuild 후 1차 검수(golden 세션 8/10, doctor 분포) + GPT 분신
-(`20260619T095519-55dcb9` gpt-5.5) 검수 결론: **rebuild는 성공("핵심만"
-정책 정상 작동). 지금 손댈 건 threshold 완화가 아니라 (1) golden 계약 정리
-(2) 2e retrieval balancing (3) read-only 민감도 계측.** 300KB는 유지.
-
-검수 사실:
-- 세션 15,581청크/376파일, md 10,404/2217, verify 로컬 clean (oracle orphan은
-  raw 소스 미보유 host-locality 아티팩트).
-- **compaction=0**: GPT가 로컬 raw 확인 — pi compaction 107개 전부
-  garden-native=false라 정책상 정상 제외. 94개 신형 파일엔 `type=compaction`
-  자체가 없음 → **parser 고쳐도 즉시 복구 안 됨.** legacy 재유입 금지.
-- 분포 skew: source claude 89.5%/pi 10.5%, project pi-shell-acp 37.1%.
-
-### 우선순위 1 — Golden contract cleanup (작고 즉시)
-- `delegate session directory` 제거 ✅ (v2026.6.19에서 완료).
-- `봇멘트 remark42`: session golden에서 제거 또는 md/skill-doc golden으로 이동
-  (세션 tightening의 의도적 손실 — botment 운영지식이면 skill docs/md/botlog로 승격).
-- `남은 작업 뭐지`: strict session golden에서 제외 → recall/NEXT workflow test로
-  분리("two-step recall required" 케이스). golden 8/10의 2 탈락은 *의도된 손실*이라
-  현 golden 수치가 오해를 부름 → 기대치를 코퍼스에 맞춰 정정.
-
-### 우선순위 2 — 2e balanced windowed retrieval (아래 § 상세설계에 파라미터 주입)
-GPT 권장 파라미터 (인덱스 아니라 retriever에서 skew 해소):
-- `baseCandidates` ≥ `limit×10` (가능하면 `×20`). 코퍼스 작아져 후보 넉넉히 잡아도 부담↓.
-- **score floor 먼저**: hybrid/semantic은 `score ≥ topScore×0.6`(또는 normalized floor)
-  안에서만 diversity 강제 — relevance 망치지 않게.
-- project **soft cap** `ceil(limit×0.25)` (limit=30 → project당 ~8), sparse fallback에선 초과 허용.
-- source **minority rescue**: 50/50 강제 금지(pi 약하면 쓰레기 끌어올림). base 후보에 양
-  source 있으면 minority를 최대 `ceil(limit×0.2~0.3)`까지 rescue.
-- **sparse fallback** 강화: bucket round-robin 후 결과가 `limit`의 40~60% 미만이면
-  active bucket 안에서 `(sessionFile, project)`-balanced fill.
-- skew 수치(claude 89.5 / pi-shell-acp 37.1)를 **regression fixture**로 박을 것.
-
-### 우선순위 3 — Read-only quality audit (threshold 변경 전 필수)
-- 300/250/200KB dry-run 비교표: 파일 수·chunk 수·project/source 분포·golden 회복·
-  noise 회귀. threshold 변경은 이 표 보고 **GLG decision**.
-- 2a `parsePiLine` compaction schema fix: old schema는 top-level `type:"compaction",
-  summary:...`인데 parser는 `parsed.compaction?.summary`만 봄 → `summary` top-level
-  fallback 추가(비용 작고 future/legacy 안전). 단 compaction 복구 이유로 pre-0.9.0
-  재유입 금지. 추후 "derived session summary chunk"(header/name + first/last user turn
-  + NEXT link)는 별도 설계.
-- doctor metric 추가: "compaction records filtered by filename policy"를 설명 가능하게.
-
-## Next — Windowed sessions retrieval that survives daily use
-
-**현재 주요 우선순위:** 2026-05-28 doomemacs-config 측 wrapper
+**Historical repro:** 2026-05-28 doomemacs-config 측 wrapper
 (`andenken-search-sessions-today/this-week`)를 사용자가 매일 쓰려고
 처음 시도했다. 즉시 결과 미달. 실측으로 surface shape 문제 확정 (어제
 KST 윈도우 / limit 30 / mode=recent):
@@ -318,13 +157,13 @@ KST 윈도우 / limit 30 / mode=recent):
 
 | 단계 | 내용 | 상태 |
 |---|---|---|
-| **2e** | Multi-axis balanced windowed view — `(sessionFile, time-bucket)` group + project balancing tier. retriever module + `cli.ts` + `index.ts` parity. 인덱싱 무변경 | **현재 시작점** |
+| **2e** | Multi-axis balanced windowed view — `(sessionFile, time-bucket)` group + project balancing tier. retriever module + `cli.ts` + `index.ts` parity. 인덱싱 무변경 | parked pending timeline cases |
 | **2b** | Corpus noise threshold — simulation 병행 (read-only). 임계값 확정은 2e 안정 후 | 시뮬만 |
 | **2a** | parsePiLine compaction schema fix + targeted reindex (Phase 1 stored signals 결손 채움) | 2e 다음 |
 | **2c** | Golden quality 측정 — query #3 / #6 / #8. **2e 비차단** (regression check만 머지 직전) | pending |
 | **2d** | Derived signals 인덱싱 — 헤더 `id`(garden sessionId) + `entwurf`/`control` 이름 태그 / commit_sha / slash_command. **0.9.0 이후 entwurf parent/child threading은 여기로 흡수** (파일명 공짜 소멸, 인덱싱 필수). 2c 결과 보고 결정 | deferred |
 
-### Current step — 2e Multi-axis balanced view
+### Historical proposed step — 2e Multi-axis balanced view
 
 #### Step 0 — Session-track fileDedup 분기 (1줄 fix 아님)
 

@@ -17,6 +17,16 @@ not drift.
 
 - andenken **never calls LLMs for recall**. Retrieval is vector + BM25 + merge + decay + MMR.
   If an LLM-in-the-loop is ever needed, it is a harness concern (active memory), not andenken.
+- The harness-side `timeline` skill is the canonical source for KST coordinates,
+  event identity, source status, and provenance. andenken must not infer a date
+  from similarity, turn a day-only event into midnight, or collapse
+  `empty`/`partial`/`stale`/`unreadable` into one state.
+- Natural-language time parsing and cross-depth timeline composition belong to
+  the caller. andenken accepts exact stored-signal windows and returns semantic
+  evidence inside or around them.
+- A timeline event embedding track is **not** a default scope expansion. If one
+  is ever justified by measured meaning→time failures, it is a derived search
+  projection keyed to canonical event identity, never a second timeline.
 - The **query path never writes** to LanceDB. Only indexing writes. This is what lets
   query run on any host including Oracle without touching the DB.
 - **Hard guard is a safety rail, not a quality bar**. Oversize chunks being skipped is
@@ -52,6 +62,9 @@ If policy changes, treat it as a **DB rebuild event**, not an incremental sync.
 Invariant:
 - more embedded text is **not** automatically better memory
 - low-signal corpora should stay excluded until proven useful in retrieval
+- a new corpus is not justified merely because the timeline can collect it;
+  first prove that existing exact refs plus sessions/md cannot satisfy a real
+  time-grounded recovery case
 
 Examples of default exclusion candidates:
 - transcript dumps
@@ -276,6 +289,8 @@ At minimum, unit tests must prove:
 
 Coverage gaps to close (not blocking, but tracked):
 
+- timeline-grounded retrieval cases with canonical dates, session files, note
+  paths/Denote IDs, and honest corpus-miss vs ranking-miss classification
 - `getShortCJKTokens()` boundary cases (punctuation, ASCII-adjacent, length cut)
 - session-search interleave order (substring + FTS round-robin)
 - session-manifest stale detection (mtime change, size change, deleted file)

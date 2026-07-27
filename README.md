@@ -5,7 +5,8 @@
 > but lets the past gain meaning in the present.
 
 Semantic memory for humans and AI agents. Not a corporate RAG pipeline — an
-interface to the *high-signal slices of one existence* laid out on a time axis.
+embedding lens that lets the meaning around one existence's canonical time axis
+return to the present.
 
 ## How to Read This
 
@@ -32,6 +33,17 @@ understand where it fits.
                  │ ── Not implemented in this repo. ──
 ```
 
+The canonical time axis itself is not implemented here. The harness-side
+[`timeline`](https://github.com/junghan0611/agent-config/tree/main/skills/timeline) collector owns KST
+coordinates, event identity, source status, and provenance across timelog,
+journal, agenda, notes, and git. andenken supplies the semantic turn around
+that factual spine:
+
+- **time → meaning:** retrieve session decisions and durable garden context
+  around a timeline slice;
+- **meaning → time:** find candidate evidence semantically, then let the
+  timeline confirm when it happened and what surrounded it.
+
 Sidecars (required but not axes):
 
 - **dictcli** — personal vocabulary graph (Korean↔English expand, Kiwi stem)
@@ -45,8 +57,8 @@ covers all three.
 
 | Track | Quality bar | Scope |
 |-------|------------|-------|
-| **sessions** | Parity with openclaw session memory | Core. pi + Claude Code JSONL. Closed/stable as of 2026-05-11. |
-| **md (public garden)** | Immediately usable knowledge retrieval for agents | Current production knowledge axis. Direct Markdown embedding over exported `~/repos/gh/notes/content` (~2,200 md / ~27MB). OpenClaw builtin md memory logic + LanceDB backend (same pattern that built the org track). First production cut closed on 2026-05-12. |
+| **sessions** | Recover decisions and continuity inside canonical time windows | Core. pi + Claude Code JSONL with stored timestamp/project/role/source/file signals. OpenClaw parity is a technical baseline. |
+| **md (public garden)** | Recover durable interpretation attached to dated notes and events | Current production knowledge axis. Direct Markdown embedding over exported `~/repos/gh/notes/content` (~2,200 md / ~27MB). OpenClaw builtin md memory logic + LanceDB backend. |
 | **org** | Currently disabled | 3,000+ Denote notes. Source track. Doctor/chunker/incremental work is upstream R&D, **not** what agents consume right now. |
 
 **Split of effort.** The agent-in-charge separates *what we ship to agents now*
@@ -68,16 +80,21 @@ as the sessions track.
 
 Records buried in time — session conversations and the exported public garden —
 are embedded into vector space. The current production surface is deliberately
-narrow: session continuity + md knowledge axis first, with org left in
-upstream R&D until it earns a return path.
+narrow: sessions recover the reasoning and next move; md recovers durable
+interpretation. A caller supplies or discovers the time coordinate through the
+canonical timeline, then uses andenken to restore meaning around it.
 
 ```
-andenken search-sessions "NixOS GPU cluster setup"
-andenken search-md "체화인지 embodied cognition"
-andenken search-knowledge "체화인지 embodied cognition"   # compatibility alias
+andenken search-sessions "why did we stop the paid full rebuild"
+andenken search-sessions "last week's decision" --date-from ... --date-to ...
+andenken search-md "2026-07-11 장염 복통"
 andenken status
 ./run.sh doctor --md       # production md triage / gap explainability
 ```
+
+The north-star question is not whether a generic concept term returns
+something. It is whether the system can answer: **what did I live, what did I
+make, why did I do it, and where do I continue now?**
 
 ## Architecture
 
@@ -98,12 +115,16 @@ Query ──→ Embed ──→ │                  └── Claude Code sessi
 ### Three-layer search
 
 ```
-Query: "설계했다"
+Question: "When did the embedding cost incident happen, why, and what changed?"
 
-Layer 1 — andenken              Embedding + BM25. Language-agnostic.
-Layer 2 — denotecli dblock      Structural graph / classification.
-Layer 3 — dictcli               Personal vocabulary + Korean morphology.
+Timeline — canonical KST coordinates, event identity, source status
+Layer 1 — andenken              Session + md semantic evidence
+Layer 2 — denotecli             Structural graph / exact note navigation
+Layer 3 — dictcli               Personal vocabulary bridge
 ```
+
+The timeline is not Layer 0 of the embedding stack; it is the factual spine the
+stack must not overwrite. The harness composes these capabilities.
 
 Layer 1 keeps retrieval quality high on its own. Layer 2 provides navigation.
 Layer 3 reflects the human's vocabulary. Each catches what the others miss.
@@ -213,12 +234,14 @@ scripts/rebuild-sessions-full.sh      # sessions full rebuild (estimate + confir
 ./run.sh index:md                     # md incremental / full (with gate when needed)
 ./run.sh search:md "<query>"          # md search
 ./run.sh doctor --md                  # md production triage / gap explainability
-./run.sh golden                       # current quality baseline surface (B2 expands md coverage)
+./run.sh golden                       # transitional component baseline; see NEXT.md
 ```
 
 `sync-sessions.sh` is the operating heartbeat for the sessions track and what
-the agent-config `memory-sync` skill calls. The md track follows the same
-shape (manifest-driven incremental). The legacy mixed-track
+the agent-config `memory-sync` skill calls. The current golden fixtures still
+contain vocabulary-heavy probes; they are retained only as transitional
+component checks while the gate is rebuilt around canonical timeline evidence.
+The md track follows the same shape (manifest-driven incremental). The legacy mixed-track
 `scripts/rebuild-incremental.sh` / `scripts/rebuild-full.sh` paths are
 deprecated; each track is run on its own. Org indexing is currently disabled
 in production — do not invoke `index:org` outside upstream R&D.
