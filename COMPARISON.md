@@ -268,17 +268,24 @@ session 9/10 · md 22/23).
 andenken NEXT.md 결함 1(희소 고유어 `피투성` 회수 실패)의 **직접 해법이
 OpenClaw 쪽에 이미 있다.**
 
+> ⚠️ **이 소절의 초안에는 사실 오류가 있었고 §12에서 정정됐다.** 아래 표는 정정본이다.
+> 결론(상대 정규화가 문제)은 유지되지만, **직접 이식은 불가**하다 — 두 시스템의
+> component score가 같은 척도가 아니다.
+
 | | OpenClaw `mergeHybridResults` | andenken `weightedMerge` |
 |---|---|---|
-| 벡터 항 | 원본 코사인 **그대로** | `score / maxVec` (max 상대 정규화) |
-| 키워드 항 | `bm25RankToScore(rank)` = `1/(1+rank)` | `score / maxFts` |
-| 결과 | 두 항 모두 절대 스케일 → 합산이 의미를 가짐 | 무관 결과도 `vecNorm≈1.0` 만점 |
+| 벡터 항 | `vec_distance_cosine` → `1 - dist`, 즉 코사인 [0,1] | `1/(1+L2거리)` (`store.ts:353`), 실측 raw 0.42~0.43 |
+| 키워드 항 | `bm25RankToScore` — FTS5 **음수** BM25를 `r/(1+r)`로 압축 | Lance `_score` **양수 high-is-good** 원본(실측 6.6~10.2) / `score / maxFts` |
+| 정규화 | 없음 (두 항 모두 자체 절대 척도) | 양쪽 다 max 상대 정규화 |
+| 결과 | 합산이 의미를 가짐 | **무관 결과도 `vecNorm≈1.0` 만점** |
 
 - 참조: `extensions/memory-core/src/memory/hybrid.ts` (156줄 전체).
-- `bm25RankToScore`는 음수 rank를 relevance로 해석해 `r/(1+r)`로 접는다 —
-  LanceDB FTS가 음수 BM25를 돌려주는 우리 상황과 형태가 같다.
-- **andenken 적용점**: `retriever.ts` `weightedMerge`. 코사인 0.69 밴드(무관)가
-  정규화로 만점이 되는 경로가 사라진다.
+- **andenken 적용점**: `retriever.ts` `weightedMerge`. max 상대 정규화가 vector-only
+  후보를 lexical-only 정답 앞으로 몰아주는 경로를 없애는 것이 목표다.
+- **직접 이식 금지 (§12.2)**: `bm25RankToScore`를 그대로 쓰면 andenken의 양수
+  `_score`에서 **순서가 역전**된다(`1/(1+s)`는 큰 점수를 작게 만든다). 대응 형태는
+  최소한 `s/(c+s)`이고 `c`는 calibration 대상이다. raw Lance BM25(6~10)를 그대로
+  `0.3`에 곱하면 이번엔 lexical이 vector를 압도한다.
 - **주의**: 우리 `session` 경로는 RRF라 이 변경의 영향을 받지 않는다. md/knowledge
   (weighted) 경로만 대상.
 
@@ -347,7 +354,7 @@ andenken NEXT.md의 "우선순위 1 — golden contract cleanup"이 정확히 �
 | render-aware chunking | `packages/markdown-core/src/render-aware-chunking.ts` | 전송 크기 제한용 청킹이지 임베딩 청킹이 아니다. 이름이 비슷해 혼동 주의 |
 | QA 시나리오 YAML 실행기 | `qa/scenarios/memory/*.yaml` + qa-lab | 게이트웨이/에이전트 런타임을 띄우는 e2e 하네스. andenken은 런타임이 없어 통째로는 부적합 |
 
-### 11.8 열린 질문 — 검수에서 깨야 할 것
+### 11.8 열린 질문 — 검수에서 깨야 할 것 (⚠️ §12에서 3·4번 답이 나왔다)
 
 1. `1/(1+rank)`는 BM25 **점수 크기를 통째로 버린다**. `피투성` FTS 8건처럼 상위
    몇 건의 relevance 차이가 큰 경우, 랭크 역수가 원점수 정규화보다 나은가?
@@ -361,3 +368,128 @@ andenken NEXT.md의 "우선순위 1 — golden contract cleanup"이 정확히 �
 4. scaffold 섹션(`## 히스토리` 862파일 / `## 관련메타` 864)을 chunk 경계로 쓸
    것인가, 별도 chunk로 뺄 것인가, 아예 임베딩에서 제외할 것인가. 제외하면
    "언제 무슨 일이 있었나" 류 질의를 잃는다.
+---
+
+## 12. GPT 검수 결과 (2026-07-27) — §11의 사실 오류 정정
+
+`20260727T165615-b9acf6` (gpt-5.6-sol) 검수. **결함 판정(`피투성`을 golden ❌로
+고정)은 유지**되지만, §11 초안의 원인 설명에 사실 오류가 있어 정정한다. 아래는
+Claude 쪽에서 코드로 재확인한 것만 적는다 — 검수 주장을 그대로 옮기지 않았다.
+
+### 12.1 정정 1 — "코사인 0.69 밴드"는 틀렸다
+
+- `store.ts:353` — `score: 1 / (1 + r._distance)`. **L2 거리를 similarity로 접은
+  값**이지 코사인이 아니다. 주석에도 `L2 distance → similarity: 1/(1+distance)
+  — OpenClaw pattern`이라 적혀 있다.
+- 검수 측 단계별 재현(동일 후보수 20): vector raw top-20은 **0.4336 → 0.4236**.
+  기대 파일은 vector top-20에 없음. `weightedMerge` 이후 vector-only 20건이
+  **0.7000 → 0.6837**로 1~20위를 독점하고 첫 기대 파일은 **22위**.
+- 즉 §11이 "무관한 코사인"이라 부른 0.689~0.700은 **이미 `0.7 × score/maxVec`가
+  된 병합 후 점수**다. raw는 0.42~0.43.
+- **따라서 §11.8 Q2의 "cosine floor 0.75"는 폐기한다.** 현재 표현계에서 0.75는
+  모든 결과를 자르는 값이다.
+
+### 12.2 정정 2 — `bm25RankToScore` 오독
+
+§11.8 Q1은 "`1/(1+rank)`가 BM25 점수 크기를 통째로 버린다"고 썼는데 틀렸다.
+
+- OpenClaw의 **production 경로는 ordinal rank가 아니다.** FTS5 BM25는 음수이고,
+  음수 분기 `relevance = -rank; relevance/(1+relevance)`가 실제로 타는 길이다.
+  **원점수 크기를 버리지 않고 단조 압축**한다.
+- andenken Lance `_score`는 실측 **양수 high-is-good**(6.65~10.16). 여기에
+  OpenClaw 함수를 그대로 넣으면 `1/(1+s)`가 되어 **relevance 순서가 역전**된다.
+- 대응 형태라면 최소 `s/(c+s)`이고 `c`는 calibration 대상. 한편 raw Lance
+  BM25(6~10)를 그대로 `0.3`에 곱하면 이번엔 lexical이 vector(0.3점대)를 압도한다.
+- **결론: "OpenClaw가 정규화 안 하니 우리도 raw 합산"은 해법이 아니다.** 먼저
+  component score의 semantics(부호·척도·metric)를 통일하거나 보존해야 한다.
+
+### 12.3 정정 3 — `Title:/Tags:` 프리앰블 가설은 **반증됐다**
+
+§11.8 Q3의 의심은 코드로 닫힌다.
+
+- `md-chunker.ts:211` — 저장 `text`는 "NOT used for embedding".
+- `md-chunker.ts:599` / `indexer.ts:852` — 임베딩은 `chunks.map(c => c.embeddingInput)`,
+  즉 **body-only**.
+- 내가 검색 결과에서 본 `Title: ... Tags: ...`는 **FTS/표시용 저장 text**였다.
+  프리앰블이 벡터 밴드를 평평하게 만든다는 가설은 성립하지 않는다.
+- 남는 여지: MMR은 저장 `text`를 tokenize하므로 공통 title/tags 토큰이 Jaccard
+  다양성에 미세 개입할 수 있다. FTS에는 의도적 개입이다.
+
+### 12.4 정정 4 — `mdScaffoldRatio` 관측치는 과대계상
+
+§11.8 Q4의 "md golden 23행 중 11행" 숫자를 그대로 믿으면 안 된다.
+
+- `golden-queries.ts`는 `r.text.slice(0, 500)` 한 뒤 `mdScaffoldRatio()`를 부른다
+  → **chunk 비율이 아니라 앞 500자 excerpt 비율**이다.
+- `mdScaffoldRatio()`는 첫 marker부터 문자열 **끝까지** 전부 scaffold로 센다.
+  실제 파일은 `## 관련메타` 뒤에 다시 실질 H2가 오는 경우가 있어 과대계상된다.
+- `md-chunker.ts:660` `stripBibliographyTail()`이 이미 후반 50% 이후의
+  CITATIONS/BIBLIOGRAPHY/REFERENCES/RELATED-NOTES를 `embeddingInput`에서 제거하고
+  있다. **기존 정책과의 중복·충돌을 먼저 표로 정리해야 한다.**
+- 재측정 방법: marker 섹션의 다음 same-or-higher heading까지만 span으로 세고,
+  excerpt가 아니라 full chunk에서 잰다.
+
+### 12.5 정정 5 — `피투성` fixture의 corpus/index provenance 불일치
+
+- 소스 `rg` 기준 2파일이 맞지만, md.lance에는 **과거 본문이 남은
+  `botlog/20260319T110800`** 이 있고 그것이 FTS 1위(10.1619)다.
+- 확인: 해당 소스는 현재 12,848 bytes(15:29 수정), md-manifest 기록은
+  **39,247 bytes**. 현재 소스에 "피투성"은 **0건**. → **인덱스가 stale**이고 그
+  FTS 1위는 유령 본문이다.
+- 즉 FTS 8건은 **인덱스 기준 3파일**이었다. 결함 자체는 사라지지 않지만
+  (`expectFiles`의 두 파일은 여전히 소스·인덱스 양쪽에 실재), fixture를 신뢰하려면
+  **sync 후 재측정**이 선행되어야 한다.
+
+### 12.6 추가 발견 — dictcli / Kiwi stem 경로가 죽어 있다
+
+GLG 지적으로 확인. 검수 측이 "production md path는 `dictcli stem`을 호출하지
+않는다"고 짚은 것을 따라가 보니 그보다 나쁘다.
+
+- `dictcli --help`: `stem은 JVM 전용: ./run.sh stem <"문장">`.
+  그런데 **그 `run.sh`가 dictcli 디렉토리에 없다.** stem 경로는 실행 불가능.
+- `./dictcli stem "설계했다"` → 알 수 없는 서브커맨드인데 help를 찍고 **exit 0**.
+  조용히 실패하는 형태다(andenken은 `out.startsWith("[")`로 걸러내 무해).
+- andenken 프로덕션 코드(`md-search.ts` / `cli.ts` / `retriever.ts`)에 stem 호출은
+  **없다**. `estimate.ts:148`은 비용 안내 문구, `doctor-org.ts`는 은퇴 트랙.
+- `./dictcli expand "설계" --json` → **빈 출력**, exit 0. 사전에 매핑이 없다
+  (그래프 규모: 트리플 3,989 / 단어 4,735 / `:trans` 2,453).
+
+**따라서 golden `설계했다`의 계약 "한국어 어간 '설계' — Kiwi stem이 동작해야"는
+허구다.** stem을 부르는 코드도, 실행 가능한 stem 바이너리 경로도 없다. 이 케이스의
+PASS는 아무것도 증명하지 않는다. AGENTS.md의 dictcli 설명("stem으로 한국어 어간을
+추출한다")도 현실과 어긋나므로 같이 정정 대상이다.
+
+### 12.7 그 밖에 지목된 허술한 통과면
+
+- definition 6개 케이스의 `top1NoScaffold` / `topKScaffoldMax`는 org 마커용
+  `isScaffoldChunk()`를 쓴다 → md에서 0건 매치 → **사실상 no-op**.
+- `뜻새김`, `일일일생 왜 중요`는 사실상 `resultCount`만 확인. vector search가 늘
+  5건을 채우는 구조에서는 회귀를 거의 못 잡는다.
+- diversity 케이스는 relevance anchor 없이 파일 분산만 본다 → 무관하지만 다양한
+  결과로 통과 가능.
+- `--compare`가 expected rank/pass가 아니라 `topScore` 증감만 비교하는 것도
+  max-normalized 점수에서는 품질 비교로 약하다.
+- `설계했다`의 `0.7000`은 "가짜의 충분조건"이 아니라 **max 정규화에서 top
+  vector-only 후보라는 대수적 sentinel**이다. 점수 밴드는 자동 FAIL이 아니라
+  **suspicious / weak-review 플래그**로 쓰는 게 맞다.
+
+### 12.8 다음 Opus 세션 실행 순서 (fusion 변경은 마지막)
+
+검수 권고를 그대로 채택한다. **fusion부터 손대지 않는다.**
+
+1. **corpus/index sync provenance 정합** — md sync 후 `피투성` fixture 재측정.
+   유령 본문이 FTS 1위인 상태로는 어떤 튜닝도 근거가 흔들린다.
+2. **score metric/sign 바로잡기** — `_distance` 원값, 변환 후 값, 실제 metric을
+   구분해 기록. 지금은 "코사인"이라는 잘못된 이름이 문서와 코드 주석에 섞여 있다.
+3. **raw component 계측** — golden 결과에 `vectorRank` / `ftsRank` / raw score /
+   `inBoth` / `expectedRank`를 남긴다. 이것 없이는 개선 진척을 볼 수 없다.
+4. **같은 후보셋 A/B** — shell candidate마다 유료 임베딩을 반복하지 말고, 한 번
+   얻은 raw vector/FTS 후보를 저장해 **fusion만 in-process replay**한다. 청킹이나
+   문서 임베딩 자체를 바꿀 때만 shadow index가 필요하다.
+5. 그 뒤에 fusion 후보를 고른다. 후보는 (a) 양수 BM25 단조 압축 `s/(c+s)`,
+   (b) RRF/ordinal fusion, (c) exact lexical hit에 top-K quota 또는 override,
+   (d) vector 채널이 평평할 때 weight/gate 조정. **희소 exact-term 회수 계약에는
+   (c)가 가장 직접적**이고, 전체 품질에는 (a)/(d)가 정교하다. 판정은 `피투성` /
+   `Geworfenheit` 두 케이스가 아니라 **expected rank / MRR**로.
+6. golden 판정을 `pass` / `weak-pass` / `fail`로 확장. canonical path·content
+   anchor가 있는 케이스는 **그 anchor의 rank가 최종 판정**이어야 한다.
