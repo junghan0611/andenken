@@ -354,7 +354,10 @@ andenken NEXT.md의 "우선순위 1 — golden contract cleanup"이 정확히 �
 | render-aware chunking | `packages/markdown-core/src/render-aware-chunking.ts` | 전송 크기 제한용 청킹이지 임베딩 청킹이 아니다. 이름이 비슷해 혼동 주의 |
 | QA 시나리오 YAML 실행기 | `qa/scenarios/memory/*.yaml` + qa-lab | 게이트웨이/에이전트 런타임을 띄우는 e2e 하네스. andenken은 런타임이 없어 통째로는 부적합 |
 
-### 11.8 열린 질문 — 검수에서 깨야 할 것 (⚠️ §12에서 3·4번 답이 나왔다)
+### 11.8 열린 질문 — ⚠️ **1~4번 전체가 §12에서 superseded되었다**
+
+아래는 검수 전 초안이다. Q1은 §12.2가 전제를 깨고, Q2는 §12.1이 폐기하고,
+Q3은 §12.3이 반증하고, Q4는 §12.4가 관측 자체를 무효화한다. **기록으로만 남긴다.**
 
 1. `1/(1+rank)`는 BM25 **점수 크기를 통째로 버린다**. `피투성` FTS 8건처럼 상위
    몇 건의 relevance 차이가 큰 경우, 랭크 역수가 원점수 정규화보다 나은가?
@@ -440,24 +443,52 @@ Claude 쪽에서 코드로 재확인한 것만 적는다 — 검수 주장을 �
   (`expectFiles`의 두 파일은 여전히 소스·인덱스 양쪽에 실재), fixture를 신뢰하려면
   **sync 후 재측정**이 선행되어야 한다.
 
-### 12.6 추가 발견 — dictcli / Kiwi stem 경로가 죽어 있다
+### 12.6 dictcli / Kiwi stem — 초안이 과장이었다 (정정본)
 
-GLG 지적으로 확인. 검수 측이 "production md path는 `dictcli stem`을 호출하지
-않는다"고 짚은 것을 따라가 보니 그보다 나쁘다.
+초안은 "stem 경로가 죽어 있다"고 썼다. dictcli 담당 세션
+(`20260727T171701-026e1e`)의 반박을 받아 **우리 코드로 다시 확인한 결과 그 표현은
+틀렸다.** 확정된 사실만 남긴다.
 
-- `dictcli --help`: `stem은 JVM 전용: ./run.sh stem <"문장">`.
-  그런데 **그 `run.sh`가 dictcli 디렉토리에 없다.** stem 경로는 실행 불가능.
-- `./dictcli stem "설계했다"` → 알 수 없는 서브커맨드인데 help를 찍고 **exit 0**.
-  조용히 실패하는 형태다(andenken은 `out.startsWith("[")`로 걸러내 무해).
-- andenken 프로덕션 코드(`md-search.ts` / `cli.ts` / `retriever.ts`)에 stem 호출은
-  **없다**. `estimate.ts:148`은 비용 안내 문구, `doctor-org.ts`는 은퇴 트랙.
-- `./dictcli expand "설계" --json` → **빈 출력**, exit 0. 사전에 매핑이 없다
-  (그래프 규모: 트리플 3,989 / 단어 4,735 / `:trans` 2,453).
+**내가 틀린 것:**
 
-**따라서 golden `설계했다`의 계약 "한국어 어간 '설계' — Kiwi stem이 동작해야"는
-허구다.** stem을 부르는 코드도, 실행 가능한 stem 바이너리 경로도 없다. 이 케이스의
-PASS는 아무것도 증명하지 않는다. AGENTS.md의 dictcli 설명("stem으로 한국어 어간을
-추출한다")도 현실과 어긋나므로 같이 정정 대상이다.
+- "andenken 프로덕션 코드에 stem 호출이 없다" → **거짓.** `indexer.ts:44`에
+  `batchStem()`이 있고 `:971`에서 호출된다. 초안의 grep이 `head -10`에 잘려
+  놓쳤다.
+- "`run.sh`가 없어 stem은 실행 불가" → **부정확.** `indexer.ts:34`
+  `getDictcliDir()`는 스킬 번들이 아니라 **`~/repos/gh/dictcli` repo를 직접**
+  가리키고, 거기에는 `run.sh`가 있다. 실행 가능하다.
+
+**그럼에도 남는 사실:**
+
+- `batchStem`은 `indexOrg()` 안에서만 호출된다(확인: `:971`이 속한 함수는
+  `:891 indexOrg`). `indexSessions`(`:500`) / `indexMd`(`:666`)에는 없다.
+  → **md.lance는 stem enrichment 없이 색인되어 있다.** 원인은 삭제가 아니라
+  **org 트랙 은퇴에 딸려간 트랙 이동**이다.
+- 검색 경로(`md-search.ts` / `cli.ts` / `retriever.ts`)에는 stem 호출이 없다.
+  `dictcliExpand`만 있고 이쪽은 `execSync` + **1초 타임아웃 + 매 단어 프로세스
+  spawn**이다.
+- `enrichTextWithStems`(`indexer.ts:88`)는 `[stems: ...]` 블록을 텍스트 끝에
+  붙인다. 주석대로 **FTS 인덱스에만 들어가고 벡터는 원문**을 쓴다.
+- `./dictcli expand "설계" --json` → 빈 출력. 담당자 확인으로 이것은 **정책이
+  아니라 미수집**이다(`디자인 :trans design`은 있는데 `설계`가 없는 비대칭,
+  `data/practical.edn` 92줄).
+
+**golden `설계했다`에 대한 판정 (수정):** 기대치 자체("설계"가 회수되어야)는
+정당하다. 잘못된 것은 **description이 "Kiwi stem이 동작해야"라고 쓴 것**과, 그
+계약을 검증하지 않는 PASS다. 검색 경로가 stem을 부르지 않으므로 이 케이스는 stem을
+증명할 수 없다.
+
+**중요 — 형태소는 `피투성`의 해법이 아니다.** 담당자 실측:
+`피투성이라는 개념` → `["피", "개념"]`. Kiwi가 "피투성이"를 "피"로 쪼갠다(사용자
+사전에 없음). 게다가 우리 `retriever.ts:493 isUsefulKoreanStem`이 1음절 한글
+어간을 버리므로 그 "피"는 어차피 탈락한다. **stem을 붙였어도 `피투성`은 회수되지
+않는다.** 결함 1의 원인은 병합 정규화라는 결론이 그대로 유지된다.
+
+> **의존 금지 (GLG 지시, 2026-07-27).** dictcli 개선은 GLG가 직접 조율하는 별도
+> 라인이다. andenken의 retrieval 품질 계획은 **dictcli 쪽 변경을 전제하지
+> 않는다.** stem 소켓 서버(`stem_server.clj`, 포트 18230)나 expand 시드 확장이
+> 언제 오든, 그것을 기다리거나 그것에 맞춰 설계하지 말 것. 우리 쪽 할 일은
+> 계약을 정직하게 다시 쓰는 것까지다.
 
 ### 12.7 그 밖에 지목된 허술한 통과면
 
@@ -475,21 +506,42 @@ PASS는 아무것도 증명하지 않는다. AGENTS.md의 dictcli 설명("stem�
 
 ### 12.8 다음 Opus 세션 실행 순서 (fusion 변경은 마지막)
 
-검수 권고를 그대로 채택한다. **fusion부터 손대지 않는다.**
+**fusion부터 손대지 않는다.** 초안은 5단계였는데, "score metric 바로잡기"가
+*이름을 고치는 것*인지 *계산을 바꾸는 것*인지 모호하다는 2차 검수 지적을 받아
+그 단계를 둘로 쪼갰다. 원칙은 **raw vocabulary → telemetry → interpretation**의
+3단 분리다.
 
 1. **corpus/index sync provenance 정합** — md sync 후 `피투성` fixture 재측정.
    유령 본문이 FTS 1위인 상태로는 어떤 튜닝도 근거가 흔들린다.
-2. **score metric/sign 바로잡기** — `_distance` 원값, 변환 후 값, 실제 metric을
-   구분해 기록. 지금은 "코사인"이라는 잘못된 이름이 문서와 코드 주석에 섞여 있다.
-3. **raw component 계측** — golden 결과에 `vectorRank` / `ftsRank` / raw score /
-   `inBoth` / `expectedRank`를 남긴다. 이것 없이는 개선 진척을 볼 수 없다.
-4. **같은 후보셋 A/B** — shell candidate마다 유료 임베딩을 반복하지 말고, 한 번
-   얻은 raw vector/FTS 후보를 저장해 **fusion만 in-process replay**한다. 청킹이나
-   문서 임베딩 자체를 바꿀 때만 shadow index가 필요하다.
-5. 그 뒤에 fusion 후보를 고른다. 후보는 (a) 양수 BM25 단조 압축 `s/(c+s)`,
-   (b) RRF/ordinal fusion, (c) exact lexical hit에 top-K quota 또는 override,
-   (d) vector 채널이 평평할 때 weight/gate 조정. **희소 exact-term 회수 계약에는
-   (c)가 가장 직접적**이고, 전체 품질에는 (a)/(d)가 정교하다. 판정은 `피투성` /
-   `Geworfenheit` 두 케이스가 아니라 **expected rank / MRR**로.
+2. **관측 스키마·용어 계약 확정 — behavior 불변.** backend raw field를 그 이름
+   그대로 박는다: `_distance`, `distanceMetric=l2`, `similarityTransform=1/(1+d)`,
+   Lance `_score`, `higherIsBetter=true`. `vectorScore` / `cosine` / `rank`처럼
+   **의미가 섞인 이름은 이 단계에서 금지**한다. 계산식과 랭킹은 건드리지 않는다.
+   `s/(c+s)` 적용·metric 교체·floor 도입 같은 **행동 변경은 이 단계가 아니다**
+   (그것을 여기서 하면 순서가 틀린 것이고 3번이 먼저여야 한다).
+3. **raw component 계측** — raw distance와 현재 transformed score를 **둘 다**
+   보존. raw FTS score와 fallback 여부도 **둘 다**. 여기에 `vectorRank` /
+   `ftsRank` / `inBoth` / `expectedRank`. 이것 없이는 개선 진척을 볼 수 없다.
+4. **계측값으로 empirical semantics / calibration 결정 + 같은 후보셋 replay** —
+   shell candidate마다 유료 임베딩을 반복하지 말고, 한 번 얻은 raw vector/FTS
+   후보를 저장해 **fusion만 in-process replay**한다. 청킹이나 문서 임베딩 자체를
+   바꿀 때만 shadow index가 필요하다.
+5. **calibrated transform / fusion behavior 변경.** 후보는 (a) 양수 BM25 단조
+   압축 `s/(c+s)`, (b) RRF/ordinal fusion, (c) exact lexical hit에 top-K quota
+   또는 override, (d) vector 채널이 평평할 때 weight/gate 조정. **희소 exact-term
+   회수 계약에는 (c)가 가장 직접적**이고, 전체 품질에는 (a)/(d)가 정교하다.
+   판정은 `피투성` / `Geworfenheit` 두 케이스가 아니라 **expected rank / MRR**로.
 6. golden 판정을 `pass` / `weak-pass` / `fail`로 확장. canonical path·content
    anchor가 있는 케이스는 **그 anchor의 rank가 최종 판정**이어야 한다.
+
+> 잘못 의미화한 필드(`vectorScore=0.4336`, `bm25Rank=10.16`)를 먼저 쌓으면 나중에
+> 마이그레이션 비용이 된다. 반대로 계측 전에 calibrated semantics를 정하면 근거
+> 없는 튜닝이 된다. 2번이 **이름만** 고치는 단계라는 것이 이 순서가 성립하는
+> 조건이다.
+
+### 12.9 다음 코드 라운드에서 같이 정정할 주석
+
+`store.ts:311` / `:8`의 `L2 distance → similarity: 1/(1+distance) — OpenClaw
+pattern`은 오해를 부른다. OpenClaw는 `vec_distance_cosine` 후 `1 - dist`이므로
+**계산이 같지 않다.** `andenken legacy transform` 류로 바꿔야 SSOT가 정직해진다.
+(이번 문서 라운드에서는 코드를 건드리지 않았다.)
