@@ -164,7 +164,19 @@ golden `피투성` ❌로 고정해 뒀다. 통과시키려 기대치를 낮추�
 #### andenken 함의 (측정 결과)
 
 `Tags:` 는 chunk의 **저장 `text`** 에 들어가고 `embeddingInput`(body-only)에는
-들어가지 않는다(§12.3). 즉 이 통제 어휘는 **벡터가 아니라 FTS/표시 축**의 성질이다.
+들어가지 않는다(§12.3).
+
+⚠️ **여기서 문서 쪽과 쿼리 쪽이 비대칭이라는 점을 놓치지 말 것.** "통제 어휘는
+벡터가 아니라 FTS 축의 성질"은 **문서 쪽만 본 반쪽 서술이다**:
+
+| | 태그/확장어가 벡터에 들어가나 |
+|---|---|
+| 문서 쪽 `embeddingInput` | **아니오** — body only |
+| 쿼리 쪽 `enrichedQuery` | **예** — `md-search.ts:104` `provider.embedQuery(enrichedQuery)` |
+
+즉 dictcli 확장어는 tag FTS만 건드리는 게 아니라 **query embedding 자체를 바꾼다.**
+계측에서 `tag hit` / `body·title FTS hit` / `vector-only lift`를 구분하지 않으면
+"태그 축 착지"와 "확장어의 semantic lift"가 다시 섞인다.
 
 dictcli `:trans` 영어 출력(1,950개)과 가든 태그(1,253개)의 정렬도 실측:
 
@@ -190,9 +202,28 @@ dictcli 담당자가 짚은 "`practical.edn` 92줄, 실무어가 통째로 빠�
 다음 라운드 과제다. ⚠️ **dictcli 시드 확장을 기다리지 말 것**(§12.6 말미) — 이
 측정은 andenken 쪽 계약을 정직하게 쓰기 위한 것이지, 저쪽 작업의 선행조건이 아니다.
 
-**golden에 대한 함의**: 태그 축에 착지하지 못하는 expand 결과는 `expectKeywords`를
-우연히 만족시킬 수 있다(본문에 그 단어가 있으면). 결함 4(`설계했다`)와 같은 계열의
-가짜 통과 경로다. rank 기반 판정으로 옮길 때 같이 봐야 한다.
+#### golden 함의 — 계약을 **둘로 나눠야** 한다
+
+태그 축에 착지하지 못하는 expand 결과가 `expectKeywords`를 우연히 만족시킬 수 있다
+(본문에 그 단어가 있으면). 결함 4(`설계했다`)와 같은 계열의 가짜 통과다.
+
+그런데 **anchor rank로 옮기는 것만으로는 이게 닫히지 않는다.** anchor rank는
+"올바른 문서를 찾았다"는 계약은 닫지만 "dictcli 확장이 controlled-tag 축을 통해
+**기여했다**"는 계약은 증명하지 않는다 — 같은 anchor가 원래 한글 본문이나 벡터로도
+잡힐 수 있기 때문이다. 반대로 확장된 영어어가 body에서 맞은 것도 **전체 retrieval
+관점에서는 정당한 성공**이며, 다만 "영어 태그로 확장해야"라는 channel-specific 설명을
+증명하지 못했을 뿐이다.
+
+그래서 케이스를 둘로 쪼갠다:
+
+1. **제품 retrieval 계약** — canonical anchor의 expected rank로 판정.
+   body / vector / tag 어느 경로든 정답이면 성공.
+2. **expansion / tag-bridge 계약** — no-expand 대비 expand의 **anchor rank delta**
+   \+ expanded term이 anchor의 `metadata.tags`에 **실제 존재하는지** + FTS/vector
+   component 변화까지 계측. **단순 `expectKeywords` 금지.**
+
+`보편 학문`처럼 description이 "dictcli expand가 영어 태그로 확장해야"라고 쓰인
+케이스는 전부 2번으로 가야 하고, 지금은 1번 방식으로 채점되고 있다.
 
 ### 실행 순서 — fusion은 마지막 (§12.8 전문)
 
