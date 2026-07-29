@@ -76,7 +76,61 @@ queries are not the reason andenken exists. The north-star question is:
 Start with time→meaning because its coordinate is already exact. Meaning→time
 comes second and must end by pivoting back to the timeline.
 
-### Next session — design before code
+### 2026-07-29 — the canonical concepts now live in the garden
+
+Do not restate this design here. Two garden notes are the SSOT and stewards
+read them in this order:
+
+- **concept** — `20250214T145957` *왜 나는 지식그래프를 계속 묻는가 — 문과 길,
+  자석과 살아 있는 프로피디아*. What GraphRAG is, what embedding is and is not,
+  the six places and what each one refuses to do, Folgezettel signatures.
+- **contract** — `20251024T085736` *에이전트 컨텍스트 레이어 기술 지도*, sections
+  `[2026-07-29]` and `[2026-07-29 보완]`. Ownership, authority grades, the parser
+  contract, and the four boundaries.
+
+What andenken owns out of that: **one parse of the public garden, two artifacts**
+(`summary.jsonl` + `edges.jsonl`). andenken never writes `skos:*Match`, never
+assigns a signature, never invents a relation. Candidates only; promotion is the
+author's, in ELOT Org.
+
+Measured 2026-07-29 (public surface 2,240 files):
+
+| axis | size | note |
+|---|---|---|
+| summary corpus | 339K tokens, **$0.0034** | 3.4% of the current chunk index; abstract present in 2,130 (95%) |
+| doc-level vectors today | **0** | 10,533 chunks, no stable one-doc-one-vector |
+| export scaffold in embedding input | **15.1%** | relref path + anchor + timestamp span; meta 33% |
+| chunks straddling ≥2 sections | **4,590 / 10,543** | headings are not chunk boundaries |
+| links | 22,271 occurrences / 20,278 unique pairs | |
+| authority | filename 123 · human 4,804 · body 4,636 · export 800 · dblock 12,031 | **volume and authority run opposite** |
+| author gloss on human links | **1,358 (28%)** | not reproducible by extraction |
+| signature reach, human 2-hop | **1,052 / 2,240 (47%)** | meta 82% · botlog 88% · bib 42% · **notes 30%** · journal 1% |
+
+### Next — one comparison, not more documents
+
+The open question is whether the signature axis actually improves recall, so the
+next step is an experiment, not a build.
+
+- **A** embedding/chunks only · **B** A + human links + `raw_gloss` ·
+  **C** B + mode-aware Folgezettel traversal
+- Questions to run: *2024년 12월 나는 지식 지형의 어디를 지나고 있었나* /
+  *메멕스·셀프트레킹이 왜 `1j2c`에 놓였는가* / a near-antonym pair that embedding
+  places close (전쟁·평화) and must not be collapsed.
+- Score: rank of the canonical evidence, explainable path, expansion volume,
+  tokens to reach the source, honest abstain, and **whether the answer separates
+  today's map from the map that existed at the time** (signature assignment time
+  is recoverable from `~/sync/org` git rename history).
+
+If C beats A/B, the signature axis is a real structural signal for the memory
+layer. If not, it stays a filename search feature and the summary corpus alone
+carries the doc-level gain.
+
+Blocking on the author, not on code: whether a graft address (`1j1b` `1j2a`
+`1j2b1` `1j2c`) is narrower or continuation, and whether an agent may ever assign
+a signature (andenken's proposal: **read-only**).
+
+> Parked below: the original timeline case-pack framing. Still valid as the
+> temporal contract — the two-question distinction above is exactly its join.
 
 1. Build a small case pack from real temporal recovery jobs, beginning with the
    two timeline golden days:
