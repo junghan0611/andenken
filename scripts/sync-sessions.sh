@@ -6,7 +6,7 @@
 #
 # Safety boundaries (PR-B):
 #   - Wrong sessions DB dim → API 0 abort. (operator must run rebuild-sessions-full.sh first)
-#   - to_index == 0          → API 0 exit.  (no work, no probe)
+#   - to_index == 0          → API 0 exit, or rsync-only replica push with --push.
 #   - to_index >= 1          → preflight 1 API call, then incremental embed.
 #   - org track              → never touched. This script never reads/writes
 #                              ANDENKEN_ORG_*, ANDENKEN_VLLM_*, or org.lance.
@@ -56,8 +56,8 @@ fi
 #
 # API KEY TIMING (PR-B v2 boundary):
 #   - The key is *not* required for the API0 paths below (status:json read,
-#     wrong-dim abort, to_index=0 exit). We weak-set it here so those paths
-#     work key-less.
+#     wrong-dim abort, to_index=0 exit, or --push replica sync). We weak-set
+#     it here so those paths work key-less.
 #   - The strict `:?` check happens just before Step 4 (preflight). Indexing
 #     in Step 5 reuses the same exported value.
 export ANDENKEN_SESSION_PROVIDER=openrouter
@@ -98,9 +98,29 @@ if [ -n "$ACTUAL_DIM" ] && [ "$ACTUAL_DIM" != "4096" ]; then
   exit 1
 fi
 
-# --- Step 3: no-work guard (API 0 exit) ---
+# --- Replica push (API 0; DB and manifest always travel together) ---
+push_replica() {
+  echo "== rsync sessions.lance → oracle =="
+  rsync -az --delete \
+    data/sessions.lance/ \
+    oracle:/home/junghan/repos/gh/andenken/data/sessions.lance/ \
+    2>&1 | tail -3
+
+  # Manifest must travel with the DB: oracle is a replica, and a stale remote
+  # manifest would make a local run there skip files the pushed DB no longer has.
+  echo "== rsync session-manifest.json → oracle =="
+  rsync -az \
+    data/session-manifest.json \
+    oracle:/home/junghan/repos/gh/andenken/data/session-manifest.json \
+    2>&1 | tail -3
+}
+
+# --- Step 3: no-work guard (API 0; --push still replicates local maintenance) ---
 if [ "$TO_INDEX" = "0" ]; then
-  echo "✅ sessions: to-index=0 — no work, no API call"
+  echo "✅ sessions: to-index=0 — no embedding work, no API call"
+  if [ "$PUSH" = "1" ]; then
+    push_replica
+  fi
   exit 0
 fi
 
@@ -133,19 +153,7 @@ fi
 # --- Step 6: optional oracle push (only on successful index) ---
 if [ "$PUSH" = "1" ]; then
   if [ "$INDEX_OK" = "1" ]; then
-    echo "== rsync sessions.lance → oracle =="
-    rsync -az --delete \
-      data/sessions.lance/ \
-      oracle:/home/junghan/repos/gh/andenken/data/sessions.lance/ \
-      2>&1 | tail -3
-
-    # Manifest must travel with the DB: oracle is a replica, and a stale remote
-    # manifest would make a local run there skip files the pushed DB no longer has.
-    echo "== rsync session-manifest.json → oracle =="
-    rsync -az \
-      data/session-manifest.json \
-      oracle:/home/junghan/repos/gh/andenken/data/session-manifest.json \
-      2>&1 | tail -3
+    push_replica
   else
     echo "⚠ skipping --push: index step did not complete cleanly"
   fi

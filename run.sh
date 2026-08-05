@@ -72,7 +72,7 @@ Usage: ./run.sh <command> [args]
                               estimate → confirm → preflight → destroy → rebuild
   sync:sessions [--push]      scripts/sync-sessions.sh
                               wrong-dim → API0 abort
-                              to_index=0 → API0 exit
+                              to_index=0 → API0 exit (or rsync-only with --push)
                               else → preflight 1 + incremental
   rebuild:full                ❌ DEPRECATED (mixed sessions+org)
   rebuild:incremental         ❌ DEPRECATED (mixed sessions+org)

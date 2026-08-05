@@ -78,8 +78,9 @@ a single-writer race.
 - **dim 4096 preflight**: each incremental confirms the provider dim with 1 call
   before embedding. On mismatch with the DB dim → **API-0 abort** — never embed at
   the wrong dim. That case needs a full rebuild (`scripts/rebuild-sessions-full.sh`) first.
-- **to_index=0 → API-0 exit**: nothing to embed → no probe, just exit. Safe to
-  re-call right after a run (zero cost).
+- **to_index=0 → API-0 exit**: nothing to embed → no probe. With `--push`, it
+  still rsyncs the local DB and manifest (for example after compact), also at
+  zero API cost.
 - **org isolation**: the sessions script never reads or writes `ANDENKEN_ORG_*`,
   `ANDENKEN_VLLM_*`, or `org.lance`.
 
