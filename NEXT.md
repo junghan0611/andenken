@@ -21,27 +21,39 @@
 - 맥락 노트: [[botlog]] `20260406T140411` §andenken — llm-wiki·OKF·EKG 수렴.
   EKG/semext(ahyatt) 동행 좌표도 거기.
 
-## Watching — pi-shell-acp 1.0.0 (session-identity 2차 정렬 예상)
+## 세션 코퍼스 — 파일명 정렬 뒤 남은 것 (2026-08-10)
 
-0.9.0 garden-native identity 정렬은 끝났다 (`b77713d`). 그런데 0.9.0
-changelog가 직접 예고하듯 **resident · entwurf · 1.0.0 meta-bridge가
-하나의 garden session ontology로 수렴**한다 — 즉 1.0.0에서 세션 정체성/이름/
-헤더 표면이 **또 바뀔 수 있다.** GLG가 지금 pi-shell-acp 1.0.0 작업 중이고,
-끝나면 결과를 가지고 andenken과 논의 예정.
+파일명 축은 `v2026.8.10`으로 닫혔다 → [CHANGELOG.md](./CHANGELOG.md).
+**닫힌 것은 파일명 축 하나뿐이다.** 아래는 그 정렬이 열어놓고 간 것들.
 
-andenken 측 함의 (지금 착수 금지, 1.0.0 결과 본 뒤):
+- **재인덱싱은 GLG gate 앞에 정지해 있다.** 현행 규격으로 발견되는 pi 세션이
+  아직 임베딩되지 않았다. 규모는 4일치 gap이 아니라 **2026-04-15까지 소급되는
+  UUIDv7 전량**이다 — `v2026.6.19`가 "pre-0.9.0 `_<uuid>`"로 은퇴시켰던 세션이
+  현행 규격에 그대로 해당하기 때문. 대략 `~217+` 규모이되 **살아 있는 transcript가
+  300KB를 넘을 때마다 움직인다.** 문서 숫자를 근거로 승인하지 말 것 —
+  `./run.sh estimate:sessions`가 유일한 권위다(현행 sessions OpenRouter 8B,
+  API-0 면. `estimate`는 legacy Gemini 가격 면이라 다른 것을 잰다).
+- **garden-id 333건 처리 결정이 열려 있다.** 이미 인덱싱된 이 세션들은 discovery에서
+  빠지지만 청크는 `sessions.lance`에 남아 semantic 검색이 당분간 찾는다 — 의도된
+  상태다. 다만 **매니페스트↔디스커버리 drift**가 생기고 증분 sync는 이것을 스스로
+  제거하지 않는다. 유지(검색 잔존) vs `./run.sh cleanup sessions`(청소)는 GLG 결정
+  항목으로 남는다.
+- **2d entwurf parent/child threading은 여전히 기다린다.** 헤더 `id` +
+  `entwurf`/`control` 태그 schema는 meta-bridge 표면이 굳은 뒤 한 번에 설계한다.
+  파일명 정렬이 끝났다고 threading이 열린 것은 아니다.
+- **헤더·세션이름 grammar 재점검은 아직 안 했다.** pi-shell-acp가 session identity
+  표면을 다시 움직이면 파일명뿐 아니라 JSONL 헤더 `id`와 session-name 태그도 바뀐다.
+  이번에 검증한 것은 **파일명 축뿐이고**, `session-indexer.ts`의 헤더 가정은
+  손대지 않았다. 다음 identity 릴리즈가 landing하면 (1) 헤더/이름 grammar diff 확인,
+  (2) indexer의 헤더 가정 재점검 — 이 둘은 열린 상태다.
+- **다음 drift를 잡을 라이브 불변식이 없다.** `session-filename.test.ts`는 우리가
+  방금 쓴 규격을 고정할 뿐, 업스트림이 문법을 바꾸는 이번 실패모드는 못 잡는다
+  (`test.ts`의 `piFiles.length > 0`도 당시 garden-id가 남아 있어 통과했을 것이다).
+  후보: "non-tmp pi 디렉토리의 최신 `.jsonl`(>300KB)은 반드시 admit" 같은 recency
+  불변식, 또는 `.jsonl`이 있는데 admit 0인 프로젝트 디렉토리를 doctor가 WARN.
+  이번 스코프에서는 구현하지 않았다.
 
-- **2d entwurf parent/child threading은 1.0.0 결과를 기다린다.** 헤더 `id` +
-  `entwurf`/`control` 태그를 인덱싱하는 schema 결정인데, 1.0.0이 meta-bridge로
-  그 표면을 또 바꾸면 지금 설계한 게 두 번 깨진다. 0.9.0에서 한 번 깨진 걸로
-  충분 — threading은 1.0.0 session 표면이 굳은 뒤 한 번에 설계.
-- 1.0.0이 landing하면: (1) 세션 파일명/헤더/이름 grammar diff 확인,
-  (2) session-indexer.ts 파일명·헤더 가정 재점검, (3) AGENTS.md
-  "Session corpus sources" 절 재정렬.
-
-> 세션 코퍼스 정밀화(tmp/300KB/구형 파일명 가드 + delegate golden 제거)는
-> `v2026.6.19`로 닫혔다 → [CHANGELOG.md](./CHANGELOG.md). 아래는 그 위에서
-> 이어지는 retrieval 품질 작업.
+> 아래는 그 위에서 이어지는 retrieval 품질 작업.
 
 ## Now — derive embedding quality from the canonical time axis
 
