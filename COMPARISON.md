@@ -1,6 +1,9 @@
-# COMPARISON — andenken vs OpenClaw
+# COMPARISON — andenken vs OpenClaw vs Hermes
 
-This document compares the **embedding surfaces** only.
+Sections 1–13 compare the **embedding surfaces** of andenken and OpenClaw.
+Section 14 places a third system, NousResearch **Hermes Agent**, next to both —
+not as another embedding implementation, but as the clearest available reference
+for the **write-side** of memory, which andenken does not own.
 
 As of 2026-07-27, comparison parity and generic vocabulary recall are not the
 quality direction. The canonical KST timeline is the compass: andenken must
@@ -624,3 +627,234 @@ and fusion defect remain valid engineering work. Their order changes only in
 one respect: real timeline-grounded cases define the acceptance surface before
 fusion is tuned. OpenClaw remains a source of techniques; parity with it is not
 the destination.
+
+---
+
+## 14. 2026-08-06 — Hermes Agent as the third reference point
+
+**Surveyed:** NousResearch `hermes-agent` `v0.20.0` (`3c27eb6`, 2026-08-03),
+local checkout at `~/repos/3rd/hermes-agent`.
+
+### 14.1 Why Hermes enters a document about embeddings
+
+It does not have one. `hermes_state_search.py` is SQLite **FTS5 only** — no
+`sqlite-vec`, no vectors, no rerank. Vectors reach Hermes exclusively through
+external memory-provider plugins (Honcho, Mem0, Hindsight, Supermemory, …),
+which are opt-in and additive.
+
+That absence is the finding. Hermes ships a mature, heavily-tested agent memory
+product whose recall layer is keyword search plus a **bounded curated context
+block**, and it invests its engineering elsewhere: in deciding *what gets
+written down in the first place*. andenken has the opposite shape — a serious
+retrieval engine over corpora that nobody curates on write.
+
+The word **axis** does not appear in Hermes' vocabulary. It decomposes memory
+into *store · provider · lifecycle hook* instead. Reading it is therefore a test
+of whether our axis framing survives contact with a system that never adopted
+it.
+
+### 14.2 Three-system placement
+
+| Memory concern | OpenClaw | Hermes Agent | andenken |
+|---|---|---|---|
+| Recall before reply | active-memory layer in runtime | provider prefetch (background, **non-blocking**) + frozen system-prompt block | out of scope; must expose graceful-degrade contract |
+| Semantic retrieval | `sqlite-vec` + FTS5 hybrid, builtin | **none in core**; external providers only | **owned** — LanceDB, Qwen3-8B/4096d, hybrid + MMR + decay |
+| Keyword retrieval | FTS5 (trigram for CJK) | FTS5 + sanitizer + session scroll (`~20ms`, no LLM) | BM25 + substring fallback, particle stripping |
+| Curated always-on facts | promotion across short/long layers | **`MEMORY.md` 2,200 chars + `USER.md` 1,375 chars**, hard-capped | none — andenken has no bounded store |
+| Procedural memory | — | **`SKILL.md` library**, agent-written, curator-pruned | none |
+| Write-side loop | **dreaming** — 3 phases, promotion gated on *recall statistics*; default-on behind provenance gates since the 7.2 beta (§14.4) | **background review fork** — every 10 turns, promotion gated on *LLM judgment*, on by default (§14.3) | none |
+| Context compaction | runtime-side | batch, or `micro_compact` (one exchange per turn, off by default) | not applicable |
+| Corpus ownership | per-bot / per-runtime | per-profile (`~/.hermes/`), agent-runtime-local | **per-human, cross-harness** |
+| Canonical time axis | none | none | harness `timeline` skill; andenken is the lens over it |
+
+Two properties remain andenken-only across all three: the **cross-harness human
+corpus** and the **canonical KST spine** that retrieval must not fabricate.
+Neither OpenClaw nor Hermes has an equivalent of §13.1 ownership.
+
+### 14.3 What Hermes calls self-improvement, mechanically
+
+A three-stage write-side loop. Worth reading precisely, because "the agent
+learns" is otherwise unfalsifiable marketing.
+
+**Trigger — counters, not cron.** `agent/agent_init.py:1656,1756`:
+`memory_nudge_interval = 10` user turns, `skill_nudge_interval = 10` tool
+iterations (reset whenever `skill_manage` actually fires). Evaluated in
+`turn_finalizer.py:700` after the turn closes.
+
+**Execution — an isolated fork of itself.**
+`agent/background_review.py:1030 spawn_background_review_thread` forks `AIAgent`
+into a daemon thread. Three deliberate constraints:
+
+- `_bg_review_auto_deny` (`:674`) — approval-gated commands are auto-denied.
+  A no-user-present actor may not escalate.
+- the fork's own nudge intervals are zeroed (`:815`) — a review cannot spawn a
+  review.
+- same model ⇒ verbatim replay on a warm prompt cache; different model ⇒
+  `_digest_history` (`:123`, last 24 turns verbatim + summary of the rest), so a
+  cheap review model does not pay for a cold full transcript.
+
+**Judgment — the prompt is the policy.** `_SKILL_REVIEW_PROMPT` (`:182`, ~120
+lines) is the actual artifact:
+
+- *Bias to act*: "A pass that does nothing is a **missed learning opportunity,
+  not a neutral outcome**."
+- *Action precedence*: patch a skill loaded this session → patch an existing
+  class-level umbrella → add `references/` · `templates/` · `scripts/` support
+  files → only then create a new umbrella. A name that only makes sense for
+  today's task is defined as a wrong name.
+- *Store separation*: memory = "who the user is"; skill = "how to do this class
+  of task for this user". A style correction belongs in the **skill body**, not
+  memory.
+- *Explicit do-not-capture list*, the most transferable part:
+  environment-dependent failures; **negative claims about tools**, which
+  "harden into refusals the agent cites against itself for months after the
+  actual problem was fixed"; and unresolved failures written up as validated
+  workflow, which "presents an untested sequence of failures as guidance a
+  future session will trust and repeat".
+- *Protected skills*: bundled / hub / pinned / user-owned are refused writes.
+  "Being in play does not make one yours to edit." Ownership transfer is an
+  explicit human act (`hermes curator adopt <name>`).
+
+**Gardening — the curator.** `curator.enabled: true` by default, fires on
+`interval_hours: 168` **plus** `min_idle_hours: 2`. Deterministic phase (no
+LLM): unused 30d → `stale`, 90d → `~/.hermes/skills/.archive/`. It **never
+deletes**; pinned skills and skills referenced by any cron job (including
+paused ones) are exempt; never-used skills get an age grace floor because zero
+uses is absence of evidence. The LLM consolidation phase (merge overlapping
+skills into umbrellas, 50–100 API calls) is **opt-in**, defers its first run by
+one full interval, and has `--dry-run`.
+
+**Consent.** `memory.write_approval` / `skills.write_approval` stage every
+background write for `/memory pending` · `/skills diff` · approve/reject. The
+docs name the motivating failure directly: "the agent saved a wrong assumption
+about me".
+
+### 14.4 OpenClaw already has the write-side loop — now provenance-gated by default
+
+The framing "Hermes innovated on the write side, OpenClaw has not caught up" is
+wrong. OpenClaw's `dreaming` (`docs/concepts/dreaming.md`,
+`extensions/memory-core/src/dreaming-phases.ts`,
+`src/memory-host-sdk/dreaming.ts`, plus `qa/scenarios/memory/*.yaml`) is the
+same class of system, built more conservatively:
+
+| | OpenClaw dreaming | Hermes background review |
+|---|---|---|
+| Phases | Light (stage, no write) → Deep (promote, writes `MEMORY.md`) → REM (reflect, no write) | Single review pass |
+| Promotion gate | `minScore` + **`minRecallCount`** + **`minUniqueQueries`** — *did this actually get recalled, across distinct queries* | LLM asked "did you learn something" |
+| Stale defense | Rehydrates snippets from live daily files before writing; deleted/stale candidates are skipped | None |
+| Audit surface | `DREAMS.md` + per-phase reports under `memory/dreaming/<phase>/YYYY-MM-DD.md` | One `💾 Memory updated` line in chat |
+| Default | **On since the 7.2 beta, provenance-gated** (#114819) | **On** (every 10 turns) |
+
+The decisive difference is **evidence-gated vs judgment-gated promotion**.
+OpenClaw promotes what retrieval statistics prove was useful; Hermes promotes
+what a model believes was instructive. The first is falsifiable and cannot
+promote something that was never recalled. The second can, and its 120-line
+do-not-capture list is the compensating guardrail — guardrail volume is
+evidence of misfire frequency.
+
+**Correction (2026-08-10).** The original survey called dreaming opt-in and
+disabled, then treated that state as a durable product judgment. OpenClaw 7.2
+beta changed the premise: dreaming is now default-on under the provenance gate
+introduced by #114819. The earlier "keeps it off" interpretation is withdrawn.
+The important comparison is no longer on/off; it is OpenClaw's evidence and
+provenance gates versus Hermes' model-judgment gate.
+
+**Consequence for andenken.** When the dream axis is specified, the reference
+implementation to study is OpenClaw's, not Hermes'. Specifically:
+recall-count/unique-query gating maps directly onto andenken's existing recall
+tracking, and rehydrate-before-promote is the same defect class as §12.5 (ghost
+bodies surviving in the index after the source changed).
+
+### 14.4b Reading — this is an adjacent axis, not our dream axis
+
+Hermes' loop compresses **behavior**, not corpus. Its output is a changed
+starting state for the next session (`SKILL.md`, `MEMORY.md`), not a distilled
+retrieval unit. The consolidation axis andenken defers to the harness compacts
+*what can be recalled*; Hermes sediments *how to act*. They are complementary
+and should not be conflated when the dream axis is eventually specified.
+
+The sharper observation is about corpus curation. Hermes bounds its always-on
+memory at ~1,300 tokens and refuses the write when full — forcing the agent to
+consolidate in the same turn — and prunes its procedural library on a 30/90-day
+clock. andenken indexes everything and sorts it out at query time. Our defects
+in §§11–12 (stale ghost bodies ranked first, scaffold sections diluting chunks,
+generic fixtures masquerading as purpose) are all **write-side problems being
+attacked from the read side**.
+
+### 14.5 Transfer candidates
+
+| # | Surface | Hermes reference | Real owner | andenken applicability |
+|---|---|---|---|---|
+| A | Refuse-on-full instead of silent drop | `tools/memory_tool.py` capacity error carrying `current_entries` | **harness** | None. andenken has no bounded always-on store. Belongs to `next-handoff` / `AGENTS.md` contracts, which have no capacity discipline today |
+| B | Do-not-capture list for a write loop | `_SKILL_REVIEW_PROMPT` negative section | **harness (dream axis)** | None — andenken has no write loop by invariant. Reusable text when that axis is specified |
+| C | Deterministic prune before LLM pass | `curator.py` two-phase run | **andenken** ✅ | An `md` corpus hygiene pass (stale manifest entries, ghost bodies from §12.5) is fully deterministic and needs no model. Already the §12.8 step-1 item |
+| D | Staged writes with human approve/reject | `write_approval`, `/memory pending` | **n/a** | andenken's only write is indexing, and the query path never writes (`INVARIANT.md` §0) |
+| E | Compaction cost as an explicit tuning knob | `docs/micro-compaction.md` | **harness** | None. Context compaction is not an andenken concern |
+
+**Scope guard.** One of these five is andenken's, and it is already on the
+roadmap. The other four belong to the harness. **Being written down in this
+repo's COMPARISON.md is not a reason for them to enter this repo's roadmap.**
+This section exists so the harness has a surveyed reference, not so andenken
+grows a write side.
+
+Explicitly **not** transferable at all: the provider-plugin architecture. Eight
+memory providers each doing their own prefetch, injection, and summarization is
+exactly the "no document says which axis owns what" failure that
+`INVARIANT.md` §0 exists to prevent. Hermes' breadth here is a product-surface
+decision, not an architectural one to copy.
+
+### 14.6 What Hermes has that we cannot answer
+
+No bounded always-on store. No procedural memory. No write-side loop at all.
+andenken is correct to exclude these by invariant — but the harness as a whole
+currently has no owner for them either, and `AGENTS.md` / skills are maintained
+by GLG by hand. That gap belongs in the harness roadmap, not in this repo.
+
+### 14.7 Research lineage — where these ideas actually came from
+
+Hermes' memory design publishes no paper, and its repository cites no memory
+research (`grep` across `website/docs`, `agent/`, `tools/` finds arXiv only as
+an example *skill*). It is an engineering product, not a research artifact —
+and its components have clear 2023 antecedents:
+
+| Hermes component | Antecedent |
+|---|---|
+| `MEMORY.md` / `USER.md` — bounded, self-edited via add/replace/remove, agent consolidates on overflow | **MemGPT** (Packer et al., 2023) — core-memory blocks (persona/human) with `core_memory_append` / `core_memory_replace` under a hard bound. Near 1:1 |
+| `SKILL.md` library grown from experience | **Voyager** (Wang et al., 2023) — iteratively growing skill library of reusable procedures |
+| Post-turn background review that decides what was learned | **Generative Agents** (Park et al., 2023) reflection; **Reflexion** (Shinn et al., 2023) verbal self-reflection into episodic memory |
+| Honcho dialectic user modeling | plastic-labs — the one component with its own research posture |
+
+Two consequences worth recording.
+
+**First**, "self-improving agent memory" is a three-year-old idea being
+productized, not a new capability. That does not diminish the work — the
+non-obvious parts of Hermes are the operational ones no paper contains (the
+do-not-capture list, auto-deny in the review fork, the curator's never-delete
+rule, grace floors for never-used skills).
+
+**Second**, current research is moving toward OpenClaw's shape, not Hermes'.
+*Memory Beyond Recall: A Dual-Process Cognitive Memory System for Self-Evolving
+LLM Agents* (DPCM) argues that memory systems fail because they "collapse belief
+revision, causal coupling, and cross-domain abstraction into a single retrieval
+surface tuned for surface recall," and proposes a synchronous daytime writer
+plus an **asynchronous nighttime abstraction engine**, with a read path that
+traverses the store deterministically **without invoking any LLM**.
+
+That is OpenClaw's Light/Deep/REM split, and it is andenken's axis separation
+plus `INVARIANT.md` §0 ("andenken never calls LLMs for recall"). It is not a
+flat `MEMORY.md` plus FTS5. The state of the field, read honestly: **the
+attention is on Hermes; the design direction the research is converging on is
+the provenance-gated design OpenClaw now ships by default.**
+
+### 14.8 Standing judgment (2026-08-06)
+
+- andenken's axis framing survives contact with a system that never adopted it.
+  Hermes' `store · provider · lifecycle hook` decomposition is a valid product
+  vocabulary but leaves no document answering "which layer owns what," which is
+  precisely why it can host eight overlapping providers.
+- The reference implementation for the future dream axis is **OpenClaw's
+  dreaming**, on the strength of evidence-gated promotion. Hermes is the
+  reference for *operational guardrails on a write loop*, which is a different
+  and smaller borrow.
+- Nothing in §14 changes what andenken builds next. §13 still governs; §12.8
+  still orders the work.
