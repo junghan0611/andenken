@@ -140,15 +140,46 @@ Sessions index exactly two harness sources:
 | `pi` | `~/.pi/agent/sessions` | pi JSONL (`type="message"`, `message.role`) |
 | `claude` | `~/.claude/projects` | Claude Code JSONL (`type="user" | "assistant"`) |
 
-Entwurf sessions are **not a third source**. Since pi-shell-acp 0.9.0 the old
-`*_entwurf-<taskId>.jsonl` filename species is gone — a spawned/resumed entwurf
-is just a garden-native session written as `<created-at>_<sessionId>.jsonl`
-(sessionId `YYYYMMDDTHHMMSS-[0-9a-f]{6}`, with the `entwurf` identity carried in
-the JSONL header / session name tag, not in the filename) under
-`~/.pi/agent/sessions/<project>/`. It is indexed by the normal `pi` source path,
-with project inferred from the cwd-shaped session directory. Saved task metadata /
-control sockets are not separately embedded; only the transcript JSONL that lands
-under the pi sessions tree participates in `sessions.lance`.
+Entwurf sessions are **not a third source**. A spawned/resumed entwurf is just a
+pi session written as `<created-at>_<native session id>.jsonl` under
+`~/.pi/agent/sessions/<project>/`, and it is indexed by the normal `pi` source
+path with project inferred from the cwd-shaped session directory.
+
+**Corpus admission is the current native id suffix `_<UUIDv7>.jsonl`** (2026-08-10
+ruling). Retired species are *not* OR'd back in: `*_entwurf-<taskId>`,
+`*_delegate-…`, UUIDv4, and the garden-id form `_YYYYMMDDTHHMMSS-[0-9a-f]{6}`.
+See `session-indexer.ts § isNativePiSessionFile` and its mirror
+`session-recap._is_native_pi_session_file`; the two must move together.
+
+The species history matters, because the obvious story is wrong. UUIDv7 native ids
+are **not new** — pi has written them since **2026-04-15**, and the garden-id form
+**coexisted** with them from 2026-06-03 to 2026-08-06. What changed is that
+**from 2026-08-07 pi emits UUIDv7 only**. A filter still demanding the garden-id
+suffix therefore admitted zero *new* pi sessions from that day on: no error, just
+the pi half of the corpus going quiet.
+
+Two consequences follow, and the second is a corpus-policy change, not a bug fix:
+
+- Already-indexed pi sessions carrying the garden-id suffix (333 manifest entries
+  at 2026-08-10) leave discovery. Their chunks stay in `sessions.lance` — search
+  still finds them — so manifest and discovery drift apart until someone decides
+  retain vs `cleanup sessions`. Incremental sync never removes them on its own.
+- Pre-existing UUIDv7 sessions become eligible **retroactively**. `v2026.6.19`
+  retired the `_<uuid>` species wholesale as "pre-0.9.0"; admitting the current
+  species readmits every UUIDv7 transcript back to 2026-04-15, which is the bulk
+  of the pending work rather than the four-day gap. Size the paid embedding gate
+  with `./run.sh estimate:sessions`, never with a number copied from a doc — the
+  count moves as live transcripts cross the 300KB floor.
+
+**Filenames do not carry identity.** The `garden id ↔ nativeSessionId ↔
+transcriptPath` join is owned by the entwurf meta-record, and neither this indexer
+nor `session-recap` reimplements it — the filename decides corpus membership and
+nothing else. The transcript may carry backend/name hints, but canonical garden
+identity and the native-session join live only in the meta-record.
+
+Saved task metadata / control sockets are not separately embedded; only the
+transcript JSONL that lands under the pi sessions tree participates in
+`sessions.lance`.
 
 Do **not** index `~/.pi/agent/claude-config-overlay/projects`. That directory
 is pi-shell-acp's Claude overlay, not a third memory source. Its work is already
