@@ -93,6 +93,7 @@ Usage: ./run.sh <command> [args]
   test:unit                   Unit tests only (no API)
   test:integration            Integration tests (needs API)
   test:search "query"         Live search test
+  test:filename               Fixture tests for pi corpus admission by filename (API 0)
 
 === Acceptance (user-facing quality — layers 1/2/3) ===
   accept [flags]              Acceptance report. DEFAULT IS API 0: index health +
@@ -197,6 +198,8 @@ case "${1:-help}" in
     load_env; cd "$SCRIPT_DIR" && pnpm exec tsx test.ts integration ;;
   test:search)
     shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx test.ts search "$@" ;;
+  test:filename)
+    cd "$SCRIPT_DIR" && pnpm exec tsx session-filename.test.ts ;;
 
   # === Golden Queries ===
   golden)

@@ -13,8 +13,9 @@
  * Indexing exclusions (both runtimes):
  * - tmp/test/probe project dirs (pi `--tmp…--`, claude `-tmp…`) — never indexed.
  * - sessions at or below MIN_SESSION_SIZE_BYTES (300KB floor, `size > MIN`).
- * - pi only: pre-0.9.0 filename species (`_<uuid>`, `_entwurf-…`, `_delegate-…`).
- *   Only garden-native `<created-at>_<YYYYMMDDTHHMMSS>-<suffix>.jsonl` is indexed.
+ * - pi only: admission is the current native id suffix `_<UUIDv7>.jsonl`. Retired
+ *   species (garden-id `_YYYYMMDDTHHMMSS-<6hex>`, UUIDv4, `_entwurf-…`,
+ *   `_delegate-…`) are not OR'd back in — no backward compatibility.
  *   Claude filenames are always UUIDs → no filename filter (tmp + size only).
  *
  * Chunks extracted:
@@ -162,15 +163,34 @@ function isExcludedProjectDir(subdir: string): boolean {
 }
 
 /**
- * Post-0.9.0 garden-native pi session filename:
- * `<created-at>_<sessionId>.jsonl` where sessionId matches pi-shell-acp SSOT
- * `SESSION_ID_RE = /^\d{8}T\d{6}-[0-9a-f]{6}$/`. Pre-0.9.0 species (`_<uuid>`,
- * `_entwurf-…`, `_delegate-…`) are retired and not indexed. Anchored to the
- * full sessionId so a future naming drift fails fast (drop) rather than
+ * Corpus admission for pi, by filename suffix: `_<UUIDv7>.jsonl`, where the native
+ * session id is a **UUIDv7** — RFC 9562 version nibble `7`, variant `[89ab]`.
+ *
+ * **Suffix only, by design.** The written form is `<created-at>_<native id>.jsonl`,
+ * but the created-at prefix is deliberately *not* validated. Filenames do not carry
+ * identity: the `garden id ↔ nativeSessionId ↔ transcriptPath` join is owned by the
+ * entwurf meta-record, and this indexer does not reimplement it. The filename decides
+ * corpus membership and nothing else, so the predicate pins only the part that is a
+ * stable contract — the native id species.
+ *
+ * **No backward compatibility** (GLG ruling 2026-08-10). Retired species — the older
+ * garden-id form (`_YYYYMMDDTHHMMSS-<6hex>`), UUIDv4, `_entwurf-…`, `_delegate-…` —
+ * are not OR'd back in. Corpus admission is one current spec.
+ *
+ * History, measured 2026-08-10 (non-tmp dirs, created-at prefix):
+ * - UUIDv7 native ids have been written since **2026-04-15**; they are not new.
+ * - The garden-id form **coexisted** with them from 2026-06-03 to 2026-08-06.
+ * - From **2026-08-07** pi emits UUIDv7 only; the garden-id species ceased.
+ *
+ * So this is a corrected premise, not a tightening: a filter that demanded the
+ * garden-id suffix admitted **zero** new pi sessions from 8/07 onward, and the pi
+ * half of the corpus went dark silently — here and in `session-recap` alike.
+ *
+ * Anchored to the full id so a future naming drift fails fast (drop) rather than
  * silently false-including. Claude is exempt (always UUIDs).
  */
-function isGardenNativePiFile(file: string): boolean {
-  return /_\d{8}T\d{6}-[0-9a-f]{6}\.jsonl$/.test(file);
+function isNativePiSessionFile(file: string): boolean {
+  return /_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.jsonl$/.test(file);
 }
 
 /**
@@ -204,7 +224,7 @@ function scanDir(dir: string): string[] {
     const subdirPath = path.join(dir, subdir);
     if (!fs.statSync(subdirPath).isDirectory()) continue;
     for (const file of fs.readdirSync(subdirPath)) {
-      if (file.endsWith(".jsonl") && isGardenNativePiFile(file)) {
+      if (file.endsWith(".jsonl") && isNativePiSessionFile(file)) {
         files.push(path.join(subdirPath, file));
       }
     }
@@ -482,3 +502,12 @@ function truncateText(text: string, maxLength: number): string {
 export function getSessionsBaseDir(): string {
   return getPiSessionsDir();
 }
+
+// ---------------------------------------------------------------------------
+// Test-only export (kept undocumented for production callers)
+// ---------------------------------------------------------------------------
+
+export const __test = {
+  isNativePiSessionFile,
+  isExcludedProjectDir,
+};
