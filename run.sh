@@ -94,6 +94,24 @@ Usage: ./run.sh <command> [args]
   test:integration            Integration tests (needs API)
   test:search "query"         Live search test
 
+=== Acceptance (user-facing quality — layers 1/2/3) ===
+  accept [flags]              Acceptance report. DEFAULT IS API 0: index health +
+                              stored-signal (recent-mode) probes only.
+                              --retrieval   also run probes that need a PAID query
+                                            embedding (1 call each, +1 if the
+                                            sessions→md fallback fires)
+                              --only id[,id]  --cases <file>  --label <name>
+                              --json        machine-readable report
+                              --save        write report under data/acceptance/
+                                            (gitignored; private excerpts redacted)
+                              --compare <prev.json>   before/after by probe
+                              --strict      nonzero exit on fail/error
+                              Probes run with ANDENKEN_DISABLE_RECALL_TRACKING=1 and
+                              the run verifies recalls.jsonl did not grow.
+                              A green tally is NOT user acceptance — layer 3 is a
+                              human verdict. See the andenken-acceptance skill.
+  test:accept                 Fixture tests for acceptance.ts (API 0)
+
 === Benchmark ===
   golden [--db session|md]    Golden queries search quality test
   bench                       Full benchmark (needs API)
@@ -183,6 +201,12 @@ case "${1:-help}" in
   # === Golden Queries ===
   golden)
     shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx golden-queries.ts "$@" ;;
+
+  # === Acceptance ===
+  accept)
+    shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx acceptance.ts "$@" ;;
+  test:accept)
+    cd "$SCRIPT_DIR" && pnpm exec tsx acceptance.test.ts ;;
 
   # === Doctor ===
   doctor)

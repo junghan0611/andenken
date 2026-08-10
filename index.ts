@@ -31,6 +31,7 @@ import {
 } from "./session-indexer.js";
 import { retrieve, expandQueryForBM25, getShortCJKTokens, sortByTimestampDesc } from "./retriever.js";
 import { readSessionExcerpt, type SessionExcerpt } from "./session-excerpt.js";
+import { recordRecall } from "./recall-log.js";
 
 // Re-declare minimal SearchResult to avoid jiti-incompatible import() type syntax
 interface SearchResult {
@@ -90,22 +91,9 @@ function dictcliExpandRaw(query: string): string[] {
 }
 
 // --- Recall Tracking (memory consolidation stage 2) ---
-
-function recordRecall(query: string, tool: string, results: SearchResult[]): void {
-  try {
-    const recallPath = path.join(getDataDir(), "recalls.jsonl");
-    const entry = JSON.stringify({
-      timestamp: new Date().toISOString(),
-      query,
-      tool,
-      resultIds: results.slice(0, 5).map(r => r.id),
-      topScore: results[0]?.score ?? 0,
-    });
-    fs.appendFileSync(recallPath, entry + "\n");
-  } catch {
-    // best-effort — never block search
-  }
-}
+// Implementation lives in recall-log.ts, shared with cli.ts, so the
+// `ANDENKEN_DISABLE_RECALL_TRACKING` guard applies identically on both search
+// entry points. Production callers never set it and keep logging as before.
 
 // --- Config ---
 

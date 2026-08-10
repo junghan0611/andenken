@@ -161,6 +161,30 @@ a signature (andenken's proposal: **read-only**).
 - The answer can show not only what happened, but the decision/interpretation
   and the next thread when the evidence exists.
 
+### 2026-08-10 — acceptance surface landed; layer 3 ran; one product gap left
+
+`./run.sh accept` + `acceptance-cases.json` + the `andenken-acceptance` skill
+carry the user-facing question ("what became better?") in three separated layers.
+Design lives in the skill and in `acceptance.ts`; do not restate it here.
+
+Layer-3 verdicts from the real pi tools (surface `pi-tools`, not the CLI):
+
+- **garden lookup — usable**, **garden explore — usable**. The autholog usable
+  gate is closed.
+- **recent-session lookup — partial.** Evidence was recovered, but the production
+  response carries **no freshness warning** while the index lags the transcript.
+
+**Next product gap: freshness warning / provenance in the production response.**
+Not a ranking problem — the response has no field to say "the index is behind
+this source", so the user cannot tell recall from staleness. Technical green
+still never implies acceptance; the runner cannot set the verdict.
+
+**Measured debt: production-path parity.** On the same cases the CLI surface is
+semantically worse than the pi tools (distractor above a helpful neighbor on
+lookup; no labeled helpful neighbor on the explore first screen). Do not tune one
+surface in isolation — the shared production core is the fix. Freshness comes
+first.
+
 ### What happened to the 2026-07-27 word-oriented work
 
 The md gate, independent track scoring, shared `searchMdCore()`, stale-index

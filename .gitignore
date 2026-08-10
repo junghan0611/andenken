@@ -6,6 +6,10 @@ node_modules/
 dist/
 *.d.ts
 benchmark-log.jsonl
+
+# Acceptance: volatile / private case bindings (session UUIDs, machine paths).
+# The committed acceptance-cases.json keeps intent + query + evidence TYPE only.
+acceptance-cases.local.json
 data/org-manifest.json
 data/bakeoff-qwen4b/
 data

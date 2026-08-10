@@ -1,0 +1,188 @@
+{
+  "schemaVersion": 2,
+  "note": "User-facing acceptance cases for andenken. DATA, not a roadmap — adding a case must never require editing acceptance.ts. Committed content is public-safe by construction: intent, query, and expected EVIDENCE TYPE only. No machine name, no session UUID, no path binding to a private transcript. Volatile bindings live in acceptance-cases.local.json (gitignored), merged over this file by case id and probe id. A case whose local binding is missing or expired reports `abstain` / `expired` — never a suite pass and never a suite failure.",
+  "caseTypes": {
+    "lookup": "The steward knows which room they want. Canonical evidence must be reachable from the first screen; a single document dominating top-K is a WARNING, not an automatic failure — a narrow lookup legitimately returns one document.",
+    "explore": "The steward is surveying. Numeric guardrails (distinct documents, per-document share) are necessary and NOT sufficient: a diverse screen of irrelevant documents is a worse answer than a narrow relevant one. Semantic usefulness is graded by labeled neighbors, and where labels are absent the automated verdict is capped below pass and handed to the steward.",
+    "time-probe": "A day is asked about. andenken grades only recoverable session/md anchors inside a caller-supplied ISO window, or an honest miss. Zero rows is `honest-miss`, never a retrieval PASS and never an empty day — the timeline skill owns whether the day was lived."
+  },
+  "relevanceLabels": {
+    "canonical": "The document the steward was actually after.",
+    "helpfulNeighbor": "A different document that genuinely advances the same question. Must be observed and labeled by a human — never guessed by the runner.",
+    "knownDistractor": "A document observed to crowd the first screen without advancing the question. If one ranks ahead of canonical the run is at most `partial`."
+  },
+  "cases": [
+    {
+      "id": "freshness-recent-work",
+      "type": "lookup",
+      "title": "Something decided an hour ago is retrievable after sync",
+      "userQuestion": "방금 전 디스크 꽉 찼던 빌드 캐시 사건, 어떻게 처리하기로 했지?",
+      "why": "The most common real failure is not bad ranking — it is asking about something the index has not seen yet. The report must separate 'the index is behind' from 'ranking failed', because the operator fix is completely different: run a sync, versus change the ranker. The freshness warning must be read BEFORE any ranking interpretation.",
+      "requiresLocalBinding": true,
+      "evidenceType": "A session transcript written today in a personal-repo project, still being appended to.",
+      "bindingHint": "Bind `freshnessAnchors` and `probes[].evidence.canonical` in acceptance-cases.local.json. Rebind the anchor and the query together when the incident ages out; do not keep grading a months-old transcript as 'recent'.",
+      "layers": ["index-health", "retrieval", "harness"],
+      "ownership": {
+        "timeline": "Owns whether the incident happened and at which KST coordinate.",
+        "andenken": "Grades only whether the session anchor is recoverable, or reports index-freshness / corpus miss honestly.",
+        "harness": "Grades whether the recovered evidence restores the decision and the next move."
+      },
+      "probes": [
+        {
+          "id": "sessions-natural-language",
+          "surface": "search-sessions",
+          "query": "zig 빌드 캐시가 디스크를 다 먹었는데 어떻게 정리하기로 했지",
+          "limit": 5,
+          "rankThreshold": 3,
+          "evidence": { "canonical": [], "helpfulNeighbors": [], "knownDistractors": [] }
+        }
+      ],
+      "humanPrompt": "Could you choose or reject the right session from this first screen, without re-querying?",
+      "harnessGrades": "Did the answer name the decision and the reason, not merely surface the transcript?"
+    },
+    {
+      "id": "garden-lookup-canonical",
+      "type": "lookup",
+      "title": "A natural-language question with no title reaches the canonical note",
+      "userQuestion": "내가 지식그래프를 왜 계속 묻는지 정리해 둔 글, 그거 어디 있지?",
+      "why": "The steward asks in their own words, not by title. If the canonical note is only reachable by exact-title search, retrieval added nothing — the win is measured as one fewer exact-title lookup.",
+      "layers": ["index-health", "retrieval", "harness"],
+      "ownership": {
+        "timeline": "Owns nothing here — this is a meaning question with no time claim.",
+        "andenken": "Owns the rank of the canonical note under a no-title query.",
+        "harness": "Owns whether the steward could act from the first screen."
+      },
+      "freshnessAnchors": ["~/repos/gh/notes/content/notes/20250214T145957.md"],
+      "probes": [
+        {
+          "id": "md-no-title",
+          "surface": "search-md",
+          "query": "새 원석을 기존 autholog 방에 넣고 싶다. 흩어진 메모를 서로 연결하면서 내가 계속 전체 지식의 지도를 만들려는 이유를 설명해 둔 방을 찾아줘",
+          "limit": 5,
+          "rankThreshold": 3,
+          "forbiddenQueryTokens": ["왜 나는", "계속 묻는가", "지식그래프", "문과 길", "자석", "프로피디아"],
+          "queryProvenance": "A real steward task phrased as the task, not as the note. An earlier version of this probe repeated the canonical title almost verbatim, which made a rank-1 result meaningless — it was measuring string overlap, not retrieval. `forbiddenQueryTokens` lists the canonical title and subtitle wording, and a fixture test fails if any of it reappears in the query.",
+          "evidence": {
+            "canonical": ["20250214T145957"],
+            "helpfulNeighbors": ["20250324T110312", "20241222T114848"],
+            "knownDistractors": ["20240516T124151"]
+          },
+          "labelNote": "Labels come from an observed production run through the pi tools, not from the CLI and not from guessing. 20241206T090648 ranked 2 and gave useful scope/magnet context but is not a candidate room, so it is deliberately labeled NEITHER helpful-neighbor nor distractor — mislabeling it either way would corrupt the grade."
+        }
+      ],
+      "humanPrompt": "Could you choose or reject an existing room from this first screen?",
+      "harnessGrades": "One fewer step than before — no re-query, no exact-title search, no extra file open?"
+    },
+    {
+      "id": "garden-explore-diversity",
+      "type": "explore",
+      "title": "A survey question returns several genuinely different, genuinely useful notes",
+      "userQuestion": "일일일생 관련해서 내가 써 둔 글들 훑어보고 싶다",
+      "why": "Raw chunk count is not a user effect; documents are. A top-5 filled by one note's adjacent chunks is a five-row screen carrying one document. But diversity alone is equally hollow — five unrelated documents is a worse screen than two relevant ones. Numbers guard the floor; the steward judges usefulness.",
+      "layers": ["index-health", "retrieval", "harness"],
+      "ownership": {
+        "timeline": "Owns nothing here.",
+        "andenken": "Owns document-level diversity and the rank of the canonical note.",
+        "harness": "Owns whether the returned set is enough to write from."
+      },
+      "freshnessAnchors": ["~/repos/gh/notes/content/notes/20250727T094722.md"],
+      "probes": [
+        {
+          "id": "md-explore",
+          "surface": "search-md",
+          "query": "일일일생",
+          "limit": 5,
+          "rankThreshold": 3,
+          "guardrails": { "minUniqueDocs": 3, "maxChunksPerDoc": 2 },
+          "evidence": {
+            "canonical": ["20250727T094722"],
+            "helpfulNeighbors": ["20250324T110312", "20251121T132839"],
+            "knownDistractors": ["20260302T000000"]
+          },
+          "labelNote": "Labels come from a human who read an observed production run through the pi tools (top5: 4 unique documents, max 2 chunks per document). They are not derived from the CLI and not guessed — a guessed label would make this case grade itself."
+        }
+      ],
+      "humanPrompt": "From this first screen, could you open 3+ genuinely different notes worth reading — not just 3 different filenames?",
+      "harnessGrades": "Did the set support writing without a second query?"
+    },
+    {
+      "id": "cross-track-labeled",
+      "type": "explore",
+      "title": "Sessions and garden answer together, labeled — never merged by score",
+      "userQuestion": "피투성 개념, 세션에서 얘기한 것도 가든에 쓴 것도 둘 다 보여줘",
+      "why": "The two tracks emit numbers that are incomparable by construction — different fusion strategies over different distributions. Any single ranking across them is meaningless, and folding private session text into 'garden knowledge' misrepresents what is published. Grade attribution and grouping; compute no merged ranking at all.",
+      "layers": ["retrieval", "harness"],
+      "ownership": {
+        "timeline": "Owns nothing here.",
+        "andenken": "Owns that each result is attributed to its track with its visibility, and that no cross-track score comparison is emitted.",
+        "harness": "Owns whether the composed answer keeps the private/public distinction in what it says back."
+      },
+      "probes": [
+        {
+          "id": "sessions-with-md-fallback",
+          "surface": "search-sessions",
+          "query": "피투성 던져짐 하이데거",
+          "limit": 6,
+          "grader": "labeled-groups",
+          "evidence": { "canonical": [], "helpfulNeighbors": [], "knownDistractors": [] }
+        }
+      ],
+      "humanPrompt": "Is it obvious, without opening anything, which rows are private session text and which are published notes?",
+      "harnessGrades": "Did the answer say which claims come from a private session and which from a published note?"
+    },
+    {
+      "id": "time-lens-2026-02-07",
+      "type": "time-probe",
+      "title": "A lived day with only depth-0 residue is an honest miss, never an empty day",
+      "userQuestion": "2026년 2월 7일에 나는 뭘 하고 있었지?",
+      "why": "The timeline golden day 2026-02-07 has depth-0 evidence only. andenken must either recover a session/md anchor or report an honest miss. Reporting 'nothing found' as 'nothing happened' is the failure this case exists to make impossible.",
+      "layers": ["retrieval", "harness"],
+      "ownership": {
+        "timeline": "Owns the coordinate and the source status — empty / partial / stale / unreadable are four different states, not zero.",
+        "andenken": "Grades only recoverable session/md anchors inside the supplied ISO window, or an honest miss.",
+        "harness": "Grades the synthesis and the next move."
+      },
+      "probes": [
+        {
+          "id": "sessions-window",
+          "surface": "search-sessions",
+          "query": "",
+          "limit": 20,
+          "mode": "recent",
+          "dateFrom": "2026-02-06T15:00:00Z",
+          "dateTo": "2026-02-07T15:00:00Z",
+          "windowNote": "KST 2026-02-07 00:00–24:00 expressed as UTC. andenken does not parse natural-language time; the caller supplies ISO. Stored-signal scan — no embedding call, API 0."
+        }
+      ],
+      "humanPrompt": "Does this output make it impossible to conclude 'nothing happened that day'?",
+      "harnessGrades": "Did the answer refuse to call the day empty, and name which axis still holds evidence?"
+    },
+    {
+      "id": "time-lens-2026-07-11",
+      "type": "time-probe",
+      "title": "A day explained by timelog and journal, with no artifact residue, stays explainable",
+      "userQuestion": "2026년 7월 11일은 어떤 날이었지?",
+      "why": "The second timeline golden day: timelog and journal explain it while depth-2/3 artifacts are silent. andenken's honest answer may be thin; what it must not do is manufacture a coordinate from a similarity score.",
+      "layers": ["retrieval", "harness"],
+      "ownership": {
+        "timeline": "Owns the day's coordinates and that timelog/journal evidence exists.",
+        "andenken": "Grades recoverable session/md anchors in the window, or an honest miss. Never asserts the date from a score.",
+        "harness": "Grades whether the day becomes readable from the combined axes."
+      },
+      "probes": [
+        {
+          "id": "sessions-window",
+          "surface": "search-sessions",
+          "query": "",
+          "limit": 20,
+          "mode": "recent",
+          "dateFrom": "2026-07-10T15:00:00Z",
+          "dateTo": "2026-07-11T15:00:00Z",
+          "windowNote": "KST 2026-07-11 00:00–24:00 expressed as UTC. Stored-signal scan — API 0."
+        }
+      ],
+      "humanPrompt": "Does the thin result read as an honest limit of this axis rather than as an absence of life?",
+      "harnessGrades": "Did the answer carry the lived day without inventing artifacts that do not exist?"
+    }
+  ]
+}

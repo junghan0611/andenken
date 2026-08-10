@@ -270,6 +270,20 @@ Specific operations worth knowing by name:
   IDs from real timeline recovery scenarios and grade expected evidence rank,
   source coverage, and honest gaps rather than loose keyword presence.
 
+- `./run.sh accept` — the **user-facing acceptance surface**, distinct from
+  `golden`. Three separated layers: index/operator health (API 0), andenken
+  retrieval behaviour (canonical evidence rank, document-level diversity, and an
+  honest `stale-index` / `corpus-miss` / `ranking-miss` classification), and a
+  **human** `usable` / `partial` / `not-improved` verdict that no automated run
+  may set. Default is API 0; `--retrieval` opts into paid query embeddings.
+  Cases live in `acceptance-cases.json` (public-safe) plus a gitignored
+  `acceptance-cases.local.json` for volatile bindings, so adding a case never
+  touches code. `--compare` reports before/after and refuses a direction when the
+  two runs did not measure the same thing. Probes run with
+  `ANDENKEN_DISABLE_RECALL_TRACKING=1` and the run verifies `recalls.jsonl` did
+  not grow. See the `andenken-acceptance` skill for the manual layer-3 step —
+  CLI diagnostics measure `cli:*` only and never prove the pi tool surface.
+
 Retired:
 
 - `./run.sh qmd:*` — the qmd-over-garden-MD path was removed on 2026-05-12
