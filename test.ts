@@ -53,8 +53,26 @@ import {
   applyRecencyDecay,
   jinaRerank,
   retrieve,
+  canonicalDocId,
+  capPerDocumentWithBackfill,
 } from "./retriever.ts";
+import {
+  searchMdCore,
+  mdCandidateCount,
+  groupMdResultsByDocument,
+  formatMdScreen,
+  mdResultToJson,
+  stripMdDisplayScaffold,
+  mdSnippet,
+  mdDisplayField,
+  MD_CANDIDATE_FLOOR,
+  MD_MAX_CHUNKS_PER_DOC,
+  MD_SNIPPET_CHARS,
+  MD_DESCRIPTION_CHARS,
+  MD_TITLE_CHARS,
+} from "./md-search.ts";
 import type { SearchResult } from "./store.ts";
+import type { EmbeddingProvider } from "./embedding-provider.ts";
 
 // --- Test Framework ---
 
@@ -788,15 +806,21 @@ async function testMdStalePolicy() {
 async function testRetriever() {
   section("Retriever");
 
-  // Mock results for testing
+  // Mock results for testing.
+  //
+  // `sessionFile` is derived from the id rather than hard-coded: every mock used
+  // to share `/test/file.jsonl`, which made document identity untestable —
+  // a per-document cap would have collapsed the whole fixture into one row and
+  // nobody would have noticed either the bug or its fix.
   const makeResult = (
     id: string,
     score: number,
     timestamp?: string,
+    sessionFile?: string,
   ): SearchResult => ({
     id,
     text: `text for ${id}`,
-    sessionFile: "/test/file.jsonl",
+    sessionFile: sessionFile ?? `/test/${id}.jsonl`,
     project: "test",
     lineNumber: 1,
     timestamp: timestamp ?? new Date().toISOString(),
@@ -848,6 +872,293 @@ async function testRetriever() {
   assert(
     retrieved[0].score >= retrieved[retrieved.length - 1].score,
     "Retrieve: sorted descending by score",
+  );
+
+  // --- Document identity across the three real id shapes -------------------
+  //
+  // The legacy `fileDedup` regex (`:[ch]\d+`) collapsed only the org shape, so
+  // it was a no-op for BOTH production tracks. Document identity now comes from
+  // the stored `sessionFile` column, which every track populates.
+  const docShapes: Array<[string, string, string]> = [
+    ["md", "/home/x/notes/content/notes/garden2wikidocs.md#3", "/home/x/notes/content/notes/garden2wikidocs.md"],
+    ["md", "/home/x/notes/content/notes/garden2wikidocs.md#11", "/home/x/notes/content/notes/garden2wikidocs.md"],
+    ["session", "/home/x/.pi/agent/sessions/p/20260810_a.jsonl:4521", "/home/x/.pi/agent/sessions/p/20260810_a.jsonl"],
+    ["org", "/home/x/org/notes/20250214T145957.org:c12", "/home/x/org/notes/20250214T145957.org"],
+  ];
+  for (const [track, id, file] of docShapes) {
+    const r = makeResult(id, 1, undefined, file);
+    assert(canonicalDocId(r) === file, `docId (${track}): ${id} → document path`);
+  }
+  // Legacy rows with no stored sessionFile fall back to the id — and the
+  // fallback must strip ALL THREE real suffixes, not just the org one. A
+  // fallback that handles a single shape is how the original defect hid.
+  const legacyShapes: Array<[string, string, string]> = [
+    ["md #N", "/g/a.md#3", "/g/a.md"],
+    ["md #NN", "/g/a.md#11", "/g/a.md"],
+    ["session :line", "/s/a.jsonl:4521", "/s/a.jsonl"],
+    ["org :cN", "/o/n.org:c12", "/o/n.org"],
+    ["org :hN", "/o/n.org:h44", "/o/n.org"],
+    ["org :cN:mN", "/o/n.org:c12:m3", "/o/n.org"],
+  ];
+  for (const [shape, id, doc] of legacyShapes) {
+    const row = { ...makeResult("x", 1), sessionFile: "", id };
+    assert(canonicalDocId(row) === doc, `docId fallback (${shape}): ${id} → ${doc}`);
+  }
+  const twoChunks = ["/g/a.md#3", "/g/a.md#11"].map((id) => ({
+    ...makeResult(id, 1),
+    sessionFile: "",
+    id,
+  }));
+  assert(
+    canonicalDocId(twoChunks[0]) === canonicalDocId(twoChunks[1]),
+    "docId fallback: two md chunks of one document collapse to the same key",
+  );
+
+  // --- Per-document cap is lossless ---------------------------------------
+  const docA = "/g/a.md";
+  const docB = "/g/b.md";
+  const monopoly = [
+    makeResult(`${docA}#1`, 0.9, undefined, docA),
+    makeResult(`${docA}#2`, 0.8, undefined, docA),
+    makeResult(`${docA}#3`, 0.7, undefined, docA),
+    makeResult(`${docB}#1`, 0.6, undefined, docB),
+    makeResult(`${docA}#4`, 0.5, undefined, docA),
+  ];
+  const capped = capPerDocumentWithBackfill(monopoly, MD_MAX_CHUNKS_PER_DOC);
+  assert(capped.length === monopoly.length, "cap: no candidate is lost");
+  assert(
+    new Set(capped.map((r) => r.id)).size === new Set(monopoly.map((r) => r.id)).size &&
+      capped.every((r) => monopoly.some((m) => m.id === r.id)),
+    "cap: output is a permutation of the input — recall is unchanged",
+  );
+  assert(
+    capped.slice(0, 3).filter((r) => r.sessionFile === docA).length === 2,
+    "cap: one document holds at most 2 rows while an alternative remains",
+  );
+  assert(capped[2].sessionFile === docB, "cap: the other document is pulled onto the first screen");
+  assert(
+    capped[3].sessionFile === docA && capped[4].sessionFile === docA,
+    "cap: over-cap chunks backfill behind the capped pass, in score order",
+  );
+  const narrow = [
+    makeResult(`${docA}#1`, 0.9, undefined, docA),
+    makeResult(`${docA}#2`, 0.8, undefined, docA),
+    makeResult(`${docA}#3`, 0.7, undefined, docA),
+  ];
+  assert(
+    capPerDocumentWithBackfill(narrow, MD_MAX_CHUNKS_PER_DOC).map((r) => r.id).join() ===
+      narrow.map((r) => r.id).join(),
+    "cap: a narrow lookup with one document keeps its full screen, unreordered",
+  );
+
+  // Sessions must not acquire a document cap: `retrieve` without documentCap
+  // keeps the legacy path, which is a no-op for `path.jsonl:<line>` ids.
+  const sessDoc = "/s/deep.jsonl";
+  const deep = [1, 2, 3, 4, 5].map((i) =>
+    makeResult(`${sessDoc}:${i * 100}`, 1 - i * 0.1, undefined, sessDoc),
+  );
+  const sessOut = await retrieve("q", deep, [], {
+    mergeStrategy: "rrf",
+    recencyHalfLifeDays: 0,
+    minScore: 0,
+    mmr: { enabled: false, lambda: 0.7 },
+  });
+  assert(
+    sessOut.length === deep.length,
+    `sessions: a deep single-session result set is not truncated (${sessOut.length}/${deep.length})`,
+  );
+}
+
+async function testMdSurface() {
+  section("MD retrieval surface (candidate floor · doc grouping · compact screen)");
+
+  // --- Candidate floor: limit stops being a ranking parameter --------------
+  assert(mdCandidateCount(5) === MD_CANDIDATE_FLOOR, "candidates: limit 5 sits on the floor");
+  assert(mdCandidateCount(10) === MD_CANDIDATE_FLOOR, "candidates: limit 10 sits on the same floor");
+  assert(
+    mdCandidateCount(5) === mdCandidateCount(10),
+    "limit invariance: display limit 5 and 10 see the SAME candidate universe",
+  );
+  assert(mdCandidateCount(100) === 200, "candidates: ceiling still applies for wide limits");
+  assert(mdCandidateCount(30) === 120, "candidates: above the floor, limit × 4 still governs");
+
+  const mk = (doc: string, chunk: number, score: number): SearchResult => ({
+    id: `${doc}#${chunk}`,
+    text: `Title: ${doc}\nTags: a, b\n\nbody of ${doc} chunk ${chunk}`,
+    sessionFile: doc,
+    project: "notes",
+    lineNumber: chunk * 10,
+    timestamp: "2026-07-27T04:05:52.100Z",
+    role: "doc",
+    source: "md",
+    metadata: { title: `T ${doc}`, denoteId: `2026010${chunk}T000000`, description: `desc ${doc}`, chunkIndex: String(chunk) },
+    score,
+  });
+  const universe = [
+    mk("/g/a.md", 1, 0.99), mk("/g/a.md", 2, 0.95), mk("/g/b.md", 1, 0.90),
+    mk("/g/a.md", 3, 0.85), mk("/g/c.md", 1, 0.80), mk("/g/d.md", 1, 0.75),
+    mk("/g/b.md", 2, 0.70), mk("/g/e.md", 1, 0.65), mk("/g/f.md", 1, 0.60),
+    mk("/g/g.md", 1, 0.55),
+  ];
+  const ordered = capPerDocumentWithBackfill(universe, MD_MAX_CHUNKS_PER_DOC);
+
+  // --- Limit invariance, through the REAL pipeline --------------------------
+  //
+  // Asserting `slice(0,5) === slice(0,10).slice(0,5)` proves nothing — it is
+  // true of any array. The claim that matters is about `searchMdCore`: two
+  // display limits must issue the SAME candidate requests and therefore produce
+  // the same first screen after merge/MMR/document ordering. So this drives the
+  // real function with a stub store and a stub provider (no API, no DB) and
+  // records what the store was actually asked for.
+  //
+  // The stub honours the requested candidate count (`slice(0, n)`), which is
+  // what makes the test non-trivial: without the floor, limit 5 would ask for
+  // 20 of these 44 rows and a different set would survive.
+  const bigUniverse: SearchResult[] = [];
+  for (let d = 0; d < 22; d++) {
+    for (let c = 1; c <= 2; c++) {
+      bigUniverse.push(mk(`/g/doc${String(d).padStart(2, "0")}.md`, c, 1 - d * 0.04 - c * 0.005));
+    }
+  }
+  const asked: { vector: number[]; fts: number[] } = { vector: [], fts: [] };
+  const stubStore = {
+    async search(_v: number[], n: number) {
+      asked.vector.push(n);
+      return bigUniverse.slice(0, n);
+    },
+    async fullTextSearch(_q: string, n: number) {
+      asked.fts.push(n);
+      // Offset so vector and FTS buckets differ — the merge must do real work.
+      return bigUniverse.slice(2, n);
+    },
+    async substringSearch(_t: string, n: number) {
+      return bigUniverse.slice(0, Math.min(2, n));
+    },
+  };
+  let embedCalls = 0;
+  const stubProvider = {
+    name: "stub",
+    dimensions: 4096,
+    async embedQuery(_q: string) {
+      embedCalls++;
+      return [0.1, 0.2, 0.3];
+    },
+  };
+  const runCore = async (limit: number) =>
+    searchMdCore(
+      stubStore as unknown as VectorStore,
+      stubProvider as unknown as EmbeddingProvider,
+      "embodied cognition garden",
+      limit,
+      { expand: false }, // no dictcli subprocess in a unit test
+    );
+  const at5 = await runCore(5);
+  const at10 = await runCore(10);
+  assert(
+    asked.vector.join() === "40,40" && asked.fts.join() === "40,40",
+    `limit invariance: both limits request the same candidate depth (vector ${asked.vector.join("/")}, fts ${asked.fts.join("/")})`,
+  );
+  assert(at5.results.length === 5 && at10.results.length === 10, "searchMdCore honours the display limit");
+  assert(
+    at5.results.map((r) => r.id).join() === at10.results.slice(0, 5).map((r) => r.id).join(),
+    "limit invariance: top-5 ids identical at limit 5 and limit 10, through the real retrieve pipeline",
+  );
+  assert(embedCalls === 2, "searchMdCore issues exactly one query embedding per call");
+  const capViolation = at10.results
+    .slice(0, 5)
+    .filter((r, _i, arr) => arr.filter((x) => x.sessionFile === r.sessionFile).length > MD_MAX_CHUNKS_PER_DOC);
+  assert(capViolation.length === 0, "searchMdCore applies the md document cap to its own output");
+
+  // --- Document grouping ---------------------------------------------------
+  const groups = groupMdResultsByDocument(ordered.slice(0, 5));
+  assert(groups[0].file === "/g/a.md", "grouping: rank order is preserved by first appearance");
+  assert(groups[0].chunks.length === 2, "grouping: a document's adjacent chunks collapse into one group");
+  assert(
+    groups.length === new Set(ordered.slice(0, 5).map((r) => r.sessionFile)).size,
+    "grouping: one group per distinct document",
+  );
+
+  // --- Display scaffold stripping (display only) ---------------------------
+  const noisy =
+    'Title: X\nTags: a, b\n\nsee [n]({{< relref "/botlog/2026.md" >}}) and ' +
+    '<span class="timestamp-wrapper"><span class="timestamp">[2026-07-18 Sat]</span></span> ' +
+    "## Heading {#heading-anchor} &lt;kept&gt;";
+  const stripped = stripMdDisplayScaffold(noisy);
+  assert(!stripped.includes("relref"), "display: Hugo relref shortcodes are stripped");
+  assert(!stripped.includes("<span"), "display: export span wrappers are stripped");
+  assert(!stripped.includes("{#heading-anchor}"), "display: heading anchors are stripped");
+  assert(!stripped.startsWith("Title:"), "display: the FTS Title/Tags preamble is not re-shown per chunk");
+  assert(stripped.includes("<kept>"), "display: entity-escaped prose survives as prose");
+  assert(
+    stripped.includes("see n and") && !stripped.includes("]()"),
+    "display: a de-linked relref keeps the neighbour's title and drops the empty parens",
+  );
+
+  assert(mdSnippet("x".repeat(500)).length === MD_SNIPPET_CHARS + 1, "snippet: budget is enforced (+ellipsis)");
+  assert(mdSnippet("short body").endsWith("body"), "snippet: short bodies are not padded or truncated");
+
+  // --- Author-written fields are budgeted ----------------------------------
+  assert(
+    mdDisplayField("x".repeat(900), MD_DESCRIPTION_CHARS).length === MD_DESCRIPTION_CHARS + 1,
+    "description: an unbounded frontmatter field is truncated to its budget (+ellipsis)",
+  );
+  assert(
+    mdDisplayField("short", MD_DESCRIPTION_CHARS) === "short",
+    "description: a short field is passed through untouched",
+  );
+  assert(
+    !mdDisplayField('a {{< relref "/x.md" >}} b', MD_DESCRIPTION_CHARS).includes("relref"),
+    "description: display scaffold is stripped before the budget applies",
+  );
+  const longDoc = "/g/long.md";
+  const longRow: SearchResult = {
+    ...mk(longDoc, 1, 0.9),
+    metadata: {
+      title: "T".repeat(400),
+      denoteId: "20260101T000000",
+      description: "D".repeat(900),
+      chunkIndex: "1",
+    },
+  };
+  const longScreen = formatMdScreen("q", [longRow, { ...longRow, id: `${longDoc}#2`, metadata: { ...longRow.metadata, chunkIndex: "2" } }]);
+  assert(
+    longScreen.split("\n").filter((l) => /^ {3}D+…?$/.test(l)).length === 1,
+    "screen: an oversized description is printed once per document, not once per chunk",
+  );
+  assert(
+    !longScreen.includes("D".repeat(MD_DESCRIPTION_CHARS + 1)),
+    `screen: description never exceeds ${MD_DESCRIPTION_CHARS} chars`,
+  );
+  assert(
+    !longScreen.includes("T".repeat(MD_TITLE_CHARS + 1)),
+    `screen: title never exceeds ${MD_TITLE_CHARS} chars`,
+  );
+
+  // --- Compact screen ------------------------------------------------------
+  const screen = formatMdScreen("q", ordered.slice(0, 5));
+  assert(screen.includes("across 4 documents"), "screen: document count is stated, not just chunk count");
+  assert(!screen.includes("[md]") && !/\bdoc\b\s*\(score/.test(screen), "screen: the constant [md] doc tag is gone");
+  assert(!screen.includes("2026-07-27T04:05:52.100Z"), "screen: the export mtime is never shown as semantic time");
+  assert(screen.includes("2026010"), "screen: the Denote ID is shown as the note's coordinate");
+  assert(screen.includes("/g/a.md"), "screen: the openable source path is shown once per document");
+  assert((screen.match(/desc \/g\/a\.md/g) ?? []).length === 1, "screen: the description is printed once per document, not per chunk");
+  assert(
+    !/·\s*0\.\d\d(\s|$)/m.test(screen) && !screen.includes("score"),
+    "screen: no numeric score reaches model-visible content — a normalized rank is not a confidence",
+  );
+  const legacyBytes = ordered.slice(0, 10).reduce((n, r) => n + Math.min(r.text.length, 500) + 120, 0);
+  assert(screen.length < legacyBytes, `screen: compact form is smaller than the legacy limit-10 form (${screen.length} < ${legacyBytes})`);
+
+  // --- JSON row ------------------------------------------------------------
+  const row = mdResultToJson(ordered[0]);
+  assert(row.denoteId === "20260101T000000", "json: Denote ID is exposed");
+  assert(row.indexedAt === "2026-07-27T04:05:52.100Z", "json: the mtime survives, named `indexedAt` for what it is");
+  assert(!("timestamp" in row), "json: no `timestamp` key that could be read as the note's date");
+  assert(typeof row.file === "string" && (row.file as string).endsWith(".md"), "json: the openable path is the document path");
+  const full = mdResultToJson(ordered[0], { full: true });
+  assert(
+    (full.text as string).length >= (row.text as string).length,
+    "json: --full widens the body budget",
   );
 }
 
@@ -1167,6 +1478,7 @@ if (mode === "unit" || mode === "all") {
   await testOrgChunker();
   await testMdChunker();
   await testRetriever();
+  await testMdSurface();
   await testWriteBuffer();
   await testVectorStore();
   await testMdStalePolicy();

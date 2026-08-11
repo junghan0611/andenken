@@ -197,6 +197,59 @@ lookup; no labeled helpful neighbor on the explore first screen). Do not tune on
 surface in isolation — the shared production core is the fix. Freshness comes
 first.
 
+### 2026-08-11 — md context efficiency landed; what it did and did not close
+
+An independent review of the 2026-08-11 autholog link-curation job produced
+measurements, and the patch that followed is in the working tree. Closed:
+
+- **`knowledge_search` runs `searchMdCore()`.** The inline copy and the
+  duplicated short-CJK helper are gone, so `golden` and `accept` finally measure
+  the function the pi tool executes. `acceptance.ts` now hashes `index.ts` into
+  `pipelineDigest` for the same reason. Parity is still reported as **unproven**
+  — shared code is not a measurement, and this runner never executes the pi tool.
+- **`limit` is no longer a ranking parameter.** `mdCandidateCount()` floors the
+  candidate pool at 40, so display limit 5 and 10 now see the same universe.
+  This was a real production defect, not a theory: two `knowledge_search` calls
+  on the same query 46 minutes apart returned different rows at ranks 3 and 5
+  (recall log, 01:10 vs 01:56).
+- **Document identity comes from `SearchResult.sessionFile`.** The old id regex
+  was a no-op for md *and* for sessions; it only ever collapsed the org shape.
+  The md track now uses `capPerDocumentWithBackfill` (max 2/doc, over-cap chunks
+  move behind the capped pass), so the output is a permutation of the input —
+  recall provably unchanged, and a narrow single-document lookup still fills its
+  screen. Sessions keep the legacy path deliberately; the windowed-session
+  collapse belongs to the 2e scheduler below, not to a global cap.
+- **Compact md screen, one formatting contract.** Document-grouped: title,
+  Denote ID, openable path, and the author's description once per document, then
+  per-chunk `#index Lline` with a 200-char display-cleaned snippet. Measured
+  3.2–3.4× smaller than the previous limit-10 screen on live queries. The
+  constant `[md] doc` tag is gone; the export mtime is no longer printed as
+  `Time` (JSON calls it `indexedAt`).
+- **md default limit is 5** on both surfaces, with `--full` on the CLI.
+- **`recalls.jsonl` records `limit` and `returned`** (additive keys; older rows
+  carry neither).
+
+Explicitly NOT closed, and not to be inferred from the above:
+
+- **Freshness is still the next product gap.** Unchanged by this work.
+- **Stored md `timestamp` is still the export mtime.** `MdFrontmatter` already
+  parses `date`/`lastmod` (present in 2,244/2,249 garden files) and discards
+  them, while the org path stores the note's own date. Fixing it means
+  rewriting every md row, so it rides the **next md re-index** and should land
+  together with exposing `dateFrom`/`dateTo` on md — that is the capability it
+  unlocks. Do not do one without the other.
+- **No new acceptance case.** `garden-explore-diversity` already owns the
+  monopoly contract; re-run it with `accept --retrieval --compare` rather than
+  adding a case.
+- **Caller practice** is unchanged and now enforced in `promptGuidelines`:
+  conceptual discovery starts at 5, judge the top 3–5, and proper-noun/existence
+  questions are semantic candidates followed by `denotecli` exact verification.
+
+**Correction landed with it:** `knowledge_search.promptGuidelines` claimed
+Korean verb stems were auto-indexed via Kiwi. They are not — `batchStem()` /
+`enrichTextWithStems()` are reached from `indexOrg()` only, and org is disabled
+in production. The claim was removed rather than reworded.
+
 ### What happened to the 2026-07-27 word-oriented work
 
 The md gate, independent track scoring, shared `searchMdCore()`, stale-index

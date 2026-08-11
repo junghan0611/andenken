@@ -36,14 +36,28 @@ export function getRecallLogPath(): string {
   return path.join(getDataDir(), "recalls.jsonl");
 }
 
+export interface RecallContext {
+  /** Rows the caller ASKED for. Absent when the surface did not pass one. */
+  limit?: number;
+}
+
 /**
  * Append one recall record. Best-effort: search must never fail because the
  * trace could not be written.
+ *
+ * `limit` / `returned` are additive keys (2026-08-11). Without them the log
+ * cannot answer "what limit do callers actually use", so every default-limit
+ * argument rested on a single observed task. Readers must treat both as
+ * optional: rows written before this change carry neither. Note that
+ * `resultIds` stays capped at 5 — it is a first-screen trace, not a full
+ * result dump — so `returned` is the only witness of how many rows a caller
+ * actually received.
  */
 export function recordRecall(
   query: string,
   tool: string,
   results: SearchResult[],
+  context: RecallContext = {},
   env: NodeJS.ProcessEnv = process.env,
 ): void {
   if (isRecallTrackingDisabled(env)) return;
@@ -52,6 +66,8 @@ export function recordRecall(
       timestamp: new Date().toISOString(),
       query,
       tool,
+      ...(context.limit !== undefined ? { limit: context.limit } : {}),
+      returned: results.length,
       resultIds: results.slice(0, 5).map((r) => r.id),
       topScore: results[0]?.score ?? 0,
     });

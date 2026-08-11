@@ -85,8 +85,13 @@ Usage: ./run.sh <command> [args]
                                      --session-file path --session-file-contains substr
                                      --mode semantic|hybrid|recent
                               recent = stored-signal scan + timestamp DESC (no NL time parsing)
-  search:md <query> [--limit N]  Search md (public garden) — issue #8
-  knowledge <query> [--limit N]  Search knowledge base (org — disabled in production)
+  search:md <query> [--limit N] [--full]
+                              Search md (public garden). Default limit 5,
+                              document-grouped; --full widens each snippet.
+  knowledge <query> [--limit N] [--full]
+                              DEPRECATED alias for search:md. `cli.ts
+                              search-knowledge` has run the md track since the
+                              org axis was disabled; prefer search:md.
 
 === Test ===
   test                        All tests (unit + integration)

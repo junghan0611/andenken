@@ -75,7 +75,8 @@ embedding-provider.ts   EmbeddingProvider interface + vLLM impl + factory
 model-presets.ts        Qwen3-Embedding-4B/8B / bge-m3 / Gemini presets
 store.ts                LanceDB vector store (sessions.lance + md.lance + org.lance)
 retriever.ts            Hybrid retrieval (weighted/RRF + decay + MMR)
-md-search.ts            md retrieval core shared by cli.ts search-md + golden
+md-search.ts            md retrieval core + display contract, shared by cli.ts
+                        search-md, knowledge_search, and golden
 session-indexer.ts      pi + Claude Code JSONL parser
 md-chunker.ts           Markdown-aware chunker + analyzeMdFile SSOT classifier
 org-chunker.ts          Org-aware 2-tier chunker (disabled track — upstream R&D)
@@ -295,7 +296,9 @@ Specific operations worth knowing by name:
 - `./run.sh golden` — the current component-level search baseline. It covers
   the two live tracks independently: `--db session` and `--db md`; the org
   track is retired from the gate. The md track calls `searchMdCore()` from
-  `md-search.ts`, the same function `cli.ts search-md` runs. Its 2026-07-27
+  `md-search.ts` — since 2026-08-11 that is also the function the pi
+  extension's `knowledge_search` runs, so the gate and the agent-facing tool
+  no longer measure different pipelines. Its 2026-07-27
   vocabulary-heavy fixture set is transitional, not the final quality bar.
   The next gate must use canonical dates / event refs / session files / Denote
   IDs from real timeline recovery scenarios and grade expected evidence rank,

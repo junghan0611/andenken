@@ -725,16 +725,20 @@ section("recall log — readiness audit and the suppression guard");
   process.env.ANDENKEN_DATA = dir;
   const target = path.join(dir, "recalls.jsonl");
   const before = fs.readFileSync(target, "utf-8").length;
-  recordRecall("q", "acceptance-probe", [], { [RECALL_TRACKING_ENV]: "1" });
+  recordRecall("q", "acceptance-probe", [], {}, { [RECALL_TRACKING_ENV]: "1" });
   assert(
     fs.readFileSync(target, "utf-8").length === before,
     "with the guard set, a search appends nothing — acceptance traffic cannot enter promotion evidence",
   );
-  recordRecall("q", "production", [], {});
+  recordRecall("q", "production", [], { limit: 5 }, {});
+  const written = fs.readFileSync(target, "utf-8");
   assert(
-    fs.readFileSync(target, "utf-8").length > before,
+    written.length > before,
     "without the guard, normal production calls keep logging exactly as before",
   );
+  const lastEntry = JSON.parse(written.trim().split("\n").pop() as string) as Record<string, unknown>;
+  assert(lastEntry.limit === 5, "the requested limit is recorded");
+  assert(lastEntry.returned === 0, "the returned row count is recorded, independently of the id cap");
   if (prevData === undefined) delete process.env.ANDENKEN_DATA;
   else process.env.ANDENKEN_DATA = prevData;
   fs.rmSync(dir, { recursive: true, force: true });

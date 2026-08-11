@@ -24,7 +24,13 @@ import { VectorStore, getSessionsDbPath, getOrgDbPath, getMdDbPath, getDataDir, 
 import { findSessionFiles, extractSessionChunks, normalizeSourceFilter } from "./session-indexer.js";
 import { retrieve, expandQueryForBM25, getShortCJKTokens, sortByTimestampDesc, type MergeStrategy } from "./retriever.js";
 import { readSessionExcerpt, type SessionExcerpt } from "./session-excerpt.js";
-import { searchMdCore, dictcliExpand } from "./md-search.js";
+import {
+  searchMdCore,
+  dictcliExpand,
+  groupMdResultsByDocument,
+  mdResultToJson,
+  MD_DEFAULT_LIMIT,
+} from "./md-search.js";
 // Recall tracking (memory consolidation stage 2) is shared with index.ts so the
 // `ANDENKEN_DISABLE_RECALL_TRACKING` guard cannot drift between the two search
 // entry points. See recall-log.ts for why that guard exists.
@@ -322,7 +328,7 @@ async function searchSessions(
   }
 
   const finalResults = results.slice(0, limit);
-  recordRecall(query, "search-sessions", finalResults);
+  recordRecall(query, "search-sessions", finalResults, { limit });
 
   // C2.1c — opt-in excerpt attachment for top hits.
   let excerpts: Map<string, SessionExcerpt> | undefined;
@@ -402,7 +408,7 @@ async function searchKnowledge(query: string, limit: number): Promise<void> {
   });
 
   const finalResults = results.slice(0, limit);
-  recordRecall(query, "search-knowledge", finalResults);
+  recordRecall(query, "search-knowledge", finalResults, { limit });
   console.log(
     JSON.stringify({
       query,
@@ -423,7 +429,7 @@ async function searchKnowledge(query: string, limit: number): Promise<void> {
  * garden is intentionally not chronological — most retrieval value is in
  * the long-form notes, not the freshest mtime.
  */
-async function searchMd(query: string, limit: number): Promise<void> {
+async function searchMd(query: string, limit: number, full: boolean = false): Promise<void> {
   if (!fs.existsSync(mdDbPath)) {
     console.error(
       JSON.stringify({
@@ -460,13 +466,15 @@ async function searchMd(query: string, limit: number): Promise<void> {
     limit,
   );
 
-  recordRecall(query, "search-md", finalResults);
+  recordRecall(query, "search-md", finalResults, { limit });
+  const groups = groupMdResultsByDocument(finalResults);
   console.log(
     JSON.stringify({
       query,
       expanded: expanded.length > 0 ? expanded : undefined,
       count: finalResults.length,
-      results: finalResults.map((r) => formatResult(r)),
+      documents: groups.length,
+      results: finalResults.map((r) => mdResultToJson(r, { full })),
     }),
   );
 
@@ -654,6 +662,11 @@ function parseArgs() {
 async function main() {
   const { cmd, positional, flags } = parseArgs();
   const limit = parseInt(flags.limit ?? "10", 10);
+  // Conceptual md discovery is judged on the top few documents, so its default
+  // is deliberately lower than the sessions default. An explicit --limit always
+  // wins; the candidate pool has a floor, so this changes reading cost only.
+  const mdLimit = flags.limit ? limit : MD_DEFAULT_LIMIT;
+  const mdFull = "full" in flags && flags.full !== "false";
 
   switch (cmd) {
     case "search-sessions":
@@ -730,10 +743,10 @@ async function main() {
     case "md": {
       const query = positional.join(" ");
       if (!query) {
-        console.error(JSON.stringify({ error: "Usage: search-md <query> [--limit N]" }));
+        console.error(JSON.stringify({ error: "Usage: search-md <query> [--limit N] [--full]" }));
         process.exit(1);
       }
-      await searchMd(query, limit);
+      await searchMd(query, mdLimit, mdFull);
       break;
     }
 
@@ -741,13 +754,13 @@ async function main() {
     case "knowledge": {
       const query = positional.join(" ");
       if (!query) {
-        console.error(JSON.stringify({ error: "Usage: search-knowledge <query> [--limit N]" }));
+        console.error(JSON.stringify({ error: "Usage: search-knowledge <query> [--limit N] [--full]" }));
         process.exit(1);
       }
       // Compatibility alias: production knowledge axis is md.lance. The old
       // org-backed searchKnowledge() remains in this file for R&D/manual use
       // only; agent-facing `knowledge` now follows search-md.
-      await searchMd(query, limit);
+      await searchMd(query, mdLimit, mdFull);
       break;
     }
     case "status":

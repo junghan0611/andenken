@@ -32,6 +32,14 @@ export interface RetrieverConfig {
    */
   scaffoldPenalty: number;
   scaffoldPenaltyDefinition: number;
+  /**
+   * Document-level ordering, opt-in per track (see `capPerDocumentWithBackfill`).
+   *
+   * Absent = legacy behaviour: step 6 runs the id-shaped `fileDedup()` exactly
+   * as before. The md core is the only caller that sets this today; sessions
+   * must keep their existing ordering, so they do NOT pass it.
+   */
+  documentCap?: { maxPerDoc: number };
 }
 
 const DEFAULT_CONFIG: RetrieverConfig = {
@@ -147,12 +155,72 @@ export function applyScaffoldDamping(
   );
 }
 
-// --- File-level dedup ---
+// --- Document identity ---
+//
+// `sessionFile` is the document path on EVERY track — sessions store the JSONL
+// path (`session-indexer.ts`), md stores the markdown path (`md-chunker.ts
+// mdChunkToStoreRow`), org stores the org path (`indexer.ts indexOrg`). It is
+// also what `acceptance.ts diversityOf()` already grades on.
+//
+// Chunk ids are NOT a reliable document key: they carry three different shapes
+// (`path.md#3`, `path.jsonl:4521`, `path.org:c12`) and the legacy regex below
+// only ever collapsed the org one. Parse ids only as a last resort, for rows
+// that predate the stored `sessionFile` column — and when we do, strip ALL
+// THREE suffixes, not just the org one. A fallback that handles one shape is
+// how the original defect stayed invisible.
+
+/** md `#12` · session `:4521` · org `:c12` / `:h44` / `:c12:m3`. */
+const CHUNK_ID_SUFFIX = /(?:#\d+|:[ch]\d+(?:[:.].*)?|:\d+)$/;
+
+export function canonicalDocId(r: SearchResult): string {
+  if (r.sessionFile) return r.sessionFile;
+  return r.id.replace(CHUNK_ID_SUFFIX, "");
+}
+
+/**
+ * Cap a ranked list at `maxPerDoc` chunks per document WITHOUT losing anything.
+ *
+ * Over-cap chunks are not dropped; they are appended after the capped pass in
+ * their original INPUT order — which is the ranked order this function receives,
+ * not raw score order, because MMR has already re-ordered the list by the time
+ * it gets here. The output is therefore a PERMUTATION of the input — same ids,
+ * same count — so recall is provably unchanged and a narrow lookup whose answer
+ * genuinely lives in one document still fills the screen. Only the ORDER
+ * changes, which is what a first-screen monopoly actually is.
+ */
+export function capPerDocumentWithBackfill(
+  results: SearchResult[],
+  maxPerDoc: number,
+): SearchResult[] {
+  if (maxPerDoc <= 0 || results.length <= 1) return [...results];
+  const counts = new Map<string, number>();
+  const primary: SearchResult[] = [];
+  const overflow: SearchResult[] = [];
+  for (const r of results) {
+    const doc = canonicalDocId(r);
+    const n = counts.get(doc) ?? 0;
+    if (n < maxPerDoc) {
+      counts.set(doc, n + 1);
+      primary.push(r);
+    } else {
+      overflow.push(r);
+    }
+  }
+  return [...primary, ...overflow];
+}
+
+// --- File-level dedup (LEGACY, id-shaped) ---
 //
 // Vector search on dense embeddings returns many chunks from the SAME file
 // (e.g., 10/10 from one document). This kills diversity in the merge.
 // Keep only top-K chunks per file before merge to let other files surface.
-
+//
+// KNOWN SCOPE (measured 2026-08-11): the regex matches `:c12` / `:h44` only, so
+// this is a NO-OP for md (`path.md#3`) and for sessions (`path.jsonl:4521`).
+// The only track it actually caps is org, which is disabled in production.
+// It is retained unchanged so the org weighted path and the session ordering
+// keep their existing behaviour; the md track opts into
+// `capPerDocumentWithBackfill` instead, which is lossless.
 function fileDedup(results: SearchResult[], maxPerFile: number = 3): SearchResult[] {
   const fileCounts = new Map<string, number>();
   return results.filter(r => {
@@ -559,8 +627,14 @@ export async function retrieve(
     results = mmrRerank(results, cfg.mmr.lambda);
   }
 
-  // 6. Post-merge file cap: prevent one file from dominating final results
-  results = fileDedup(results, 3);
+  // 6. Post-merge document ordering.
+  //
+  // Tracks that opt in (md) get the lossless per-document cap: over-cap chunks
+  // are moved behind the capped pass instead of being discarded. Tracks that do
+  // not (sessions, org) keep the legacy id-shaped `fileDedup` unchanged.
+  results = cfg.documentCap
+    ? capPerDocumentWithBackfill(results, cfg.documentCap.maxPerDoc)
+    : fileDedup(results, 3);
 
   // 7. Optional Jina rerank (off by default for org, on for sessions)
   if (cfg.jinaApiKey && results.length > 0) {

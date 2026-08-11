@@ -43,12 +43,13 @@
  * WHAT IS MEASURED, PRECISELY
  *
  * Probes shell out to `cli.ts`, so the measured surface is `cli:*` and nothing
- * else. The pi extension (`index.ts`) still carries inline retrieval paths —
- * `knowledge_search` calls `retrieve()` directly rather than `searchMdCore()` —
- * so CLI results do NOT prove the pi tool surface. That gap is reported as
- * `productionPathParity: unproven`, and closing it is a separate refactor.
- * Automated CLI diagnostics cannot close L3 in any case; the skill carries a
- * manual production-tool verification step for the steward.
+ * else. Since 2026-08-11 `knowledge_search` runs the SAME `searchMdCore()` this
+ * CLI does, so the md retrieval pipeline is now shared rather than copied — but
+ * shared code is not a measurement. Presentation, tool schema, and defaults
+ * still differ per surface, and this runner never executes the pi tool, so the
+ * verdict stays `productionPathParity: unproven`. Automated CLI diagnostics
+ * cannot close L3 in any case; the skill carries a manual production-tool
+ * verification step for the steward.
  *
  * COST. Default run is API 0: L1 plus probes with `mode: "recent"` (stored-
  * signal scans, no embedding call). Probes needing a query embedding are
@@ -79,10 +80,17 @@ export const ACCEPTANCE_SCHEMA_VERSION = 2;
  * label, not a guarantee — the automatic `pipelineDigest` below is what
  * actually notices source drift.
  */
-export const PIPELINE_CONTRACT_VERSION = "2026-08-10.a";
+export const PIPELINE_CONTRACT_VERSION = "2026-08-11.a";
 
-/** Files whose content defines retrieval behaviour, hashed into pipelineDigest. */
-const PIPELINE_SOURCES = ["retriever.ts", "md-search.ts", "cli.ts", "store.ts"];
+/**
+ * Files whose content defines retrieval behaviour, hashed into pipelineDigest.
+ *
+ * `index.ts` joined the list on 2026-08-11: `knowledge_search` now runs
+ * `searchMdCore()`, so the pi surface shares this pipeline and a change there
+ * (default limit, tool schema, presentation) is a change to what the steward
+ * actually receives.
+ */
+const PIPELINE_SOURCES = ["retriever.ts", "md-search.ts", "cli.ts", "store.ts", "index.ts"];
 
 /** A file appended to within this window cannot fairly be called a stale index. */
 export const LIVE_APPEND_WINDOW_MS = 15 * 60 * 1000;
@@ -1164,7 +1172,7 @@ export function assessProductionContract(
     measuredSurface: surface,
     productionPathParity: "unproven",
     parityNote:
-      "Measured through cli.ts only. The pi extension still carries inline retrieval paths (knowledge_search calls retrieve() directly rather than searchMdCore()), so these results do not prove the pi tool surface. A shared-core refactor is separate work.",
+      "Measured through cli.ts only. Since 2026-08-11 knowledge_search runs the same searchMdCore() as this CLI, so the md retrieval pipeline is shared rather than copied — but shared code is not a measurement: presentation, tool schema, and default limit still differ per surface and the pi tool is never executed here. Proving it needs the manual production-tool step in the andenken-acceptance skill.",
     exposes,
     note:
       "Measured from the production response payload itself. `implicit` means the information exists but the consumer must infer it (array order for rank; source strings that do not name the track). `absent` means the response cannot convey it at all. The explanations this report adds are DIAGNOSTIC and do not satisfy these rows.",

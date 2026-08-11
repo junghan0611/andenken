@@ -30,6 +30,12 @@ import {
   normalizeSourceFilter,
 } from "./session-indexer.js";
 import { retrieve, expandQueryForBM25, getShortCJKTokens, sortByTimestampDesc } from "./retriever.js";
+import {
+  searchMdCore,
+  formatMdScreen,
+  mdResultToJson,
+  MD_DEFAULT_LIMIT,
+} from "./md-search.js";
 import { readSessionExcerpt, type SessionExcerpt } from "./session-excerpt.js";
 import { recordRecall } from "./recall-log.js";
 
@@ -616,19 +622,18 @@ export default function (pi: ExtensionAPI) {
             if (!dimCheck.ok) {
               fallbackDiagnostic = `knowledge fallback skipped: ${dimCheck.reason ?? "md dim incompatible"}`;
             } else {
-              const mdCandidates = Math.min(limit * 4, 200);
-              const mdQueryVector = await mdP.embedQuery(enrichedQuery);
-              const mdVec = await getMdStore().search(mdQueryVector, mdCandidates, 0.05);
-              const mdFts = await getMdStore().fullTextSearch(expandQueryForBM25(enrichedQuery), mdCandidates);
-              await augmentShortCjkFts(params.query, getMdStore(), mdFts, mdCandidates);
-              const mdResults = await retrieve(params.query, mdVec, mdFts, {
-                vectorWeight: 0.7,
-                bm25Weight: 0.3,
-                recencyHalfLifeDays: 0,
-                minScore: 0.05,
-                mmr: { enabled: true, lambda: 0.7 },
-                mergeStrategy: "weighted" as const,
-              });
+              // The fallback answers from the md track, so it runs the md core
+              // rather than a third copy of that pipeline. Session ordering,
+              // the 3-row budget, and the output shape are unchanged; what the
+              // core adds is the stable candidate floor and the lossless
+              // per-document cap.
+              const { results: mdResults } = await searchMdCore(
+                getMdStore(),
+                mdP,
+                params.query,
+                3,
+                { expandFn: dictcliExpand },
+              );
               if (mdResults.length > 0) {
                 results = [...results.slice(0, limit - 3), ...mdResults.slice(0, 3)];
                 fallbackUsed = true;
@@ -639,7 +644,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       const finalResults = results.slice(0, limit);
-      recordRecall(params.query, "session_search", finalResults);
+      recordRecall(params.query, "session_search", finalResults, { limit });
 
       // C2.1c — opt-in excerpt attachment for top hits.
       // Pure read-only: no API, no DB write. We tolerate per-file errors
@@ -675,10 +680,12 @@ export default function (pi: ExtensionAPI) {
       "Search public garden Markdown semantically — notes, concepts, references in Korean and English.",
     promptGuidelines: [
       "Use knowledge_search when the user asks about their notes, concepts, or knowledge base.",
-      "Use knowledge_search for cross-lingual queries — Korean '보편' finds English-tagged 'universalism' notes.",
-      "Prefer knowledge_search over denotecli for semantic/conceptual search. Use denotecli for exact title/tag matching.",
+      "Use knowledge_search for cross-lingual queries — Korean '보편' finds English-tagged 'universalism' notes. Expansion only fires when the query itself contains Hangul.",
+      "Judge from the top 3-5 documents. The first screen groups chunks by document and shows each note's own description; widen the limit only when that screen is genuinely sparse, not by habit.",
+      "Choose a document, then open its file path to read it. Do not re-query for text you can read directly.",
+      "The score is a per-query normalized rank, not a confidence. The top md hit sits near 1.0 whatever the match quality, and md scores are NOT comparable with session_search scores.",
+      "For a person or any existence question ('is there a note about X?'), knowledge_search returns CANDIDATES only. Confirm with denotecli exact title/tag search before asserting that a note exists or writing a link to it.",
       "If results are sparse, extract keywords from top results and re-search with more specific terms. Try dictcli expand for Korean→English term expansion.",
-      "Korean verb stems are auto-indexed via dictcli stem (Kiwi). Searching '설계' matches notes containing '설계했다', '설계하는' etc. Compound nouns like '검색증강생성' are decomposed into '검색'+'증강'+'생성'.",
     ],
     parameters: Type.Object({
       query: Type.String({
@@ -687,8 +694,9 @@ export default function (pi: ExtensionAPI) {
       }),
       limit: Type.Optional(
         Type.Number({
-          description: "Max results (default 10)",
-          default: 10,
+          description:
+            `Max chunks to display (default ${MD_DEFAULT_LIMIT}). The candidate pool has a floor of 40, so for any limit up to 10 this changes how much you read, not what can be found. Above 10 the pool grows with the limit and the ranking itself can shift.`,
+          default: MD_DEFAULT_LIMIT,
         }),
       ),
     }),
@@ -726,36 +734,42 @@ export default function (pi: ExtensionAPI) {
         );
       }
 
-      const limit = params.limit ?? 10;
+      const limit = params.limit ?? MD_DEFAULT_LIMIT;
 
-      // 3층 dictcli expand — 한글 쿼리 확장
-      const expanded = dictcliExpand(params.query);
-      const enrichedQuery = expanded.length > 0
-        ? `${params.query} ${expanded.join(" ")}`
-        : params.query;
-
-      const candidates = Math.min(limit * 4, 200); // openclaw candidateMultiplier
-      const queryVector = await mdP.embedQuery(enrichedQuery);
-      const vectorResults = await getMdStore().search(queryVector, candidates, 0.05);
-      const bm25Query = expandQueryForBM25(enrichedQuery); // include dictcli expand terms in FTS
-      const ftsResults = await getMdStore().fullTextSearch(bm25Query, candidates);
-      await augmentShortCjkFts(params.query, getMdStore(), ftsResults, candidates);
-
-      const results = await retrieve(params.query, vectorResults, ftsResults, {
-        vectorWeight: 0.7,
-        bm25Weight: 0.3,
-        recencyHalfLifeDays: 0,
-        minScore: 0.05,
-        mmr: { enabled: true, lambda: 0.7 },
-        mergeStrategy: "weighted" as const,
-      });
-
-      const finalResults = results.slice(0, limit);
-      recordRecall(params.query, "knowledge_search", finalResults);
-      return formatResults(
-        expanded.length > 0 ? `${params.query} (+expand: ${expanded.join(", ")})` : params.query,
-        finalResults,
+      // Production path parity: this tool runs the SAME function as
+      // `cli.ts search-md` and `golden-queries.ts`. It used to carry a
+      // line-by-line copy of that pipeline, which meant the golden gate and
+      // `./run.sh accept` measured a function no agent ever called.
+      // `expandFn` keeps this surface's 30-minute expansion cache.
+      const { results: finalResults, expanded } = await searchMdCore(
+        getMdStore(),
+        mdP,
+        params.query,
+        limit,
+        { expandFn: dictcliExpand },
       );
+
+      recordRecall(params.query, "knowledge_search", finalResults, { limit });
+
+      // The model-visible screen echoes the caller's own query and nothing
+      // else. Expansion terms are unbounded (one per matched Korean word, from
+      // dictcli) and carry no decision value on the first screen, so they live
+      // in `details`, which pi never sends to the model.
+      return {
+        content: [
+          { type: "text" as const, text: formatMdScreen(params.query, finalResults) },
+        ],
+        details: {
+          query: params.query,
+          expanded,
+          limit,
+          resultCount: finalResults.length,
+          results: finalResults.map((r) => ({
+            id: r.id,
+            ...mdResultToJson(r),
+          })),
+        },
+      };
     },
   });
 
@@ -897,39 +911,10 @@ async function fetchExcerptsForResults(
   return out;
 }
 
-async function augmentShortCjkFts(
-  query: string,
-  store: VectorStore,
-  ftsResults: SearchResult[],
-  candidates: number,
-): Promise<void> {
-  const shortTokens = getShortCJKTokens(query);
-  if (shortTokens.length === 0) return;
-
-  const ftsIds = new Set(ftsResults.map((r) => r.id));
-  const subLists = await Promise.all(
-    shortTokens.map((t) => store.substringSearch(t, candidates)),
-  );
-  const subFlat: SearchResult[] = [];
-  const subSeen = new Set<string>();
-  for (const list of subLists) {
-    for (const r of list) {
-      if (ftsIds.has(r.id) || subSeen.has(r.id)) continue;
-      subFlat.push(r);
-      subSeen.add(r.id);
-    }
-  }
-  if (subFlat.length === 0) return;
-
-  const ftsCopy = ftsResults.slice();
-  ftsResults.length = 0;
-  let i = 0;
-  let j = 0;
-  while (i < ftsCopy.length || j < subFlat.length) {
-    if (i < ftsCopy.length) ftsResults.push(ftsCopy[i++]);
-    if (j < subFlat.length) ftsResults.push(subFlat[j++]);
-  }
-}
+// `augmentShortCjkFts` lived here as a second copy of the short-CJK substring
+// fallback in `md-search.ts`. Both md callers on this surface (knowledge_search
+// and the session cross-track fallback) now run `searchMdCore`, which owns that
+// step, so the copy was removed rather than left to drift.
 
 function formatResults(
   query: string,
