@@ -21,6 +21,10 @@
 - 맥락 노트: [[botlog]] `20260406T140411` §andenken — llm-wiki·OKF·EKG 수렴.
   EKG/semext(ahyatt) 동행 좌표도 거기.
 
+## Parked — Copilot third source
+
+- **안 함.** 양식은 커버 가능, 사용자 턴 코퍼스는 없다. 보라: [#9](https://github.com/junghan0611/andenken/issues/9).
+
 ## 세션 코퍼스 — 파일명 정렬 뒤 남은 것 (2026-08-10)
 
 파일명 축은 `v2026.8.10`으로 닫혔다 → [CHANGELOG.md](./CHANGELOG.md).
