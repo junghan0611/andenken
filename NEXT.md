@@ -89,15 +89,33 @@
 - **`"피투성"` (md)** — md 축이고 오늘 밤 md 인덱스는 손대지 않았으므로 이번
   작업이 만든 것이 아니다. **세션 축 실패는 위 1건뿐이고 그것도 assertion 이슈다.**
 
+### 가드가 좁았다 — 인덱싱 진입 전으로 올렸다 (`ae8c5fb`)
+
+agent-config 담당자가 `memory-sync`를 다시 읽다가 잡았다(검수 범위 밖이었다).
+
+**측정**: `INDEX_AUTHORITY` 참조가 `push_replica()` 안에만 있었고 `:203`의
+`indexer.ts sessions`는 무방비였다. 즉 **정본 인덱스는 나쁜 push로부터 지켜지는데
+리플리카가 스스로를 포크하는 것은 열려 있었다** — 그게 §7.1이 실제로 이름 붙인
+실패다(2026-06-19→07-06, 27,966 vs 24,882). 그리고 `memory-sync`는
+user_invocable에 모든 기기에 링크되고 "그냥 부르면 된다"고 쓰여 있으니,
+오라클에서 "기억이 오래된 것 같은데" → `/memory-sync`가 한 수 거리였다.
+
+수선: 어떤 작업보다 먼저 거절, 탈출구는 `ANDENKEN_ALLOW_REPLICA_INDEX=1`.
+거절 메시지가 대안을 말한다(이 기계 세션도 gather로 authority에 가서 인덱스에
+담겨 돌아온다). 격리 테스트 4경로 + thinkpad 실제 실행(3파일 err:0) 확인.
+
 ### 남은 것
 
-1. **`git push`** — 커밋 8개가 로컬에만 있다. GLG 승인 대기.
-   **오라클 코드는 아직 `14ccdc5`**, 즉 `--push` 가드가 없는 버전이다. 오라클에서
-   실수로 `--push`를 치면 막아줄 것이 없다. push → 오라클 `git pull`이 필요하다.
-   (agent-config 쪽 커밋 2개도 그쪽에서 푸시 대기 중.)
+1. **`git push`** — 커밋 10개가 로컬에만 있다. GLG 승인 대기.
+   **오라클 코드는 아직 `14ccdc5`**, 즉 **push 가드도 인덱싱 가드도 둘 다 없는**
+   버전이다. pull 전까지 **오라클에서 `sync:sessions` / `/memory-sync`를 부르지
+   않는 것이 유일한 방어**다. push → 오라클 `git pull`이 필요하다.
+   (agent-config 쪽 커밋 4개도 그쪽에서 푸시 대기 중.)
 2. **이슈 [#11](https://github.com/junghan0611/andenken/issues/11) 코멘트** —
    `.agent-reports/issue11-followup-draft.md`에 작성해두고 **게시하지 않았다.**
-3. **골든 세션 분기 추출** — `searchMdCore`처럼 공유 코어를 부르게 하면 이 부류의
+3. **형제 공지** — agent-config 담당자와 순서 합의: 오라클 pull이 끝난 **뒤에**
+   공지한다. 지금 공지하면 오라클 형제가 가드 없는 `14ccdc5`를 상대로 움직인다.
+4. **골든 세션 분기 추출** — `searchMdCore`처럼 공유 코어를 부르게 하면 이 부류의
    divergence가 구조적으로 죽는다. 이번엔 값만 맞췄다.
 
 ## 굽고 나서
