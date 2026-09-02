@@ -30,6 +30,20 @@
 # It is re-evaluated on every run, so a session that was below the 300KB floor
 # last time is picked up once it grows past it.
 #
+# WHICH devices is not decided here — `<corpus>/DEVICES.json` is the roster, so
+# it travels with the corpus rather than living in this repo. A device declares
+# how its sessions reach the corpus:
+#
+#   local  this machine (matched by ~/.current-device); gathered directly
+#   ssh    pullable by another host via its `target` alias
+#   push   delivers itself; nobody tries to pull it
+#
+# The push case is why the roster is not just a list of hostnames. Measured
+# 2026-09-02: oracle -> thinkpad ssh is refused, and even if it were opened, a
+# laptop that is asleep or away cannot be pulled from. So thinkpad pushes (see
+# scripts/replicate-corpus.sh) and oracle gathers only itself — a host never
+# blocks on a peer it was never supposed to reach.
+#
 # Usage:
 #   ./scripts/gather-corpus.sh                  # all devices
 #   ./scripts/gather-corpus.sh --dry-run        # plan only, copy nothing
@@ -46,7 +60,7 @@ cd "$(dirname "$0")/.."   # repo root
 CORPUS="${ANDENKEN_SESSION_CORPUS:-${SESSION_CORPUS:-$HOME/repos/gh/session}}"
 CORPUS="${CORPUS/#\~/$HOME}"
 ADMIT="$PWD/scripts/corpus-admit.py"
-REMOTES=(oracle)
+ROSTER="$CORPUS/DEVICES.json"
 
 DRY=0
 ONLY=""
@@ -90,7 +104,28 @@ if [ -z "$ONLY" ] || [ "$ONLY" = "$LOCAL_DEVICE" ]; then
   gather_device "$LOCAL_DEVICE" "$LISTDIR/$LOCAL_DEVICE.txt" "$HOME/"
 fi
 
-# --- remote devices ---
+# --- roster ---
+# Active devices, minus this one. Each row is "<id> <transport> <target>".
+# A missing roster falls back to local-only, which is the honest reading of "no
+# roster": gather what this machine has and claim nothing about peers.
+PEERS=()
+if [ -f "$ROSTER" ]; then
+  while read -r line; do
+    [ -n "$line" ] && PEERS+=("$line")
+  done < <(ROSTER="$ROSTER" LOCAL="$LOCAL_DEVICE" python3 -c '
+import json, os
+roster = json.load(open(os.environ["ROSTER"]))
+for d in roster.get("devices", []):
+    if d.get("state") != "active":
+        continue
+    if d.get("id") == os.environ["LOCAL"]:
+        continue
+    print(d["id"], d.get("transport", "ssh"), d.get("target", d["id"]))
+')
+else
+  echo "⚠ no roster at $ROSTER — gathering this device only"
+fi
+
 # corpus-admit.py is piped over ssh rather than run from a remote checkout, so
 # gathering never depends on the remote having an andenken working tree.
 #
@@ -99,16 +134,25 @@ fi
 # failing hard here would mean a laptop off the network stops indexing its own
 # sessions too.
 UNREACHABLE=()
-for remote in "${REMOTES[@]}"; do
-  [ -z "$ONLY" ] || [ "$ONLY" = "$remote" ] || continue
-  echo "== enumerating $remote (remote) =="
-  if ! REMOTE_HOME="$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$remote" 'printf %s "$HOME"' 2>/dev/null)"; then
-    echo "   ⚠ $remote unreachable — skipped (corpus keeps what it already has)"
-    UNREACHABLE+=("$remote")
+for peer in "${PEERS[@]}"; do
+  read -r device transport target <<<"$peer"
+  [ -z "$ONLY" ] || [ "$ONLY" = "$device" ] || continue
+
+  if [ "$transport" = "push" ]; then
+    # Not a gap: this device delivers itself. Say so, so a reader does not
+    # mistake the silence for a device we forgot.
+    echo "== $device: delivered by push — not pulled from here =="
     continue
   fi
-  ssh -o BatchMode=yes "$remote" 'python3 - ' < "$ADMIT" > "$LISTDIR/$remote.txt"
-  gather_device "$remote" "$LISTDIR/$remote.txt" "$remote:$REMOTE_HOME/"
+
+  echo "== enumerating $device (remote: $target) =="
+  if ! REMOTE_HOME="$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$target" 'printf %s "$HOME"' 2>/dev/null)"; then
+    echo "   ⚠ $device unreachable — skipped (corpus keeps what it already has)"
+    UNREACHABLE+=("$device")
+    continue
+  fi
+  ssh -o BatchMode=yes "$target" 'python3 - ' < "$ADMIT" > "$LISTDIR/$device.txt"
+  gather_device "$device" "$LISTDIR/$device.txt" "$target:$REMOTE_HOME/"
 done
 
 echo "== done =="

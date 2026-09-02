@@ -106,6 +106,7 @@ Usage: ./run.sh <command> [args]
   corpus:gather [--dry-run]   Collect admitted sessions from every device
   corpus:manifest [update|verify|status]
                               Inventory + sha256 integrity (git replacement)
+  corpus:replicate [--to X]   Push the corpus to devices that cannot be pulled
 
 === Acceptance (user-facing quality — layers 1/2/3) ===
   accept [flags]              Acceptance report. DEFAULT IS API 0: index health +
@@ -175,7 +176,17 @@ case "${1:-help}" in
 
   # === Index ===
   index:sessions)
-    shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts sessions "$@" ;;
+    # Bypasses the corpus gather that sync:sessions performs, so in corpus mode
+    # it indexes whatever snapshot happens to be on disk. That is a legitimate
+    # thing to want while debugging the indexer, and a silent wrong answer if
+    # you reached for it expecting "embed my sessions". Say which one this is.
+    shift; load_env; cd "$SCRIPT_DIR"
+    if [ -n "${ANDENKEN_SESSION_CORPUS:-}" ]; then
+      echo "⚠ index:sessions does NOT gather — the corpus is used as-is."
+      echo "  For the normal 'embed my sessions' path use:  ./run.sh sync:sessions"
+      echo "  Continuing in 3s (Ctrl-C to stop)…" && sleep 3
+    fi
+    pnpm exec tsx indexer.ts sessions "$@" ;;
   index:md)
     shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts md "$@" ;;
   sync:md)
@@ -222,6 +233,8 @@ case "${1:-help}" in
     shift; load_env; cd "$SCRIPT_DIR" && bash scripts/gather-corpus.sh "$@" ;;
   corpus:manifest)
     shift; load_env; cd "$SCRIPT_DIR" && bash scripts/corpus-manifest.sh "${1:-update}" ;;
+  corpus:replicate)
+    shift; load_env; cd "$SCRIPT_DIR" && bash scripts/replicate-corpus.sh "$@" ;;
 
   # === Golden Queries ===
   golden)

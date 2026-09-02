@@ -51,8 +51,50 @@ export ANDENKEN_SESSION_TIMEOUT_MS=60000
 export ANDENKEN_SESSION_PAID_REMOTE=1
 export ANDENKEN_SESSION_PRICE_PER_M_TOKENS="${ANDENKEN_SESSION_PRICE_PER_M_TOKENS:-${OPENROUTER_QWEN_8B_PRICE:-0.01}}"
 
+# --dry-run is detected here rather than at Step 2, because Step 0 (gather) and
+# the estimate both need to know before they run. Step 2 keeps its own check as
+# the actual exit point.
+DRY_RUN=0
+[ "${1:-}" = "--dry-run" ] && DRY_RUN=1
+
+# --- Single-writer lock (flock) ---
+# The sessions index is a single-writer LanceDB store, and a full rebuild holds
+# the writer for hours. sync-sessions.sh takes this same lock; without it here,
+# the hourly timer could walk into a destroy/rebuild mid-flight. Take it BEFORE
+# the destroy so a losing run never gets far enough to remove anything.
+LOCKFILE="data/.sync-sessions.lock"
+if command -v flock >/dev/null 2>&1; then
+  mkdir -p data
+  exec 9>"$LOCKFILE"
+  if ! flock -n 9; then
+    echo "⚠ another sessions writer holds the lock ($LOCKFILE) — refusing to rebuild"
+    exit 1
+  fi
+fi
+
+# --- Step 0: gather the corpus (API 0) ---
+# Before the estimate, not after: a rebuild is the one moment the whole corpus is
+# read, so it must be the whole corpus. Gathering here also means the estimate
+# below counts the merged corpus rather than whatever snapshot happened to be on
+# disk, and a gather failure lands before the destroy instead of after it.
+#
+# Not run under --dry-run: "dry run" must not mutate the corpus. The estimate
+# there is explicitly about the corpus as it stands, and the output says so.
+if [ -n "${ANDENKEN_SESSION_CORPUS:-}" ] && [ "${SKIP_GATHER:-0}" != "1" ] && [ "${DRY_RUN:-0}" != "1" ]; then
+  echo "== Step 0: gather corpus: $ANDENKEN_SESSION_CORPUS =="
+  if ! ./scripts/gather-corpus.sh > "$LOCKFILE.gather" 2>&1; then
+    echo "❌ gather-corpus failed — refusing to destroy an index for a corpus of unknown freshness"
+    tail -20 "$LOCKFILE.gather"
+    exit 1
+  fi
+  grep -E '^(==|⚠|corpus:)' "$LOCKFILE.gather" || true
+fi
+
 # --- Step 1: estimate (API 0) ---
 echo "== Step 1/6: estimate (FULL REBUILD, API 0) =="
+if [ -n "${ANDENKEN_SESSION_CORPUS:-}" ] && [ "${DRY_RUN:-0}" = "1" ]; then
+  echo "   (dry-run: estimate reflects the corpus AS IT STANDS — no gather was run)"
+fi
 pnpm exec tsx indexer.ts estimate sessions --full
 echo
 
