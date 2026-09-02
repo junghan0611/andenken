@@ -1,35 +1,56 @@
 # NEXT — andenken
 
-> RAIL: 세션 코퍼스 통합 → **[NOW] 오라클 굽기 직전** → 검증 → thinkpad 배포
+> RAIL: 세션 코퍼스 통합 → **[NOW] thinkpad에서 굽는 중** → 검증 → 오라클 배포
 >
-> 오늘(2026-09-02) 코퍼스·분할·decay·재현성까지 끝났고, 굽기 직전 세 개 중
-> 하나가 열려 있다. 아래 NOW부터 읽으면 그대로 이어진다.
+> 2026-09-02 밤, 방향을 되돌렸다. 굽는 곳은 오라클이 아니라 **노트북**이다.
+> 그게 `INVARIANT.md` §7.1이 원래 말하던 기본 시나리오이고, 코퍼스 gather가
+> 바로 그 §7.1의 "오라클 고유 세션은 소스 파일로 canonical host에 도달한다"를
+> 구현한 것이다. 아래 NOW부터 읽으면 그대로 이어진다.
 
-## NOW — 오라클에서 임베딩 걸기 전에 남은 것
+## NOW — thinkpad에서 전량 재구축 진행 중
 
-**상태**: 양 기계 코드 HEAD `14ccdc5`(+미커밋 1건), 코퍼스 2,155파일 2.9GB가
-양쪽 동일(sha256 전건 OK), 견적 1,602파일 / ~75k chunks / $0.248.
-thinkpad에는 중단된 400/1592 반쪽 인덱스가 남아 있다.
+**굽기 직전 기록** (2026-09-02T22:28:43 KST 시작):
 
-1. **[미커밋] `sync-sessions.sh`의 `--push` authority 가드를 커밋한다.**
-   `ANDENKEN_INDEX_AUTHORITY`(기본 `oracle`)와 `~/.current-device`가 다르면
-   거부한다. 로직 자체는 격리 테스트로 확인했다(thinkpad→거부, oracle→통과).
-   **왜 급한가**: `push_replica()`는 `rsync --delete`로 오라클 인덱스 경로에
-   밀어넣는다. 서버가 몇 시간 구운 완성본을 이 노트북의 반쪽 인덱스가 말없이
-   덮을 수 있다. 스크립트 전체를 실행해 확인하려 하지 말 것 — `status --json`이
-   코퍼스 전수 discovery라 10분 넘게 걸린다.
+| | |
+|---|---|
+| 코드 HEAD | `668835b` |
+| device | thinkpad (canonical host) |
+| 코퍼스 | 2,162파일 3.0GB — thinkpad 1,141 / oracle 1,021 |
+| MANIFEST.sha256 digest | `04dbc57230059589…` |
+| provider / model / dim | vllm(sessions:openrouter) / `qwen/qwen3-embedding-8b` / 4096 (preflight OK) |
+| 견적 | 1,609파일 / ~75,257 chunks / 62.2M chars / **$0.2487** |
+| ETA | 약 2.2시간 |
 
-2. **커밋 + 푸시**, 오라클에서 `git pull`.
+진행: `tmux attach -t bake`, 로그는 `/tmp/bake-*.log`.
 
-3. **오라클 tmux에서 굽기**: `cd ~/repos/gh/andenken && ./run.sh rebuild:sessions`
-   (대화형 `yes` 필요). 약 2.5~3시간.
-   굽는 동안 **thinkpad에서 `corpus:replicate`와 `sync:sessions`를 돌리지 말 것** —
-   코퍼스 lock이 아직 없어서 입력 snapshot이 운영 규율로만 고정된다(Sol 판정).
-   굽기 시작 전 최종 MANIFEST digest / HEAD / provider·model·dim을 한 줄 기록.
+**굽는 동안 하지 말 것**
+- 다른 셸에서 `corpus:replicate` / `sync:sessions` 금지. 코퍼스 lock이 아직
+  없어서 입력 snapshot이 운영 규율로만 고정된다(rsync는 파일 단위로만 atomic).
+- 오라클 세션 검색은 **maintenance로 간주**. 단 이번엔 오라클 인덱스가 굽히는
+  게 아니라 그냥 옛 replica이므로 위험이 아니라 stale일 뿐이다.
+- `status:json`을 습관적으로 부르지 말 것 — 코퍼스 전수 discovery라 10분+.
 
-4. 굽는 동안 오라클 세션 검색은 **maintenance로 간주**한다. full rebuild는 active
-   `data/sessions.lance`를 destroy하고 같은 경로를 채우므로, 중간 상태가 정상
-   DB처럼 보인다.
+### 끝난 것 (오늘 밤)
+
+- `8a9e13a` `--push` authority 가드
+- `668835b` 그 가드의 기본값을 `thinkpad`로 정정 — 처음에 `oracle`로 넣었는데
+  `INVARIANT.md` §7.1과 반대였다. §7.1은 canonical host가 유일한 writer이고
+  오라클은 인덱서를 돌리면 안 된다고 못박는다.
+- `10dafa9` `redact-credentials.py` 보류 보존
+- `d64d329` `andenken-embed` 스킬에 코퍼스 축을 문서화 — 스킬이 아직 "라이브
+  저장소를 인덱싱한다"고 말하고 있어서, 코퍼스가 어디서 오는지·레이아웃이 왜
+  계약인지·DEVICES.json과 MANIFEST의 역할 분리·굽는 중 금지 3건이 셸로만
+  읽히는 상태였다.
+
+### 굽기 끝나면 (순서대로)
+
+1. `./run.sh verify sessions` — dim 4096 / 중복 chunk id 0 / orphan 0
+2. cutover 무결성: 인덱스에 **옛 라이브 경로 0건**, build가 쓴 MANIFEST digest 기록
+3. 검증 4축 (아래 "굽고 나서")
+4. `./run.sh sync:sessions --push` — 가드가 thinkpad를 통과시킨다. DB와
+   `session-manifest.json`이 **함께** 간다(§6.6)
+5. agent-config 담당자를 **새로 불러** 소비자 축 스킬(session-recap / recall /
+   semantic-memory)이 통합 코퍼스 위에서 실제로 도는지 확인받는다.
 
 ## 굽고 나서
 
