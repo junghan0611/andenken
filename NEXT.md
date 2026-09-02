@@ -1,8 +1,67 @@
 # NEXT — andenken
 
-> 정체성 / 비교표 / 변화 기록 / 운영 신호 / 역할 분담은 [ROADMAP.md](./ROADMAP.md).
-> 이 파일은 **andenken에서 다음에 할 것들 / 잠시 주차한 것들**을 적는다.
-> 완료된 긴 히스토리는 ROADMAP.md / commit log로 보낸다.
+> RAIL: 세션 코퍼스 통합 → **[NOW] 오라클 굽기 직전** → 검증 → thinkpad 배포
+>
+> 오늘(2026-09-02) 코퍼스·분할·decay·재현성까지 끝났고, 굽기 직전 세 개 중
+> 하나가 열려 있다. 아래 NOW부터 읽으면 그대로 이어진다.
+
+## NOW — 오라클에서 임베딩 걸기 전에 남은 것
+
+**상태**: 양 기계 코드 HEAD `14ccdc5`(+미커밋 1건), 코퍼스 2,155파일 2.9GB가
+양쪽 동일(sha256 전건 OK), 견적 1,602파일 / ~75k chunks / $0.248.
+thinkpad에는 중단된 400/1592 반쪽 인덱스가 남아 있다.
+
+1. **[미커밋] `sync-sessions.sh`의 `--push` authority 가드를 커밋한다.**
+   `ANDENKEN_INDEX_AUTHORITY`(기본 `oracle`)와 `~/.current-device`가 다르면
+   거부한다. 로직 자체는 격리 테스트로 확인했다(thinkpad→거부, oracle→통과).
+   **왜 급한가**: `push_replica()`는 `rsync --delete`로 오라클 인덱스 경로에
+   밀어넣는다. 서버가 몇 시간 구운 완성본을 이 노트북의 반쪽 인덱스가 말없이
+   덮을 수 있다. 스크립트 전체를 실행해 확인하려 하지 말 것 — `status --json`이
+   코퍼스 전수 discovery라 10분 넘게 걸린다.
+
+2. **커밋 + 푸시**, 오라클에서 `git pull`.
+
+3. **오라클 tmux에서 굽기**: `cd ~/repos/gh/andenken && ./run.sh rebuild:sessions`
+   (대화형 `yes` 필요). 약 2.5~3시간.
+   굽는 동안 **thinkpad에서 `corpus:replicate`와 `sync:sessions`를 돌리지 말 것** —
+   코퍼스 lock이 아직 없어서 입력 snapshot이 운영 규율로만 고정된다(Sol 판정).
+   굽기 시작 전 최종 MANIFEST digest / HEAD / provider·model·dim을 한 줄 기록.
+
+4. 굽는 동안 오라클 세션 검색은 **maintenance로 간주**한다. full rebuild는 active
+   `data/sessions.lance`를 destroy하고 같은 경로를 채우므로, 중간 상태가 정상
+   DB처럼 보인다.
+
+## 굽고 나서
+
+- **검증**: (a) 6~12개월 전 판단 회수, (b) 2K에 잘려 있던 긴 프롬프트의 뒷부분,
+  (c) oracle 고유 세션(entwurf/openclaw workspace), (d) cutover 무결성 —
+  인덱스에 옛 라이브 경로 0건 / 중복 chunk id 0 / dim 4096.
+- **턴 단위 cap**: 긴 프롬프트 하나가 40+ chunk가 되어 top-k를 독점하는지 먼저
+  측정하고 수치를 정한다. 키는 `sessionFile` + `lineNumber`(둘 다 저장 컬럼) —
+  `canonicalDocId`를 재사용하면 세션 파일 축으로 무너진다.
+- **인덱스 배포 방향**: 오라클이 만들고 thinkpad가 당긴다. `sync:index`/`pull:index`
+  같은 표면 신설. staging으로 받아 verify 후 swap.
+- **shared prepare helper + receipt guard**: 지금은 두 wrapper에 gather 블록이
+  중복이고 indexer는 receipt를 검증하지 않는다. 세 번째 caller가 다시 구멍을 낸다.
+- **build-state sidecar**: complete / partial-stale / partial-absent.
+- **corpus lock 자동화**: host-local 고정 경로(`~/.local/state/andenken/…`).
+  acquisition order는 corpus → index로 통일(섞으면 deadlock).
+- **300KB floor 재판정**: 300KB 이하 962파일 중 925개가 의미 있는 user text를
+  갖고, 프롬프트 5,688개/4.05M자가 admission 밖이다(Sol 실측). "모든 프롬프트
+  원문 회수"와 동시에 참일 수 없다 — GLG 결정 대기.
+- **`truncateText` 죽은 코드 제거**(`session-indexer.ts:594`, 호출자 0건).
+
+## 보류 — 자격증명
+
+경계 강제 시 고유 20개(telegram 8, google-ai 8, gho_ 2, hf_ 1, slack 1,
+replicate 0). 임베딩 입력과의 교집합은 6 chunks / 4파일, 전부 `role=user`.
+**GLG 판단으로 치환 중단**(어차피 로테이션되는 값들). 라이브 저장소에는 1회
+적용됐고 코퍼스는 대부분 미적용 상태다. `scripts/redact-credentials.py`는
+남겨두었다.
+
+주의: 500 vs 20은 **다른 정규식이 잰 다른 축**이다. 500은 좌측 경계 없는 prefix
+매칭이 urlsafe-base64 본문에서 낸 오탐 포함이고, 20은 토큰 경계 강제 후다.
+나중에 훅 숫자와 비교할 때 "왜 줄었지"로 읽으면 안 된다.
 
 ## Watching — OKF (Open Knowledge Format, Google knowledge-catalog)
 
