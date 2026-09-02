@@ -7,50 +7,64 @@
 > 바로 그 §7.1의 "오라클 고유 세션은 소스 파일로 canonical host에 도달한다"를
 > 구현한 것이다. 아래 NOW부터 읽으면 그대로 이어진다.
 
-## NOW — thinkpad에서 전량 재구축 진행 중
+## NOW — 통합 세션 임베딩 가동됨 (2026-09-03 새벽 완료)
 
-**굽기 직전 기록** (2026-09-02T22:28:43 KST 시작):
+굽고, 검증하고, 오라클까지 전달했다. **여기서 하나 오라클에서 하나 세션 맥락이
+유지되는 구조가 실제로 돈다.**
 
 | | |
 |---|---|
-| 코드 HEAD | `668835b` |
-| device | thinkpad (canonical host) |
-| 코퍼스 | 2,162파일 3.0GB — thinkpad 1,141 / oracle 1,021 |
+| 코드 HEAD | `668835b` (+ 문서 커밋) — **아직 GitHub에 푸시 안 됨** |
+| 코퍼스 | 2,162파일 3.0GB, 양 기계 동일 |
 | MANIFEST.sha256 digest | `04dbc57230059589…` |
-| provider / model / dim | vllm(sessions:openrouter) / `qwen/qwen3-embedding-8b` / 4096 (preflight OK) |
-| 견적 | 1,609파일 / ~75,257 chunks / 62.2M chars / **$0.2487** |
-| ETA | 약 2.2시간 |
+| provider / model / dim | openrouter / `qwen/qwen3-embedding-8b` / 4096 |
+| 인덱스 | **75,267 chunks / 1,608 파일 / 1.7GB / 50 fragments** |
+| 비용 | 전량 $0.25 + 증분 $0.001 |
+| 소요 | 8,055초 (약 2시간 14분) |
+| verify | thinkpad ✅ / oracle ✅ (dim·중복0·orphan0·행수일치) |
 
-진행: `tmux attach -t bake`, 로그는 `/tmp/bake-*.log`.
+### 검증 4축 — 전부 통과
 
-**굽는 동안 하지 말 것**
-- 다른 셸에서 `corpus:replicate` / `sync:sessions` 금지. 코퍼스 lock이 아직
-  없어서 입력 snapshot이 운영 규율로만 고정된다(rsync는 파일 단위로만 atomic).
-- 오라클 세션 검색은 **maintenance로 간주**. 단 이번엔 오라클 인덱스가 굽히는
-  게 아니라 그냥 옛 replica이므로 위험이 아니라 stale일 뿐이다.
-- `status:json`을 습관적으로 부르지 말 것 — 코퍼스 전수 discovery라 10분+.
+- **(d) cutover 무결성** — 인덱스 경로 **100% 코퍼스**, 옛 라이브 경로 **0건**
+  (oracle 1,017 / thinkpad 592 = 1,609). `session-manifest.json` 직접 판독.
+- **(c) 합본 증명** — `"openclaw workspace bbot glg mini 설정"` 최상위 hit가
+  `oracle/.claude/projects/-home-node--openclaw-workspace/…`, thinkpad에 한 건도
+  없던 세션이다.
+- **(a) decay 제거** — 30-hit 프로브의 시점 분포가 2026-04(2) / 05(4) / 06(2) /
+  07(6) / 08(15) / 09(1). 옛 14일 half-life였다면 2026-04 hit는 `2^-10 ≈ 0.001`배로
+  `minScore` 아래였다. 다만 코퍼스 자체가 2026-04에서 시작하므로 **잰 것은 5개월이지
+  "6~12개월"이 아니다.**
+- **(b) 2K 절단 해소** — 7,371개 턴이 분할됐고 25,133 chunk(전체의 33%)가 오직 그
+  덕에 존재한다. 임베딩 DB 전수 census.
 
-### 끝난 것 (오늘 밤)
+### 굽는 중 실제로 난 일
 
-- `8a9e13a` `--push` authority 가드
-- `668835b` 그 가드의 기본값을 `thinkpad`로 정정 — 처음에 `oracle`로 넣었는데
-  `INVARIANT.md` §7.1과 반대였다. §7.1은 canonical host가 유일한 writer이고
-  오라클은 인덱서를 돌리면 안 된다고 못박는다.
-- `10dafa9` `redact-credentials.py` 보류 보존
-- `d64d329` `andenken-embed` 스킬에 코퍼스 축을 문서화 — 스킬이 아직 "라이브
-  저장소를 인덱싱한다"고 말하고 있어서, 코퍼스가 어디서 오는지·레이아웃이 왜
-  계약인지·DEVICES.json과 MANIFEST의 역할 분리·굽는 중 금지 3건이 셸로만
-  읽히는 상태였다.
+- **3파일 실패** — 전부 `vLLM request timeout (60s)` (oracle의 entwurf 2, 
+  legoagent-config 1). 데이터 결함이 아니라 OpenRouter 일시 실패다. 인덱서는 파일
+  단위 에러를 모아 **끝에 throw**하므로 인덱스 자체는 온전했고, 이어서 돌린
+  `sync:sessions` 증분이 6건(신규 3 + stale 3)을 err:0으로 채웠다. **재구축을 다시
+  돌릴 필요 없다** — 이게 이 실패모드의 정상 복구 경로다.
+- **오라클 orphan 7건** — 푸시 직후 verify에서 났다. 원인은 인덱스가 아니라
+  오라클 코퍼스가 그날 밤 gather보다 뒤처져 있던 것(2,155 vs 2,162).
+  `corpus:replicate` 후 재검증 ✅. **인덱스를 밀면 코퍼스도 같이 밀어야 한다.**
 
-### 굽기 끝나면 (순서대로)
+### 턴 cap — 미결 질문에 수치가 나왔다
 
-1. `./run.sh verify sessions` — dim 4096 / 중복 chunk id 0 / orphan 0
-2. cutover 무결성: 인덱스에 **옛 라이브 경로 0건**, build가 쓴 MANIFEST digest 기록
-3. 검증 4축 (아래 "굽고 나서")
-4. `./run.sh sync:sessions --push` — 가드가 thinkpad를 통과시킨다. DB와
-   `session-manifest.json`이 **함께** 간다(§6.6)
-5. agent-config 담당자를 **새로 불러** 소비자 축 스킬(session-recap / recall /
-   semantic-memory)이 통합 코퍼스 위에서 실제로 도는지 확인받는다.
+분할된 7,371턴의 parts 분포: 2–5 **6,110** · 6–10 **1,035** · 11–40 **222** ·
+**41+ 단 4개**(487, 386, 86, 49). 즉 **cap 40이면 건드리는 턴이 4개다.** top-k
+독점 위험은 실재하지만 극소수 꼬리에 몰려 있다. 키는 `sessionFile` + `lineNumber`
+(둘 다 저장 컬럼)이고 `canonicalDocId` 재사용은 세션 파일 축으로 무너진다.
+
+### 남은 것
+
+1. **`git push`** — 커밋 6개가 로컬에만 있다. GLG 승인 대기.
+   **오라클 코드는 아직 `14ccdc5`**, 즉 `--push` 가드가 없는 버전이다. 오라클에서
+   실수로 `--push`를 치면 막아줄 것이 없다. push → 오라클 `git pull`이 필요하다.
+2. **이슈 [#11](https://github.com/junghan0611/andenken/issues/11) 갱신** — §3의
+   "굽기 전" 항목이 전부 닫혔다.
+3. **agent-config 담당자 회신** — 소비자 축(session-recap / recall /
+   semantic-memory)이 통합 코퍼스 위에서 실제로 도는지 새 담당자에게 확인 요청함
+   (2026-09-03 새벽, claude-code/opus-5, cwd `~/repos/gh/agent-config`).
 
 ## 굽고 나서
 
