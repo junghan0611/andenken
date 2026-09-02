@@ -115,6 +115,11 @@ export ANDENKEN_SESSION_PRICE_PER_M_TOKENS="${ANDENKEN_SESSION_PRICE_PER_M_TOKEN
 # push while leaving the replica free to fork itself, and the friendly entry
 # points (the memory-sync skill, "기억 최신화") are exactly the ones a sibling on
 # the replica would reach for.
+#
+# It sits AFTER Step 0 on purpose: a refused call has already gathered, which is
+# the half a replica SHOULD do. Its sessions are in the corpus and reach the
+# index by the authority's next run. Refused does not mean nothing happened, and
+# it does not mean this machine falls behind.
 INDEX_AUTHORITY="${ANDENKEN_INDEX_AUTHORITY:-thinkpad}"
 LOCAL_DEVICE="$(cat "$HOME/.current-device" 2>/dev/null || hostname)"
 LOCAL_DEVICE="${LOCAL_DEVICE//[[:space:]]/}"
@@ -123,8 +128,9 @@ if [ "$LOCAL_DEVICE" != "$INDEX_AUTHORITY" ] && [ "${ANDENKEN_ALLOW_REPLICA_INDE
   echo "❌ refused: this is '$LOCAL_DEVICE'; only the index authority '$INDEX_AUTHORITY' writes the index."
   echo "   INVARIANT.md §7.1 — a replica that indexes its own sessions forks the corpus,"
   echo "   and no later push can reconcile the rows it invented."
-  echo "   This machine's sessions DO get indexed: they reach the authority as source"
-  echo "   files via the corpus gather, and come back inside the pushed index."
+  echo "   Not a no-op: the corpus gather above already ran, which is this machine's"
+  echo "   half. Its sessions reach the index as SOURCE FILES on the authority's next"
+  echo "   run and come back inside the pushed index. Refused ≠ falling behind."
   echo "   To move the authority:  ANDENKEN_INDEX_AUTHORITY=$LOCAL_DEVICE"
   echo "   To override once:       ANDENKEN_ALLOW_REPLICA_INDEX=1  (forks the corpus — know why)"
   echo "   (no API call was made)"

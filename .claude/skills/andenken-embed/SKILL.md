@@ -106,8 +106,14 @@ Two different disasters, one gate:
 
 Guarding only push leaves the second one open, and the friendly entry points —
 the `memory-sync` skill, "기억 최신화" — are exactly what a sibling on the replica
-reaches for. A replica's own sessions still get indexed: they travel to the
-authority as **source files** via the gather and come back inside the pushed index.
+reaches for.
+
+**The gate sits after Step 0, so a refused call has already gathered.** That is
+the half a replica should do: its sessions are in the corpus and reach the index
+as **source files** on the authority's next run, coming back inside the pushed
+index. Refused does not mean nothing happened, and it does not mean this machine
+falls behind — which is also why `ANDENKEN_ALLOW_REPLICA_INDEX=1` is not the way
+to "catch up". It forks the corpus; catching up is the authority's next run.
 
 ```
 ANDENKEN_INDEX_AUTHORITY=<device>   # move the authority deliberately
