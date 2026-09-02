@@ -208,10 +208,16 @@ async function testSessionIndexer() {
       `chunk role is valid: "${c.role}"`,
     );
 
-    // Text truncation
+    // Split bound, not truncation. Long turns are split, not cut, so the
+    // ceiling is the split target plus the short tail splitForEmbedding folds
+    // back into the last part rather than embedding it alone (session-indexer:
+    // CHUNK_TARGET_CHARS + minTailChars + the joining newline). Asserting the
+    // old 2000 + "..." here measured a truncation that no longer happens.
+    const SPLIT_CEILING = 2000 + 200 + 1;
+    const longest = Math.max(...chunks.map((ch) => ch.text.length));
     assert(
-      chunks.every((ch) => ch.text.length <= 2003), // 2000 + "..."
-      "all chunks ≤ 2000 chars",
+      longest <= SPLIT_CEILING,
+      `all chunks ≤ split ceiling ${SPLIT_CEILING} (longest ${longest})`,
     );
 
     // Short messages filtered

@@ -1,112 +1,67 @@
 # NEXT — andenken
 
-> RAIL: 세션 코퍼스 통합 → **[NOW] thinkpad에서 굽는 중** → 검증 → 오라클 배포
+> RAIL: 세션 코퍼스 통합 ✅ → **[NOW] 굽고 나서 남은 것** → 배포면 정리
 >
-> 2026-09-02 밤, 방향을 되돌렸다. 굽는 곳은 오라클이 아니라 **노트북**이다.
-> 그게 `INVARIANT.md` §7.1이 원래 말하던 기본 시나리오이고, 코퍼스 gather가
-> 바로 그 §7.1의 "오라클 고유 세션은 소스 파일로 canonical host에 도달한다"를
-> 구현한 것이다. 아래 NOW부터 읽으면 그대로 이어진다.
+> `v2026.9.3`으로 통합 세션 임베딩이 닫혔다 → [CHANGELOG.md](./CHANGELOG.md).
+> 실행 기록·측정치는 [#11](https://github.com/junghan0611/andenken/issues/11).
+> 여기 남은 것은 그 정렬이 **열어놓고 간 것들**이다.
 
-## NOW — 통합 세션 임베딩 가동됨 (2026-09-03 새벽 완료)
+## NOW — 굽고 나서
 
-굽고, 검증하고, 오라클까지 전달했다. **여기서 하나 오라클에서 하나 세션 맥락이
-유지되는 구조가 실제로 돈다.**
+인덱스는 살아 있다(75,290 chunks / 4096d / 양쪽 verify ✅). 아래는 그 위에서
+이어지는 것들이고, 순서는 위험한 것부터다.
 
-| | |
-|---|---|
-| 코드 HEAD | `668835b` (+ 문서 커밋) — **아직 GitHub에 푸시 안 됨** |
-| 코퍼스 | 2,162파일 3.0GB, 양 기계 동일 |
-| MANIFEST.sha256 digest | `04dbc57230059589…` |
-| provider / model / dim | openrouter / `qwen/qwen3-embedding-8b` / 4096 |
-| 인덱스 | **75,267 chunks / 1,608 파일 / 1.7GB / 50 fragments** |
-| 비용 | 전량 $0.25 + 증분 $0.001 |
-| 소요 | 8,055초 (약 2시간 14분) |
-| verify | thinkpad ✅ / oracle ✅ (dim·중복0·orphan0·행수일치) |
+1. **인덱스 배포 방향을 표면으로 만든다.** 지금은 `sync:sessions --push`가 유일한
+   경로이고 방향이 사람 손에 달려 있다. 오라클이 당기는 `pull:index`를 신설하고
+   staging으로 받아 verify 후 swap. **인덱스를 밀면 코퍼스도 같이 밀어야 한다** —
+   09-03에 오라클 orphan 7건이 정확히 이걸로 났다(코퍼스가 gather보다 뒤처짐).
+2. **corpus lock 자동화.** 굽는 동안 입력 snapshot이 **운영 규율로만** 고정된다.
+   rsync는 파일 단위로만 atomic하고 2,162개 전체는 아니다. host-local 고정 경로
+   (`~/.local/state/andenken/…`) — 코퍼스 안에 두면 replication 대상에 섞인다.
+   acquisition order는 `corpus → index`로 통일(섞으면 deadlock).
+3. **shared prepare helper + receipt guard.** 두 wrapper에 gather 블록이 중복이고
+   indexer는 receipt를 검증하지 않는다. **세 번째 caller가 다시 구멍을 낸다.**
+4. **골든 세션 분기 추출.** `searchMdCore`처럼 공유 코어를 부르게 한다. `f048a0a`는
+   값만 맞췄고, 사본이 남아 있는 한 다음 프로덕션 변경 때 또 뒤에 남는다.
+5. **턴 단위 cap.** 수치는 나왔다 — parts 분포 2–5 6,110 / 6–10 1,035 / 11–40 222 /
+   **41+ 단 4개**(487, 386, 86, 49). cap 40이면 4턴만 건드린다. 키는 `sessionFile` +
+   `lineNumber`(둘 다 저장 컬럼) — `canonicalDocId` 재사용은 세션 파일 축으로 무너진다.
+   `test.ts`의 "Sessions must not acquire a document cap"은 여전히 참이다(문서 상한이
+   아니라 턴 상한이다).
+6. **`truncateText` 죽은 코드 제거** (`session-indexer.ts`, 호출자 0건).
+7. **build-state sidecar**: complete / partial-stale / partial-absent. 추가 전용
+   코퍼스에서 원격 도달 불가는 "그 device 없는 인덱스"가 아니라 "마지막 성공
+   snapshot을 포함한 stale-partial 인덱스"다.
+8. **`~/.current-device` 폴백 제거 검토.** 파일이 없으면 hostname으로 떨어져 오타가
+   새 device 디렉터리를 만든다. 코퍼스 모드에서는 roster id와 정확히 일치하지 않으면
+   실패가 재현가능성에 맞다. (이제 authority 게이트도 이 값을 읽는다.)
+9. **winner path churn doctor.** chunk id가 `sessionFile:lineNumber`이고 삭제/재삽입이
+   물리 경로 기준이라, dedup 승자가 바뀌면 옛 경로 row가 남는다.
 
-### 검증 4축 — 전부 통과
+## GLG 결정 대기
 
-- **(d) cutover 무결성** — 인덱스 경로 **100% 코퍼스**, 옛 라이브 경로 **0건**
-  (oracle 1,017 / thinkpad 592 = 1,609). `session-manifest.json` 직접 판독.
-- **(c) 합본 증명** — `"openclaw workspace bbot glg mini 설정"` 최상위 hit가
-  `oracle/.claude/projects/-home-node--openclaw-workspace/…`, thinkpad에 한 건도
-  없던 세션이다.
-- **(a) decay 제거** — 30-hit 프로브의 시점 분포가 2026-04(2) / 05(4) / 06(2) /
-  07(6) / 08(15) / 09(1). 옛 14일 half-life였다면 2026-04 hit는 `2^-10 ≈ 0.001`배로
-  `minScore` 아래였다. 다만 코퍼스 자체가 2026-04에서 시작하므로 **잰 것은 5개월이지
-  "6~12개월"이 아니다.**
-- **(b) 2K 절단 해소** — 7,371개 턴이 분할됐고 25,133 chunk(전체의 33%)가 오직 그
-  덕에 존재한다. 임베딩 DB 전수 census.
+- **`git push`** — 태그와 함께. **오라클 코드는 아직 `14ccdc5`**, 즉 push 가드도
+  인덱싱 가드도 **둘 다 없는** 버전이다. pull 전까지 **오라클에서 `sync:sessions` /
+  `/memory-sync`를 부르지 않는 것이 유일한 방어**다. push → 오라클 `git pull`.
+  (agent-config 쪽 커밋 8개도 그쪽에서 대기 중.)
+- **이슈 #11 코멘트** — `.agent-reports/issue11-followup-draft.md`, 게시 안 함.
+- **형제 공지** — agent-config 담당자와 합의: 오라클 pull **뒤에** 한다. 지금 하면
+  오라클 형제가 가드 없는 버전을 상대로 움직인다.
+- **300KB floor 재판정** — 300KB 이하 962파일 중 925개가 의미 있는 user text를 갖고,
+  프롬프트 5,688개 / 4.05M자가 admission 밖이다. #10의 "모든 프롬프트 원문 회수"와
+  "300KB 이하 제외"는 동시에 참일 수 없다. 파일 크기는 대부분 tool 페이로드인데
+  임베딩은 tool을 제외하므로 **재는 것과 굽는 것이 다르다.**
+- **골든 `"남은 작업 뭐지"`** — decay를 빼니 깨졌다. 즉 recency에 기대 통과하던
+  케이스다. 지금 top-5는 전부 GLG가 실제로 그렇게 말한 발화인데 기대 키워드를 못
+  맞춘다 — **query-echo**(질문의 메아리가 답보다 위). assertion을 결과에 맞추는 건
+  게이트를 죽이는 짓이라 안 건드렸다.
+- **garden-id 333건** — 이미 인덱싱된 이 세션들은 discovery에서 빠지지만 청크는
+  남아 검색이 당분간 찾는다(의도된 상태). 매니페스트↔디스커버리 drift가 생기고 증분
+  sync는 스스로 제거하지 않는다. 유지 vs `./run.sh cleanup sessions`.
 
-### 굽는 중 실제로 난 일
+## 이번에 배운 것 — 결함 5건이 전부 같은 모양이었다
 
-- **3파일 실패** — 전부 `vLLM request timeout (60s)` (oracle의 entwurf 2, 
-  legoagent-config 1). 데이터 결함이 아니라 OpenRouter 일시 실패다. 인덱서는 파일
-  단위 에러를 모아 **끝에 throw**하므로 인덱스 자체는 온전했고, 이어서 돌린
-  `sync:sessions` 증분이 6건(신규 3 + stale 3)을 err:0으로 채웠다. **재구축을 다시
-  돌릴 필요 없다** — 이게 이 실패모드의 정상 복구 경로다.
-- **오라클 orphan 7건** — 푸시 직후 verify에서 났다. 원인은 인덱스가 아니라
-  오라클 코퍼스가 그날 밤 gather보다 뒤처져 있던 것(2,155 vs 2,162).
-  `corpus:replicate` 후 재검증 ✅. **인덱스를 밀면 코퍼스도 같이 밀어야 한다.**
-
-### 턴 cap — 미결 질문에 수치가 나왔다
-
-분할된 7,371턴의 parts 분포: 2–5 **6,110** · 6–10 **1,035** · 11–40 **222** ·
-**41+ 단 4개**(487, 386, 86, 49). 즉 **cap 40이면 건드리는 턴이 4개다.** top-k
-독점 위험은 실재하지만 극소수 꼬리에 몰려 있다. 키는 `sessionFile` + `lineNumber`
-(둘 다 저장 컬럼)이고 `canonicalDocId` 재사용은 세션 파일 축으로 무너진다.
-
-### 교차검수 — agent-config 담당자(fresh, opus-5)와 주고받은 것
-
-**같은 뿌리의 결함이 양쪽에 하나씩 있었다: 공유 코어를 한쪽만 안 쓴다.**
-
-- **소비자 축(그쪽이 찾아 수선)**: `semantic-memory` → `session-recap --session-file`
-  이음매가 **전부 거부**되고 있었다. 코드가 아니라 env 신선도 — 그 셸에
-  `ANDENKEN_SESSION_CORPUS`만 없었고(`~/.env.local`에 그 줄이 추가된 시각보다
-  먼저 뜬 세션), 반환 `file`은 100% 코퍼스 경로인데 recap이 100% 거부했다.
-  두 스킬이 `os.environ`만 보고 있었다. 또 `--device`가 기본 `--skip 1`에
-  최신 세션을 뺏기고 있었다(현재 세션은 라이브에 있어 어떤 device 값에도 안
-  걸리므로 skip이 남의 기기의 진짜 최신을 버린다). 둘 다 수선됨(`15e2385`, `6cf49d5`).
-- **내 SKILL.md(그쪽이 지적, 내가 수선 `969f8e5`)**: "코퍼스를 인덱싱한다"를
-  **무조건문**으로 썼는데 `sync-sessions.sh`의 Step 0 gather는 조건부다. unset이면 조용히
-  라이브를 인덱싱한다. `run.sh`가 `.env.local`을 소싱하고 `sync-sessions.sh` 자신도 그 변수 하나를 폴백해서 정상 경로는 안전하지만
-  그 사실이 문서에 없었다. 굽기 전 provenance 한 줄도 명령이 없는 규율이었다 →
-  실행 검증한 레시피로 교체.
-- **골든 하네스(내가 발견, 수선 `f048a0a`)**: `golden-queries.ts`의 세션 분기(`retrieve()` 호출, 오늘 `f048a0a`로 `0`이 됨)가
-  분기에 `recencyHalfLifeDays: 14`를 **인라인으로** 주입하고 있었다. 프로덕션은
-  `0`이다(`cli.ts`/`index.ts`의 `searchSessions` 경로, 2026-09-03 판독) — 코드베이스에 남은 유일한 `14`였다.
-  게이트가 몇 달 된 hit를 `minScore` 아래로 지운 뒤 그 부재를 근거로 질의를
-  실패시키고 있었다. md 분기는 `searchMdCore`를 부르는데 세션 분기만 복제본이라
-  09-02의 decay 제거가 게이트에 안 닿았다. **`operational-recovery` 4/5 → 5/5.**
-
-### 골든 30/32 — 남은 2건은 판단 항목 (튜닝하지 않았다)
-
-- **`"남은 작업 뭐지"` (session)** — decay를 빼니 새로 깨졌다. 즉 이 케이스는
-  recency에 기대 통과하고 있었다. 지금 top-5는 전부 GLG가 실제로 그렇게 말한
-  발화인데(`"더 남은 작업은?"`, `"응 작업 할게 뭐지?"`) `expectKeywords:
-  ["TODO","NEXT","pending","다음"]`을 못 맞춘다. **query-echo** — 질문의 메아리가
-  답보다 위에 온다. assertion을 결과에 맞춰 고치는 건 테스트를 결과에 끼워
-  맞추는 것이라 안 건드렸다. **GLG 판단.**
-- **`"피투성"` (md)** — md 축이고 오늘 밤 md 인덱스는 손대지 않았으므로 이번
-  작업이 만든 것이 아니다. **세션 축 실패는 위 1건뿐이고 그것도 assertion 이슈다.**
-
-### 가드가 좁았다 — 인덱싱 진입 전으로 올렸다 (`ae8c5fb`)
-
-agent-config 담당자가 `memory-sync`를 다시 읽다가 잡았다(검수 범위 밖이었다).
-
-**측정**: `INDEX_AUTHORITY` 참조가 `push_replica()` 안에만 있었고 `:203`의
-`indexer.ts sessions`는 무방비였다. 즉 **정본 인덱스는 나쁜 push로부터 지켜지는데
-리플리카가 스스로를 포크하는 것은 열려 있었다** — 그게 §7.1이 실제로 이름 붙인
-실패다(2026-06-19→07-06, 27,966 vs 24,882). 그리고 `memory-sync`는
-user_invocable에 모든 기기에 링크되고 "그냥 부르면 된다"고 쓰여 있으니,
-오라클에서 "기억이 오래된 것 같은데" → `/memory-sync`가 한 수 거리였다.
-
-수선: 어떤 작업보다 먼저 거절, 탈출구는 `ANDENKEN_ALLOW_REPLICA_INDEX=1`.
-거절 메시지가 대안을 말한다(이 기계 세션도 gather로 authority에 가서 인덱스에
-담겨 돌아온다). 격리 테스트 4경로 + thinkpad 실제 실행(3파일 err:0) 확인.
-
-### 오늘 밤 결함 4건은 전부 같은 모양이었다
-
-한쪽만 공유 경로를 안 쓴다 — 그리고 **넷 다 그 한쪽만 보면 안 보인다.**
+한쪽만 공유 경로를 안 쓴다. **넷 다 그 한쪽만 보면 안 보인다.**
 
 | 결함 | 공유 경로 | 안 쓰던 쪽 |
 |---|---|---|
@@ -114,62 +69,17 @@ user_invocable에 모든 기기에 링크되고 "그냥 부르면 된다"고 쓰
 | 스킬 무조건문 | Step 0 gather가 조건부 | SKILL.md가 단정문 |
 | 골든 decay | md 분기의 `searchMdCore` | 세션 분기만 인라인 복제 |
 | 좁은 가드 | 인덱싱 경로 | `push_replica()` 안에만 |
+| 빈 문자열 해석 | 같은 변수 | 생산자 `-z` vs 소비자 `in os.environ` |
 
-교차검수가 잡아낸 것이 이것이고, 혼자서는 넷 중 둘밖에 못 봤다. 앞으로 이
-구조(두 리포가 같은 스크립트를 양쪽에서 문서화)를 건드릴 때는 **양쪽을 같이
-읽는 사람이 한 번은 필요하다.**
+**넷 중 셋은 어제까지 옳았던 코드다.** `os.environ`만 보는 건 env가 바뀌기 전엔
+맞았고, 좁은 가드는 리플리카가 인덱싱을 안 하던 동안엔 충분했고, 골든의 `14`는
+프로덕션이 14였을 때 정확했다. **사본은 틀리게 태어나는 게 아니라 정본이 움직일 때
+조용히 뒤에 남는다.** 다섯째는 정본을 다 안 읽고 사본을 새로 만든 경우인데 결과가
+같다. 리뷰는 사본이 쓰인 시점을 보고 결함은 **다른 파일이 바뀐 시점**에 생기므로,
+교차검수가 아니면 안 잡힌다.
 
-그리고 넷 중 셋은 **어제까지 옳았던 코드**다(담당자 관찰). `os.environ`만 보는 건
-env가 바뀌기 전엔 맞았고, `push_replica` 안의 가드는 리플리카가 인덱싱을 안 하던
-동안엔 충분했고, 골든의 `14`는 프로덕션이 14였을 때 정확했다. **사본은 틀리게
-태어나는 게 아니라 정본이 움직일 때 조용히 뒤에 남는다.** 그래서 리뷰로 안 잡히고
-교차검수에서 잡힌다.
-
-다섯 번째는 담당자가 찾았고, **몇 시간 전의 그 담당자 자신**이었다. 같은 변수의
-빈 문자열을 양쪽이 다르게 읽는다 — 생산자는 `-z`라 빈 값을 미설정으로 보고
-파일 폴백해 gather를 계속 돌리고, 소비자는 `in os.environ`이라 빈 값을 의도된
-라이브 전용 탈출구로 본다(양쪽 격리 실행으로 확인). 어느 쪽도 자기 자리에선
-틀리지 않아서 코드를 맞추지 않고 **주장의 범위**를 양쪽 문서에 한정했다.
-사본이 뒤에 남는 것과 결과가 같다 — 정본을 다 안 읽고 사본을 새로 만들면 된다.
-
-부수 교훈: 리포를 건너가는 **줄번호는 하룻밤을 못 넘긴다.** 담당자가 두 시간 전
-적은 `sync-sessions.sh:118-132`가 내 `7189237`로 밀렸고, 내가 적은
-`golden-queries.ts:477`은 내 `f048a0a`로 밀렸다. 건너가는 인용은 줄번호가 아니라
-**이름과 위치**로 쓴다.
-
-### 남은 것
-
-1. **`git push`** — 커밋 12개가 로컬에만 있다. GLG 승인 대기.
-   **오라클 코드는 아직 `14ccdc5`**, 즉 **push 가드도 인덱싱 가드도 둘 다 없는**
-   버전이다. pull 전까지 **오라클에서 `sync:sessions` / `/memory-sync`를 부르지
-   않는 것이 유일한 방어**다. push → 오라클 `git pull`이 필요하다.
-   (agent-config 쪽 커밋 4개도 그쪽에서 푸시 대기 중.)
-2. **이슈 [#11](https://github.com/junghan0611/andenken/issues/11) 코멘트** —
-   `.agent-reports/issue11-followup-draft.md`에 작성해두고 **게시하지 않았다.**
-3. **형제 공지** — agent-config 담당자와 순서 합의: 오라클 pull이 끝난 **뒤에**
-   공지한다. 지금 공지하면 오라클 형제가 가드 없는 `14ccdc5`를 상대로 움직인다.
-4. **골든 세션 분기 추출** — `searchMdCore`처럼 공유 코어를 부르게 하면 이 부류의
-   divergence가 구조적으로 죽는다. 이번엔 값만 맞췄다.
-
-## 굽고 나서
-
-- **검증**: (a) 6~12개월 전 판단 회수, (b) 2K에 잘려 있던 긴 프롬프트의 뒷부분,
-  (c) oracle 고유 세션(entwurf/openclaw workspace), (d) cutover 무결성 —
-  인덱스에 옛 라이브 경로 0건 / 중복 chunk id 0 / dim 4096.
-- **턴 단위 cap**: 긴 프롬프트 하나가 40+ chunk가 되어 top-k를 독점하는지 먼저
-  측정하고 수치를 정한다. 키는 `sessionFile` + `lineNumber`(둘 다 저장 컬럼) —
-  `canonicalDocId`를 재사용하면 세션 파일 축으로 무너진다.
-- **인덱스 배포 방향**: 오라클이 만들고 thinkpad가 당긴다. `sync:index`/`pull:index`
-  같은 표면 신설. staging으로 받아 verify 후 swap.
-- **shared prepare helper + receipt guard**: 지금은 두 wrapper에 gather 블록이
-  중복이고 indexer는 receipt를 검증하지 않는다. 세 번째 caller가 다시 구멍을 낸다.
-- **build-state sidecar**: complete / partial-stale / partial-absent.
-- **corpus lock 자동화**: host-local 고정 경로(`~/.local/state/andenken/…`).
-  acquisition order는 corpus → index로 통일(섞으면 deadlock).
-- **300KB floor 재판정**: 300KB 이하 962파일 중 925개가 의미 있는 user text를
-  갖고, 프롬프트 5,688개/4.05M자가 admission 밖이다(Sol 실측). "모든 프롬프트
-  원문 회수"와 동시에 참일 수 없다 — GLG 결정 대기.
-- **`truncateText` 죽은 코드 제거**(`session-indexer.ts:594`, 호출자 0건).
+부수: **리포를 건너가는 줄번호는 하룻밤을 못 넘긴다.** 하루에 셋이 서로의 커밋에
+밀렸다. 건너가는 인용은 줄번호가 아니라 **이름과 위치**로 쓴다.
 
 ## 보류 — 자격증명
 
@@ -207,20 +117,10 @@ replicate 0). 임베딩 입력과의 교집합은 6 chunks / 4파일, 전부 `ro
 ## 세션 코퍼스 — 파일명 정렬 뒤 남은 것 (2026-08-10)
 
 파일명 축은 `v2026.8.10`으로 닫혔다 → [CHANGELOG.md](./CHANGELOG.md).
-**닫힌 것은 파일명 축 하나뿐이다.** 아래는 그 정렬이 열어놓고 간 것들.
+재인덱싱 게이트는 `v2026.9.3`의 통합 재구축으로 닫혔고(현행 규격 세션 전량이
+코퍼스를 통해 색인됐다), garden-id 333건 처리는 위 "GLG 결정 대기"로 옮겼다.
+아래는 아직 열려 있는 것들이다.
 
-- **재인덱싱은 GLG gate 앞에 정지해 있다.** 현행 규격으로 발견되는 pi 세션이
-  아직 임베딩되지 않았다. 규모는 4일치 gap이 아니라 **2026-04-15까지 소급되는
-  UUIDv7 전량**이다 — `v2026.6.19`가 "pre-0.9.0 `_<uuid>`"로 은퇴시켰던 세션이
-  현행 규격에 그대로 해당하기 때문. 대략 `~217+` 규모이되 **살아 있는 transcript가
-  300KB를 넘을 때마다 움직인다.** 문서 숫자를 근거로 승인하지 말 것 —
-  `./run.sh estimate:sessions`가 유일한 권위다(현행 sessions OpenRouter 8B,
-  API-0 면. `estimate`는 legacy Gemini 가격 면이라 다른 것을 잰다).
-- **garden-id 333건 처리 결정이 열려 있다.** 이미 인덱싱된 이 세션들은 discovery에서
-  빠지지만 청크는 `sessions.lance`에 남아 semantic 검색이 당분간 찾는다 — 의도된
-  상태다. 다만 **매니페스트↔디스커버리 drift**가 생기고 증분 sync는 이것을 스스로
-  제거하지 않는다. 유지(검색 잔존) vs `./run.sh cleanup sessions`(청소)는 GLG 결정
-  항목으로 남는다.
 - **2d entwurf parent/child threading은 여전히 기다린다.** 헤더 `id` +
   `entwurf`/`control` 태그 schema는 meta-bridge 표면이 굳은 뒤 한 번에 설계한다.
   파일명 정렬이 끝났다고 threading이 열린 것은 아니다.
