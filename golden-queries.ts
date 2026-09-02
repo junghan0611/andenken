@@ -474,7 +474,14 @@ async function runQuery(
     const fts = await store.fullTextSearch(expandQueryForBM25(enrichedQuery), 20);
     const results = await retrieve(gq.query, vec, fts, {
       vectorWeight: 0.7, bm25Weight: 0.3,
-      recencyHalfLifeDays: 14, minScore: 0.001,
+      // Must track production (cli.ts:255, index.ts:571), which is 0. A 14-day
+      // half-life multiplies score by exp(-ln2*age/14): a 5-month-old hit lands
+      // at ~2^-10 and falls under minScore, so the gate DELETED old sessions and
+      // then failed queries for "returning nothing". The decay was removed from
+      // production on 2026-09-02; this inline copy kept it, which is exactly the
+      // divergence the header comment at :27 warns about and the md branch below
+      // avoids by calling searchMdCore. Extract this branch and the copy dies.
+      recencyHalfLifeDays: 0, minScore: 0.001,
       mergeStrategy: "rrf" as MergeStrategy,
       mmr: { enabled: false, lambda: 0.7 },
     });
