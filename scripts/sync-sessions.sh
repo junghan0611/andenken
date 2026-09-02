@@ -131,16 +131,17 @@ fi
 
 # --- Replica push (API 0; DB and manifest always travel together) ---
 #
-# DANGEROUS AFTER THE AUTHORITY FLIP (2026-09-02). This pushes with
-# `rsync --delete` into oracle's index path. Once oracle became the machine that
-# BUILDS the index — it holds the merged corpus and the CPU-free hours — this
-# command means "overwrite the canonical index with whatever this laptop has",
-# and this laptop currently holds an aborted 400/1592 partial. One muscle-memory
-# `--push` would destroy hours of server work with no warning.
+# This pushes with `rsync --delete` into oracle's index path, so it is only ever
+# correct in one direction. INVARIANT.md §7.1: the single writer is the canonical
+# host (thinkpad) and oracle is a query replica that must not run the indexer —
+# oracle-native sessions become searchable by reaching thinkpad as SOURCE FILES
+# (the corpus gather), never as replica-side embeddings.
 #
-# So it refuses unless the caller names itself the authority. The guard is an env
-# var rather than a comment because the failure is silent and irreversible.
-INDEX_AUTHORITY="${ANDENKEN_INDEX_AUTHORITY:-oracle}"
+# The guard names that host so a push from the wrong side fails loudly instead of
+# silently overwriting the canonical index with an older or half-built copy. It is
+# an env var rather than a comment because the failure is irreversible: set
+# ANDENKEN_INDEX_AUTHORITY deliberately if the canonical host ever moves.
+INDEX_AUTHORITY="${ANDENKEN_INDEX_AUTHORITY:-thinkpad}"
 LOCAL_DEVICE="$(cat "$HOME/.current-device" 2>/dev/null || hostname)"
 LOCAL_DEVICE="${LOCAL_DEVICE//[[:space:]]/}"
 
