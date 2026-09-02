@@ -94,10 +94,25 @@ ssh runs `thinkpad → oracle` only, and pull symmetry is pointless anyway — a
 closed laptop cannot be pulled from. So the corpus travels by push
 (`corpus:replicate`) and the index travels by push (`sync:sessions --push`).
 
-`sync:sessions --push` refuses unless `$ANDENKEN_INDEX_AUTHORITY` (default
-`thinkpad`) matches `~/.current-device`. It rsyncs `--delete` into oracle's index
-path, so a push from the wrong side silently overwrites the canonical index with
-an older copy. Move the authority only by setting that variable deliberately.
+`sync:sessions` refuses **entirely** — not just `--push` — unless
+`$ANDENKEN_INDEX_AUTHORITY` (default `thinkpad`) matches `~/.current-device`.
+Two different disasters, one gate:
+
+- **push from a replica** rsyncs `--delete` into the canonical index path and
+  overwrites it with an older copy.
+- **indexing on a replica** forks the corpus: the replica gets canonical rows
+  *plus* rows it invented, which no later push can reconcile (§7.1's
+  2026-06-19→07-06 drift, 27,966 chunks against the canonical 24,882).
+
+Guarding only push leaves the second one open, and the friendly entry points —
+the `memory-sync` skill, "기억 최신화" — are exactly what a sibling on the replica
+reaches for. A replica's own sessions still get indexed: they travel to the
+authority as **source files** via the gather and come back inside the pushed index.
+
+```
+ANDENKEN_INDEX_AUTHORITY=<device>   # move the authority deliberately
+ANDENKEN_ALLOW_REPLICA_INDEX=1      # override once — this forks the corpus
+```
 
 ### While a rebuild is baking
 

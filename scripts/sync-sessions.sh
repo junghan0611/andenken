@@ -102,6 +102,35 @@ export ANDENKEN_SESSION_TIMEOUT_MS=60000
 export ANDENKEN_SESSION_PAID_REMOTE=1
 export ANDENKEN_SESSION_PRICE_PER_M_TOKENS="${ANDENKEN_SESSION_PRICE_PER_M_TOKENS:-${OPENROUTER_QWEN_8B_PRICE:-0.01}}"
 
+# --- Authority: who is allowed to WRITE an index at all ---
+#
+# INVARIANT.md §7.1: indexing writes happen on the canonical host; the replica
+# receives them by rsync and must not run the indexer against its own
+# transcripts. A replica-side index run silently forks the corpus — the replica
+# ends up with canonical rows PLUS rows nobody can reconcile, which is the
+# 2026-06-19→07-06 drift (27,966 chunks against the canonical 24,882).
+#
+# This gate is deliberately BEFORE the indexing path, not only inside
+# push_replica(). Guarding just --push protects the canonical index from a bad
+# push while leaving the replica free to fork itself, and the friendly entry
+# points (the memory-sync skill, "기억 최신화") are exactly the ones a sibling on
+# the replica would reach for.
+INDEX_AUTHORITY="${ANDENKEN_INDEX_AUTHORITY:-thinkpad}"
+LOCAL_DEVICE="$(cat "$HOME/.current-device" 2>/dev/null || hostname)"
+LOCAL_DEVICE="${LOCAL_DEVICE//[[:space:]]/}"
+
+if [ "$LOCAL_DEVICE" != "$INDEX_AUTHORITY" ] && [ "${ANDENKEN_ALLOW_REPLICA_INDEX:-0}" != "1" ]; then
+  echo "❌ refused: this is '$LOCAL_DEVICE'; only the index authority '$INDEX_AUTHORITY' writes the index."
+  echo "   INVARIANT.md §7.1 — a replica that indexes its own sessions forks the corpus,"
+  echo "   and no later push can reconcile the rows it invented."
+  echo "   This machine's sessions DO get indexed: they reach the authority as source"
+  echo "   files via the corpus gather, and come back inside the pushed index."
+  echo "   To move the authority:  ANDENKEN_INDEX_AUTHORITY=$LOCAL_DEVICE"
+  echo "   To override once:       ANDENKEN_ALLOW_REPLICA_INDEX=1  (forks the corpus — know why)"
+  echo "   (no API call was made)"
+  exit 1
+fi
+
 # --- Step 1: status --json (API 0 — read DB schema + manifest) ---
 # One JSON read gives us actual_dim and to_index. We never spawn `tsx -e`
 # with top-level await here; the env's tsx CJS output has bitten us before.
@@ -141,9 +170,8 @@ fi
 # silently overwriting the canonical index with an older or half-built copy. It is
 # an env var rather than a comment because the failure is irreversible: set
 # ANDENKEN_INDEX_AUTHORITY deliberately if the canonical host ever moves.
-INDEX_AUTHORITY="${ANDENKEN_INDEX_AUTHORITY:-thinkpad}"
-LOCAL_DEVICE="$(cat "$HOME/.current-device" 2>/dev/null || hostname)"
-LOCAL_DEVICE="${LOCAL_DEVICE//[[:space:]]/}"
+# (The vars are set above, where the same rule also gates indexing itself; the
+# check is repeated here because push is reachable on the to_index=0 path too.)
 
 push_replica() {
   if [ "$LOCAL_DEVICE" != "$INDEX_AUTHORITY" ]; then
