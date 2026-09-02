@@ -1,6 +1,6 @@
 ---
 name: andenken-embed
-description: "andenken embedding-maintenance workbench — the fixed flow the repo steward runs every time: status → sync(sessions+md) → verify → compact → oracle push. Re-embed/incremental for session + garden(md) indexes, integrity checks, defrag (pinned to 4 cores), oracle replication. Triggers: 'reindex', 'sync sessions', 'sync md', 'compact', 'oracle push', 'verify index', '임베딩 다시 하자', '세션/가든 임베딩', 'andenken 인덱스 정리'."
+description: "andenken embedding-maintenance workbench — the fixed flow the repo steward runs every time: gather corpus → status → sync(sessions+md) → verify → compact → oracle push. Multi-device session corpus (gather/manifest/replicate), re-embed/incremental for session + garden(md) indexes, integrity checks, defrag (pinned to 4 cores), oracle replication. Triggers: 'reindex', 'sync sessions', 'sync md', 'compact', 'oracle push', 'verify index', 'gather corpus', 'corpus manifest', 'device sessions', '통합 세션 임베딩', '임베딩 다시 하자', '세션/가든 임베딩', 'andenken 인덱스 정리'."
 user_invocable: true
 ---
 
@@ -15,6 +15,93 @@ sources `~/.env.local` for provider/keys and enforces the provider/dim guards.
 - Just need a **light, live session-only bump**? → use the `memory-sync` skill instead.
   This skill is the **full workbench**: sessions + md maintenance + compact + oracle replication.
 - Search (search-sessions / search-md) is not here — that's `semantic-memory`.
+
+## Where sessions come from — the device corpus
+
+**Read this before any sessions command.** The sessions track no longer indexes
+this machine's live store. It indexes `$ANDENKEN_SESSION_CORPUS`
+(`~/repos/gh/session`, set in `~/.env.local`), a lifetime folder holding **every
+device's** admitted transcripts.
+
+Why: GLG works on thinkpad *and* on oracle. Indexing only the local live store
+meant oracle's agent searched its own memory and did not find its own work —
+measured 2026-09-02 as **455 oracle-only sessions**, including 64 openclaw
+workspace sessions that existed on no other machine.
+
+Layout is `<corpus>/<device>/<the harness's own live path shape>` — the live path
+with one device segment in front. **That shape is a contract**, not cosmetics:
+`detectSource` keys off `/.claude/` in the path and `extractProjectName` off the
+`projects`/`sessions` segment, so both pass unmodified and no lance schema
+changed. Two rules hold it together:
+
+- **Append-only.** The gather never passes `--delete`. A session deleted from a
+  live store stays in the corpus — that is the point of a lifetime folder.
+- **Real copies, never hardlinks.** A shared inode is not an independent
+  artifact and cannot travel to another machine.
+
+### Corpus commands
+
+```bash
+./run.sh corpus:gather [--dry-run]     # collect admitted sessions from every device
+./run.sh corpus:manifest [update|verify|status]
+./run.sh corpus:replicate [--to X]     # push the corpus to devices that can't be pulled
+```
+
+**You rarely call `corpus:gather` yourself.** Both `sync:sessions` and
+`rebuild:sessions` run it as their own Step 0, and both **refuse to index** if it
+fails — an index must never be built on a corpus of unknown freshness. A remote
+device that is unreachable is a warning, not a failure, so a laptop off the
+network still indexes its own sessions. Call it directly only to inspect
+(`--dry-run`), or to gather without embedding. `SKIP_GATHER=1` opts out.
+
+**`DEVICES.json` is the roster; `MANIFEST.json` is the inventory.** Keep them
+apart — using the corpus's directory listing as the roster makes the gather try
+to reach a retired machine forever. Roster fields: `state: active|retired`,
+`transport: local|ssh|push`. A `push` device is announced as *"delivered by push
+— not pulled from here"* rather than silently skipped, so silence never reads as
+a forgotten device.
+
+**`MANIFEST.sha256` verifies without andenken.** It is `sha256sum -c` compatible
+on purpose: the corpus must be checkable on a machine that has no repo checkout.
+Full hash of ~2,160 files is ~3.5s; steady-state update 0.07s.
+
+> Replaced git deliberately. One commit of the corpus cost an 806MB pack and a
+> 47m47s gitleaks scan, and append-only data has no diff worth reading. The only
+> question that needs answering is "what do I have and is it still intact".
+
+### Direction of travel — who builds, who receives
+
+`INVARIANT.md` §7.1: **the canonical host builds the index; oracle is a query
+replica and must not run the indexer.** Oracle-native sessions become searchable
+by reaching the canonical host **as source files** (that is exactly what
+`corpus:gather` does), never as replica-side embeddings. Oracle drifted once this
+way (2026-06-19→07-06, 27,966 chunks against the canonical 24,882).
+
+```
+thinkpad:  corpus:gather (own + pull oracle)  →  embed  →  push index
+oracle  :  receives index by rsync            →  query only
+```
+
+ssh runs `thinkpad → oracle` only, and pull symmetry is pointless anyway — a
+closed laptop cannot be pulled from. So the corpus travels by push
+(`corpus:replicate`) and the index travels by push (`sync:sessions --push`).
+
+`sync:sessions --push` refuses unless `$ANDENKEN_INDEX_AUTHORITY` (default
+`thinkpad`) matches `~/.current-device`. It rsyncs `--delete` into oracle's index
+path, so a push from the wrong side silently overwrites the canonical index with
+an older copy. Move the authority only by setting that variable deliberately.
+
+### While a rebuild is baking
+
+- **Do not run `corpus:replicate` or `sync:sessions` from another shell.** There
+  is no corpus lock yet; rsync is atomic per file, never across 2,160 of them, so
+  the input snapshot is held by operating discipline alone.
+- **Treat search on the replica as maintenance.** A full rebuild destroys the
+  active `data/sessions.lance` and refills the same path, so the intermediate
+  state looks like a healthy DB while being half of one.
+- **Never run the whole script "just to check" a guard.** `status:json` performs
+  full corpus discovery and takes 10+ minutes. Read the guard, or test it in
+  isolation.
 
 ## Two tracks, one discipline
 
@@ -37,6 +124,7 @@ rebuild is a separate gate (below).
 cd ~/repos/gh/andenken
 
 # 1. Current state — to-index size / last indexed / fragment count
+#    (`status:json` does full corpus discovery — 10+ min. Don't reach for it casually.)
 ./run.sh status
 
 # 2. (optional) API-0 cost & size estimate. No calls made
@@ -102,7 +190,8 @@ ANDENKEN_COMPACT_CPUS=0-7 ./run.sh compact md    # override to 8 cores
 
 ## Oracle replication — DB and manifest travel together
 
-thinkpad is the **source of truth**, oracle is a **query replica**. Rules:
+thinkpad is the **canonical host**, oracle is a **query replica** (see the
+corpus section above for why, and for the `--push` authority guard). Rules:
 
 - **§6.6 (INVARIANT.md)**: don't ship only the `.lance` DB. Sessions must rsync
   `session-manifest.json`, md must rsync `md-manifest.json` **alongside** — otherwise
@@ -121,9 +210,23 @@ Only when a whole rebuild (not incremental) is required:
 ./run.sh rebuild:sessions       # actual destructive rebuild
 ```
 
-- ₩100K-incident residual safety: **agents do not automate full-sync / cost gates /
-  destructive rebuilds.** A human decides after reading the estimate.
+Step order is `gather → estimate → confirm → preflight → destroy → rebuild`, and
+that order is load-bearing:
+
+- **Step 0 gather runs before the estimate.** A rebuild is the one moment the
+  whole corpus is read, so it must read the *whole* corpus — and a gather failure
+  then lands *before* the destroy instead of after it. `--dry-run` skips the
+  gather: a dry run must not mutate the corpus.
+- **Step 3 is an interactive `yes` with no `--yes` flag, by design.** ₩100K-incident
+  residual safety: **agents do not automate full-sync / cost gates / destructive
+  rebuilds.** A human reads the estimate and decides.
+- A writer lock is taken **before** the destroy, so a run that loses the race
+  never gets far enough to remove anything.
 - md full rebuild only after reviewing `ANDENKEN_ALLOW_PAID_FULL_REBUILD=1`.
+
+Record before every bake, in one line: **MANIFEST digest · code HEAD ·
+provider/model/dim**. Without it a finished index cannot be tied to the input it
+was made from.
 
 ## single-writer
 
@@ -148,6 +251,9 @@ Only when a whole rebuild (not incremental) is required:
 | Operator triage | `./run.sh doctor --sessions\|--md [--json]` |
 | Oracle replicate | `./run.sh sync:sessions --push` / `./run.sh sync:md:oracle` |
 | Cost estimate (API-0) | `./run.sh estimate:sessions\|md [--full]` |
+| Gather all devices' sessions | `./run.sh corpus:gather [--dry-run]` |
+| Corpus inventory / integrity | `./run.sh corpus:manifest update\|verify\|status` |
+| Push corpus to a push-only device | `./run.sh corpus:replicate [--to X]` |
 
 SSOT is `run.sh` + `scripts/` + `INVARIANT.md`. This skill is a signpost for that
 flow — if behavior and docs disagree, run.sh/INVARIANT.md win.
