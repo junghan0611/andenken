@@ -34,6 +34,13 @@ indexer another way. A login captures env once, so a cron job, a daemon, or a
 shell that started **before** the corpus line was added to `~/.env.local` never
 sees it. If a sessions run surprises you, check that variable first.
 
+**An empty value is not an opt-out here.** The script's fallback tests `-z`, so
+`export ANDENKEN_SESSION_CORPUS=` reads as *unset*, falls back to the file, and
+gathers anyway. The read side (`session-recap`) tests presence in the
+environment instead, so the same empty string IS its live-only escape there.
+Same variable, two readings, each right for its side — just never assume one
+command's escape works on the other.
+
 Why: GLG works on thinkpad *and* on oracle. Indexing only the local live store
 meant oracle's agent searched its own memory and did not find its own work —
 measured 2026-09-02 as **455 oracle-only sessions**, including 64 openclaw
