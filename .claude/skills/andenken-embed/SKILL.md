@@ -18,10 +18,18 @@ sources `~/.env.local` for provider/keys and enforces the provider/dim guards.
 
 ## Where sessions come from — the device corpus
 
-**Read this before any sessions command.** The sessions track no longer indexes
-this machine's live store. It indexes `$ANDENKEN_SESSION_CORPUS`
-(`~/repos/gh/session`, set in `~/.env.local`), a lifetime folder holding **every
-device's** admitted transcripts.
+**Read this before any sessions command.** When `$ANDENKEN_SESSION_CORPUS` is set
+(`~/repos/gh/session`, in `~/.env.local`), the sessions track indexes that corpus
+— a lifetime folder holding **every device's** admitted transcripts — instead of
+this machine's live store.
+
+**That is a conditional, not a law.** `sync-sessions.sh:74` gathers only
+`if [ -n "${ANDENKEN_SESSION_CORPUS:-}" ]`; unset means it silently indexes the
+live store alone, and nothing warns you. `./run.sh` sources `~/.env.local`
+(`run.sh:9`) so the normal path always has it — but a cron job, a daemon, or a
+shell that started **before** the corpus line was added to `~/.env.local` does
+not, because a login captures env once. If a sessions run surprises you, check
+that variable first.
 
 Why: GLG works on thinkpad *and* on oracle. Indexing only the local live store
 meant oracle's agent searched its own memory and did not find its own work —
@@ -226,7 +234,19 @@ that order is load-bearing:
 
 Record before every bake, in one line: **MANIFEST digest · code HEAD ·
 provider/model/dim**. Without it a finished index cannot be tied to the input it
-was made from.
+was made from. A rule with no command is a rule that gets skipped, so:
+
+```bash
+set -a; . ~/.env.local; set +a          # a bare shell may not have the corpus var
+echo "$(TZ=Asia/Seoul date +%Y%m%dT%H%M%S) | HEAD $(git rev-parse --short HEAD)" \
+     "| $(cat ~/.current-device)" \
+     "| manifest $(sha256sum "$ANDENKEN_SESSION_CORPUS/MANIFEST.sha256" | cut -c1-16)" \
+     "| $(./run.sh env | grep -m1 'MODEL:' | tr -s ' ')"
+# → 20260903T010745 | HEAD ee441ac | thinkpad | manifest 6c30e28aa250bb8e | MODEL: qwen/qwen3-embedding-8b
+```
+
+The dim is not in that line because it is not yours to assert — Step 4 probes it
+and prints `✅ preflight dim=4096`. Copy what the probe said.
 
 ## single-writer
 
@@ -242,7 +262,7 @@ was made from.
 
 | Want to | Command |
 |---------|---------|
-| Current state | `./run.sh status` (`status:json` for machines) |
+| Current state | `./run.sh status` — `status:json` is machine-readable but does **full corpus discovery (10+ min)**; do not reach for it casually |
 | Sessions incremental | `./run.sh sync:sessions` |
 | Garden incremental | `./run.sh sync:md` |
 | Verify | `./run.sh verify sessions\|md\|all` |
