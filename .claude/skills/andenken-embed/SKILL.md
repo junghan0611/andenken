@@ -47,6 +47,22 @@ Four things that are easy to get wrong here:
 the index authority. That is the `thinkpad` rule below, working. Do not reach for
 `ANDENKEN_ALLOW_REPLICA_INDEX=1`.
 
+**If `verify` on oracle reports orphans but the same check is clean locally**,
+that is not a false positive and not a bad push. `verify` calls
+`fs.existsSync()` on every path in the DB, so an orphan means *the replica is
+missing a source file the index legitimately covers* — its copy of the source is
+behind, not the index. Same shape on both tracks, different source to catch up:
+
+| track | source on the replica | catch it up with |
+|---|---|---|
+| sessions | the session corpus | `./run.sh corpus:replicate` (from the authority) |
+| md | the garden checkout `~/repos/gh/notes` | `git -C ~/repos/gh/notes pull` **on oracle** |
+
+Measured 2026-09-03: pushing md left one orphan on oracle,
+`content/journal/20260831T000000.md` — oracle's garden checkout was at
+`214cf972c` while thinkpad had `fd690e367`. **Shipping an index also means
+shipping what it points at.**
+
 Cost: an incremental over a few dozen sessions / a few hundred md files is about
 $0.01. Everything below is the why, and the rarer operations.
 
