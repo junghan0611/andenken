@@ -563,7 +563,12 @@ export default function (pi: ExtensionAPI) {
         results = await retrieve(params.query, vectorResults, ftsResults, {
           vectorWeight: 0.7,
           bm25Weight: 0.3,
-          recencyHalfLifeDays: 14,
+          // Recency decay OFF for the session axis (GLG ruling 2026-09-02).
+          // Same reasoning as cli.ts: a 14-day half-life put an ordinary RRF hit
+          // under the minScore floor at ~49 days, which hard-deletes the older
+          // half of a memory axis built to reach back years. `mode=recent` owns
+          // recency intent; relevance answers the question asked.
+          recencyHalfLifeDays: 0,
           minScore: 0.001,
           mergeStrategy: "rrf" as const,
           mmr: { enabled: false, lambda: 0.7 },

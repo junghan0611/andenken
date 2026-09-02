@@ -238,7 +238,21 @@ async function searchSessions(
     results = await retrieve(query, vectorResults, ftsResults, {
       vectorWeight: 0.7,
       bm25Weight: 0.3,
-      recencyHalfLifeDays: 14,
+      // Recency decay OFF for the session axis (GLG ruling 2026-09-02).
+      //
+      // It used to be a 14-day half-life, which multiplies a hit's score by
+      // exp(-ln2 * ageDays / 14) before the minScore floor. That is 0.051 at 60
+      // days, 0.012 at 90, 0.000135 at 180 — so an ordinary RRF hit fell under
+      // the 0.001 floor at roughly 49 days and even a both-arms rank-0 hit at
+      // about 85. The corpus is a memory axis meant to reach back years; a decay
+      // that erases anything older than a season is a hard delete wearing the
+      // costume of a ranking signal, and it silently undid the whole point of
+      // indexing every device's history.
+      //
+      // Recency intent is not lost: it has its own lane in `mode=recent`, which
+      // asks for newest-first explicitly. Relevance should answer the question
+      // asked, not the question asked lately.
+      recencyHalfLifeDays: 0,
       minScore: 0.001,
       mergeStrategy: "rrf" as MergeStrategy,
       mmr: { enabled: false, lambda: 0.7 },
