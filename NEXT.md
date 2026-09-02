@@ -55,16 +55,50 @@
 독점 위험은 실재하지만 극소수 꼬리에 몰려 있다. 키는 `sessionFile` + `lineNumber`
 (둘 다 저장 컬럼)이고 `canonicalDocId` 재사용은 세션 파일 축으로 무너진다.
 
+### 교차검수 — agent-config 담당자(fresh, opus-5)와 주고받은 것
+
+**같은 뿌리의 결함이 양쪽에 하나씩 있었다: 공유 코어를 한쪽만 안 쓴다.**
+
+- **소비자 축(그쪽이 찾아 수선)**: `semantic-memory` → `session-recap --session-file`
+  이음매가 **전부 거부**되고 있었다. 코드가 아니라 env 신선도 — 그 셸에
+  `ANDENKEN_SESSION_CORPUS`만 없었고(`~/.env.local`에 그 줄이 추가된 시각보다
+  먼저 뜬 세션), 반환 `file`은 100% 코퍼스 경로인데 recap이 100% 거부했다.
+  두 스킬이 `os.environ`만 보고 있었다. 또 `--device`가 기본 `--skip 1`에
+  최신 세션을 뺏기고 있었다(현재 세션은 라이브에 있어 어떤 device 값에도 안
+  걸리므로 skip이 남의 기기의 진짜 최신을 버린다). 둘 다 수선됨(`15e2385`, `6cf49d5`).
+- **내 SKILL.md(그쪽이 지적, 내가 수선 `969f8e5`)**: "코퍼스를 인덱싱한다"를
+  **무조건문**으로 썼는데 `sync-sessions.sh:74`는 조건부다. unset이면 조용히
+  라이브를 인덱싱한다. `run.sh:9`가 `.env.local`을 소싱해 정상 경로는 안전하지만
+  그 사실이 문서에 없었다. 굽기 전 provenance 한 줄도 명령이 없는 규율이었다 →
+  실행 검증한 레시피로 교체.
+- **골든 하네스(내가 발견, 수선 `f048a0a`)**: `golden-queries.ts:477`이 세션
+  분기에 `recencyHalfLifeDays: 14`를 **인라인으로** 주입하고 있었다. 프로덕션은
+  `0`이다(`cli.ts:255`, `index.ts:571`) — 코드베이스에 남은 유일한 `14`였다.
+  게이트가 몇 달 된 hit를 `minScore` 아래로 지운 뒤 그 부재를 근거로 질의를
+  실패시키고 있었다. md 분기는 `searchMdCore`를 부르는데 세션 분기만 복제본이라
+  09-02의 decay 제거가 게이트에 안 닿았다. **`operational-recovery` 4/5 → 5/5.**
+
+### 골든 30/32 — 남은 2건은 판단 항목 (튜닝하지 않았다)
+
+- **`"남은 작업 뭐지"` (session)** — decay를 빼니 새로 깨졌다. 즉 이 케이스는
+  recency에 기대 통과하고 있었다. 지금 top-5는 전부 GLG가 실제로 그렇게 말한
+  발화인데(`"더 남은 작업은?"`, `"응 작업 할게 뭐지?"`) `expectKeywords:
+  ["TODO","NEXT","pending","다음"]`을 못 맞춘다. **query-echo** — 질문의 메아리가
+  답보다 위에 온다. assertion을 결과에 맞춰 고치는 건 테스트를 결과에 끼워
+  맞추는 것이라 안 건드렸다. **GLG 판단.**
+- **`"피투성"` (md)** — md 축이고 오늘 밤 md 인덱스는 손대지 않았으므로 이번
+  작업이 만든 것이 아니다. **세션 축 실패는 위 1건뿐이고 그것도 assertion 이슈다.**
+
 ### 남은 것
 
-1. **`git push`** — 커밋 6개가 로컬에만 있다. GLG 승인 대기.
+1. **`git push`** — 커밋 8개가 로컬에만 있다. GLG 승인 대기.
    **오라클 코드는 아직 `14ccdc5`**, 즉 `--push` 가드가 없는 버전이다. 오라클에서
    실수로 `--push`를 치면 막아줄 것이 없다. push → 오라클 `git pull`이 필요하다.
-2. **이슈 [#11](https://github.com/junghan0611/andenken/issues/11) 갱신** — §3의
-   "굽기 전" 항목이 전부 닫혔다.
-3. **agent-config 담당자 회신** — 소비자 축(session-recap / recall /
-   semantic-memory)이 통합 코퍼스 위에서 실제로 도는지 새 담당자에게 확인 요청함
-   (2026-09-03 새벽, claude-code/opus-5, cwd `~/repos/gh/agent-config`).
+   (agent-config 쪽 커밋 2개도 그쪽에서 푸시 대기 중.)
+2. **이슈 [#11](https://github.com/junghan0611/andenken/issues/11) 코멘트** —
+   `.agent-reports/issue11-followup-draft.md`에 작성해두고 **게시하지 않았다.**
+3. **골든 세션 분기 추출** — `searchMdCore`처럼 공유 코어를 부르게 하면 이 부류의
+   divergence가 구조적으로 죽는다. 이번엔 값만 맞췄다.
 
 ## 굽고 나서
 
