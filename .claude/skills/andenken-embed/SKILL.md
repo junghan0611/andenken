@@ -23,13 +23,16 @@ sources `~/.env.local` for provider/keys and enforces the provider/dim guards.
 — a lifetime folder holding **every device's** admitted transcripts — instead of
 this machine's live store.
 
-**That is a conditional, not a law.** `sync-sessions.sh:74` gathers only
-`if [ -n "${ANDENKEN_SESSION_CORPUS:-}" ]`; unset means it silently indexes the
-live store alone, and nothing warns you. `./run.sh` sources `~/.env.local`
-(`run.sh:9`) so the normal path always has it — but a cron job, a daemon, or a
-shell that started **before** the corpus line was added to `~/.env.local` does
-not, because a login captures env once. If a sessions run surprises you, check
-that variable first.
+**That is a conditional, not a law.** `sync-sessions.sh` runs its Step 0 gather
+only `if [ -n "${ANDENKEN_SESSION_CORPUS:-}" ]`; unset means it silently indexes
+the live store alone, and nothing warns you.
+
+Two things keep the normal path safe: `run.sh` sources `~/.env.local`, and
+`sync-sessions.sh` independently falls back to reading that one variable out of
+the same file when the env lacks it. Neither helps a caller that reaches the
+indexer another way. A login captures env once, so a cron job, a daemon, or a
+shell that started **before** the corpus line was added to `~/.env.local` never
+sees it. If a sessions run surprises you, check that variable first.
 
 Why: GLG works on thinkpad *and* on oracle. Indexing only the local live store
 meant oracle's agent searched its own memory and did not find its own work —
