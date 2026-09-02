@@ -16,6 +16,40 @@ sources `~/.env.local` for provider/keys and enforces the provider/dim guards.
   This skill is the **full workbench**: sessions + md maintenance + compact + oracle replication.
 - Search (search-sessions / search-md) is not here — that's `semantic-memory`.
 
+## The usual ask — "세션·가든 임베딩하고 오라클에 동기화해줘"
+
+That request is this, in order, from `~/repos/gh/andenken`. Run it and report;
+you do not need the rest of this file to do it.
+
+```bash
+cd ~/repos/gh/andenken
+./run.sh sync:sessions          # gathers every device's sessions, then embeds
+./run.sh sync:md                # garden markdown
+./run.sh verify sessions && ./run.sh verify md
+./run.sh sync:sessions --push   # → oracle: sessions.lance + session-manifest.json
+./run.sh sync:md:oracle         # → oracle: md.lance + md-manifest.json
+```
+
+Four things that are easy to get wrong here:
+
+- **Verify BEFORE pushing.** The push is `rsync --delete` onto oracle. Shipping
+  an index you have not verified replaces a good replica with a bad one.
+- **The request IS the confirmation.** Being asked to sync oracle authorizes the
+  push; do not stop to ask again. (Destructive *rebuilds* are different — those
+  keep their own human gate, below.)
+- **`--push` re-runs the gather**, so it costs a corpus rsync even when there is
+  nothing to embed (`to_index=0` still exits API-0 and ships the DB). That is the
+  current shape of the surface, not a mistake you made.
+- **Long runs go in the background** and you wait for the completion signal.
+  Never poll by re-running a sync — that is a single-writer race.
+
+**If a sessions command refuses**, read the message: this machine is probably not
+the index authority. That is the `thinkpad` rule below, working. Do not reach for
+`ANDENKEN_ALLOW_REPLICA_INDEX=1`.
+
+Cost: an incremental over a few dozen sessions / a few hundred md files is about
+$0.01. Everything below is the why, and the rarer operations.
+
 ## Where sessions come from — the device corpus
 
 **Read this before any sessions command.** When `$ANDENKEN_SESSION_CORPUS` is set
@@ -184,7 +218,8 @@ cd ~/repos/gh/andenken
 ./run.sh compact sessions
 ./run.sh compact md
 
-# 7. (optional) Oracle replication — after GLG confirms. DB + manifest together (below)
+# 7. Oracle replication — DB + manifest together (below). Being asked to sync
+#    oracle is the confirmation; verify must have passed first.
 ./run.sh sync:sessions --push   # sessions.lance + session-manifest.json → oracle
 ./run.sh sync:md:oracle         # md.lance + md-manifest.json → oracle
 ```
@@ -199,6 +234,9 @@ a single-writer race.
 ./run.sh sync:sessions && ./run.sh sync:md \
   && ./run.sh verify sessions && ./run.sh verify md
 ```
+
+**This stops before oracle.** If the ask included replication, chain the two push
+commands after it — see the top of this file for the full sequence.
 
 ## Safety guards (already enforced by the scripts)
 
@@ -237,7 +275,9 @@ corpus section above for why, and for the `--push` authority guard). Rules:
   the replica is inconsistent. Both sync commands already carry the manifest.
 - **§7.1**: oracle is not an indexing node. **Running the indexer on oracle diverges
   it from the source.** Replicate only.
-- push is outward-facing — run **after GLG confirms**. Embed + verify must pass first.
+- push is outward-facing, so it needs an operator asking for it — but the ask
+  itself is the confirmation; do not re-confirm a request you were just given.
+  Embed + verify must pass first.
 - See `INVARIANT.md` §6.4–§6.6, §7–§7.1.
 
 ## Full rebuild — human gate (no agent automation)
