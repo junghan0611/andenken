@@ -27,6 +27,7 @@ cd ~/repos/gh/andenken
 ./run.sh sync:md                # garden markdown
 ./run.sh verify sessions && ./run.sh verify md
 ./run.sh sync:sessions --push   # → oracle: sessions.lance + session-manifest.json
+./run.sh corpus:replicate       # → oracle: the sources that index points at
 ./run.sh sync:md:oracle         # → oracle: md.lance + md-manifest.json
 ```
 
@@ -34,6 +35,11 @@ Four things that are easy to get wrong here:
 
 - **Verify BEFORE pushing.** The push is `rsync --delete` onto oracle. Shipping
   an index you have not verified replaces a good replica with a bad one.
+- **Ship the sources too, or oracle's verify fails.** `sync:sessions --push`
+  moves the index, not the transcripts it indexes, so `corpus:replicate` belongs
+  in the same breath. The md track has the same debt, paid on oracle with
+  `git -C ~/repos/gh/notes pull`. Measured twice on 2026-09-03: skipping either
+  one left exactly one orphan on the replica.
 - **The request IS the confirmation.** Being asked to sync oracle authorizes the
   push; do not stop to ask again. (Destructive *rebuilds* are different — those
   keep their own human gate, below.)
