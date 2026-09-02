@@ -48,7 +48,10 @@ agent-config 쪽 8개도 GLG 지시로 푸시됨(`b3d8d01`).
 
 ## GLG 결정 대기
 
-- **이슈 #11 코멘트** — `.agent-reports/issue11-followup-draft.md`, 게시 안 함.
+- **이슈 [#11](https://github.com/junghan0611/andenken/issues/11) 닫을지** —
+  후속 코멘트 [게시 완료](https://github.com/junghan0611/andenken/issues/11#issuecomment-5516585307).
+  §3 "굽기 전" 5항목은 전부 닫혔다. 남은 것들은 NEXT로 옮겨왔으니 닫아도 되는데,
+  #10의 인수인계 사슬을 어디서 끊을지는 GLG 판단이라 열어뒀다.
 - **형제 브로드캐스트** — GLG가 직접 부를 자리다. 문서면은 이미 원격에 있어
   (agent-config `b3d8d01`, andenken `v2026.9.3`) 세션 시작에 읽히므로, 발신은
   선택이지 blocker가 아니다. 에이전트가 형제 전체에 일방 발신하지 않는다.
