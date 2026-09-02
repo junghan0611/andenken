@@ -99,6 +99,13 @@ Usage: ./run.sh <command> [args]
   test:integration            Integration tests (needs API)
   test:search "query"         Live search test
   test:filename               Fixture tests for pi corpus admission by filename (API 0)
+  test:corpus                 Fixture tests for corpus-backed device discovery (API 0)
+  test:split                  Fixture tests for long-turn embedding split (API 0)
+
+=== Session corpus (~/repos/gh/session) ===
+  corpus:gather [--dry-run]   Collect admitted sessions from every device
+  corpus:manifest [update|verify|status]
+                              Inventory + sha256 integrity (git replacement)
 
 === Acceptance (user-facing quality — layers 1/2/3) ===
   accept [flags]              Acceptance report. DEFAULT IS API 0: index health +
@@ -205,6 +212,16 @@ case "${1:-help}" in
     shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx test.ts search "$@" ;;
   test:filename)
     cd "$SCRIPT_DIR" && pnpm exec tsx session-filename.test.ts ;;
+  test:corpus)
+    cd "$SCRIPT_DIR" && pnpm exec tsx session-corpus.test.ts ;;
+  test:split)
+    cd "$SCRIPT_DIR" && pnpm exec tsx session-split.test.ts ;;
+
+  # === Session corpus ===
+  corpus:gather)
+    shift; load_env; cd "$SCRIPT_DIR" && bash scripts/gather-corpus.sh "$@" ;;
+  corpus:manifest)
+    shift; load_env; cd "$SCRIPT_DIR" && bash scripts/corpus-manifest.sh "${1:-update}" ;;
 
   # === Golden Queries ===
   golden)
