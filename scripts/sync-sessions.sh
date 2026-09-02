@@ -24,6 +24,17 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."   # repo root
 
+# --- corpus root: resolve from ~/.env.local when the caller did not export it ---
+# `./run.sh` load_env's the file first, but a direct invocation (or a systemd
+# unit) does not — and an unset corpus root silently falls back to this
+# machine's live stores, which would rebuild the wrong, smaller corpus without
+# saying so. Read it in a subshell so nothing else from that file leaks into
+# this script's carefully scoped SESSION_* environment.
+if [ -z "${ANDENKEN_SESSION_CORPUS:-}" ] && [ -f "$HOME/.env.local" ]; then
+  ANDENKEN_SESSION_CORPUS="$(set -a; . "$HOME/.env.local" >/dev/null 2>&1; printf %s "${ANDENKEN_SESSION_CORPUS:-}")"
+  [ -n "$ANDENKEN_SESSION_CORPUS" ] && export ANDENKEN_SESSION_CORPUS || unset ANDENKEN_SESSION_CORPUS
+fi
+
 # --- args ---
 PUSH=0
 while [ $# -gt 0 ]; do
@@ -48,6 +59,26 @@ if command -v flock >/dev/null 2>&1; then
     echo "⚠ another sync-sessions is already running (lock: $LOCKFILE) — exiting"
     exit 0
   fi
+fi
+
+# --- Step 0: gather the corpus (API 0) ---
+# Only when discovery is pointed at the corpus. There, the live runtime stores
+# are NOT scanned — the indexer reads `<corpus>/<device>/…` and nothing else — so
+# without this step a session written since the last gather would never be seen,
+# and "incremental embedding" would quietly mean "incremental over a frozen
+# snapshot". Gather first, then everything downstream is honest.
+#
+# Cheap enough to run every cycle: rsync moves only the delta (~1s / <1MB on a
+# steady-state corpus of ~2.1k files). An unreachable device is a warning inside
+# gather-corpus.sh, so a laptop off the network still indexes its own sessions.
+if [ -n "${ANDENKEN_SESSION_CORPUS:-}" ] && [ "${SKIP_GATHER:-0}" != "1" ]; then
+  echo "== gather corpus: $ANDENKEN_SESSION_CORPUS =="
+  if ! ./scripts/gather-corpus.sh > "$LOCKFILE.gather" 2>&1; then
+    echo "❌ gather-corpus failed — refusing to index a corpus of unknown freshness"
+    tail -20 "$LOCKFILE.gather"
+    exit 1
+  fi
+  grep -E '^(⚠|corpus:)' "$LOCKFILE.gather" || true
 fi
 
 # --- env: SESSIONS namespace ONLY ---

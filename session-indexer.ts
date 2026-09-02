@@ -10,6 +10,10 @@
  * - claude: ~/.claude/projects/-project/*.jsonl
  *           type="user" | type="assistant" (role merged into type)
  *
+ * With `ANDENKEN_SESSION_CORPUS` set, both roots are read per device from the
+ * gathered corpus instead (`<corpus>/<device>/.pi/agent/sessions`, etc.) — the
+ * same paths with a device prefix. See `getCorpusRoot` below.
+ *
  * Indexing exclusions (both runtimes):
  * - tmp/test/probe project dirs (pi `--tmp…--`, claude `-tmp…`) — never indexed.
  * - sessions at or below MIN_SESSION_SIZE_BYTES (300KB floor, `size > MIN`).
@@ -143,12 +147,101 @@ interface ClaudeJsonlMessage {
 
 // --- Directory discovery ---
 
-function getPiSessionsDir(): string {
-  return path.join(process.env.HOME ?? "", ".pi", "agent", "sessions");
+/**
+ * Session corpus root, when the operator has switched discovery over to it.
+ *
+ * `~/repos/gh/session` gathers every device's admitted sessions into one place
+ * (see `scripts/gather-corpus.sh`) so an agent on any machine searches the same
+ * memory axis. Each device dir keeps the runtime's own path shape — the corpus
+ * path is the live path with `<corpus>/<device>` bolted on the front:
+ *
+ *   ~/repos/gh/session/oracle/.claude/projects/-home-junghan-repos-gh-entwurf/…
+ *   ~/repos/gh/session/oracle/.pi/agent/sessions/--home-junghan-repos-gh-entwurf--/…
+ *
+ * That shape is load-bearing, not cosmetic: `detectSource` keys off `/.claude/`
+ * and `extractProjectName` off the `projects`/`sessions` path segment, so both
+ * keep working unmodified, and the device stays recoverable from the path via
+ * the existing `sessionFileContains` store filter — no schema change, no
+ * rebuild of `sessions.lance` to gain a device dimension.
+ *
+ * **Opt-in on purpose.** Unset (the default) means discovery reads this
+ * machine's live runtime stores, exactly as before. Corpus paths are new keys in
+ * `data/session-manifest.json`, so the first indexing run after the switch
+ * re-embeds the whole corpus (~2k files). That belongs to a deliberate operator
+ * decision, not to whichever cron run happens to fire first.
+ */
+function getCorpusRoot(): string | undefined {
+  const raw = process.env.ANDENKEN_SESSION_CORPUS;
+  if (!raw) return undefined;
+  return raw.replace(/^~(?=\/|$)/, process.env.HOME ?? "");
 }
 
-function getClaudeProjectsDir(): string {
-  return path.join(process.env.HOME ?? "", ".claude", "projects");
+/**
+ * Device dirs under the corpus root, sorted for deterministic discovery order.
+ * A missing or empty corpus yields `[]`, which makes the callers below fall back
+ * to the live runtime stores rather than silently indexing nothing.
+ */
+function getCorpusDevices(): string[] {
+  const root = getCorpusRoot();
+  if (!root || !fs.existsSync(root)) return [];
+  return fs
+    .readdirSync(root)
+    .filter((d) => !d.startsWith(".") && fs.statSync(path.join(root, d)).isDirectory())
+    .sort();
+}
+
+function getPiSessionsDirs(): string[] {
+  const root = getCorpusRoot();
+  const devices = getCorpusDevices();
+  if (root && devices.length > 0) {
+    return devices.map((d) => path.join(root, d, ".pi", "agent", "sessions"));
+  }
+  return [path.join(process.env.HOME ?? "", ".pi", "agent", "sessions")];
+}
+
+function getClaudeProjectsDirs(): string[] {
+  const root = getCorpusRoot();
+  const devices = getCorpusDevices();
+  if (root && devices.length > 0) {
+    return devices.map((d) => path.join(root, d, ".claude", "projects"));
+  }
+  return [path.join(process.env.HOME ?? "", ".claude", "projects")];
+}
+
+/**
+ * Drop corpus copies of the same session held by more than one device.
+ *
+ * GLG's two machines already exchanged a manual `rsync -a` of the live claude
+ * store at some point, so 553 of ~2.1k gathered files exist under both device
+ * dirs, byte-identical. Indexing both would double those chunks and let one
+ * conversation answer a query twice.
+ *
+ * The key is the **basename**: pi and claude session ids are UUIDs, unique by
+ * construction, so two files sharing a basename are the same conversation. The
+ * winner is the larger file — a transcript only ever grows, so the larger copy
+ * is the one that was captured later and holds strictly more turns. Size ties
+ * break on the lexicographically smaller path, which keeps the choice stable
+ * across runs (an unstable choice would churn the manifest and re-embed).
+ *
+ * A no-op when discovery is on the live stores: one device cannot collide with
+ * itself.
+ */
+function dedupeByBasename(files: string[]): string[] {
+  const best = new Map<string, { path: string; size: number }>();
+  for (const f of files) {
+    let size: number;
+    try {
+      size = fs.statSync(f).size;
+    } catch {
+      continue;
+    }
+    const key = path.basename(f);
+    const cur = best.get(key);
+    if (!cur || size > cur.size || (size === cur.size && f < cur.path)) {
+      best.set(key, { path: f, size });
+    }
+  }
+  return [...best.values()].map((v) => v.path);
 }
 
 /**
@@ -200,20 +293,25 @@ function isNativePiSessionFile(file: string): boolean {
 export function findSessionFiles(baseDir?: string): string[] {
   const raw = baseDir
     ? scanDir(baseDir)
-    : [...scanDir(getPiSessionsDir()), ...scanClaudeDir(getClaudeProjectsDir())];
-  return raw.filter(f => {
+    : [
+        ...getPiSessionsDirs().flatMap(scanDir),
+        ...getClaudeProjectsDirs().flatMap(scanClaudeDir),
+      ];
+  return dedupeByBasename(raw.filter(f => {
     try { return fs.statSync(f).size > MIN_SESSION_SIZE_BYTES; } catch { return false; }
-  }).sort();
+  })).sort();
 }
 
 /**
  * Find session files from a specific source only
  */
 export function findSessionFilesBySource(source: SessionSource): string[] {
-  const raw = source === "pi" ? scanDir(getPiSessionsDir()) : scanClaudeDir(getClaudeProjectsDir());
-  return raw.filter(f => {
+  const raw = source === "pi"
+    ? getPiSessionsDirs().flatMap(scanDir)
+    : getClaudeProjectsDirs().flatMap(scanClaudeDir);
+  return dedupeByBasename(raw.filter(f => {
     try { return fs.statSync(f).size > MIN_SESSION_SIZE_BYTES; } catch { return false; }
-  });
+  }));
 }
 
 function scanDir(dir: string): string[] {
@@ -343,12 +441,12 @@ export async function extractSessionChunks(
       continue;
     }
 
-    const chunk =
+    const lineChunks =
       source === "claude"
         ? parseClaudeLine(parsed as unknown as ClaudeJsonlMessage, sessionFile, project, lineNumber)
         : parsePiLine(parsed as unknown as PiJsonlMessage, sessionFile, project, lineNumber);
 
-    if (chunk) chunks.push(chunk);
+    for (const chunk of lineChunks) chunks.push(chunk);
   }
 
   return chunks;
@@ -359,27 +457,34 @@ function parsePiLine(
   sessionFile: string,
   project: string,
   lineNumber: number,
-): SessionChunk | null {
+): SessionChunk[] {
   const timestamp = parsed.timestamp
     ? new Date(parsed.timestamp).toISOString()
     : "";
 
-  // Compaction summaries
+  // Compaction summaries. Split like any other long text — a compaction summary
+  // is often the densest record of a session and routinely runs past 2,000
+  // chars, so head-truncating it lost exactly the part worth keeping.
   if (parsed.type === "compaction" && parsed.compaction?.summary) {
-    return {
-      id: `${sessionFile}:${lineNumber}`,
-      text: parsed.compaction.summary,
+    const parts = splitForEmbedding(parsed.compaction.summary);
+    return parts.map((part, i) => ({
+      id: parts.length === 1
+        ? `${sessionFile}:${lineNumber}`
+        : `${sessionFile}:${lineNumber}#${i}`,
+      text: part,
       sessionFile,
       project,
       lineNumber,
       timestamp,
-      role: "compaction",
-      source: "pi",
-      metadata: { type: "compaction" },
-    };
+      role: "compaction" as const,
+      source: "pi" as const,
+      metadata: (parts.length === 1
+        ? { type: "compaction" }
+        : { type: "compaction", part: String(i), parts: String(parts.length) }) as Record<string, string>,
+    }));
   }
 
-  if (parsed.type !== "message" || !parsed.message) return null;
+  if (parsed.type !== "message" || !parsed.message) return [];
 
   const { role, content } = parsed.message;
   return parseMessageContent(
@@ -398,12 +503,12 @@ function parseClaudeLine(
   sessionFile: string,
   project: string,
   lineNumber: number,
-): SessionChunk | null {
+): SessionChunk[] {
   const { type } = parsed;
 
   // Claude Code: type IS the role ("user", "assistant")
-  if (type !== "user" && type !== "assistant") return null;
-  if (!parsed.message) return null;
+  if (type !== "user" && type !== "assistant") return [];
+  if (!parsed.message) return [];
 
   const timestamp = parsed.timestamp ?? "";
   const { content } = parsed.message;
@@ -427,55 +532,49 @@ function parseMessageContent(
   lineNumber: number,
   timestamp: string,
   source: SessionSource,
-): SessionChunk | null {
-  if (!content) return null;
-  if (role !== "user" && role !== "assistant") return null;
+): SessionChunk[] {
+  if (!content) return [];
+  if (role !== "user" && role !== "assistant") return [];
 
   const rawText = extractTextContent(content);
-  if (!rawText) return null;
+  if (!rawText) return [];
 
   // 1. Sanitize FIRST — strip OpenClaw-injected envelopes and drop
   //    generator-artifact wrappers. See session-sanitize.ts.
   const sanitized = sanitizeSessionChunkText(rawText, role, source);
-  if (!sanitized.ok) return null;
+  if (!sanitized.ok) return [];
   const text = sanitized.text;
 
   // 2. Length filter — POST-strip. An 80KB envelope-only message would
   //    now correctly fall through.
   // 3. Noise filter — patterns inherited from prior session-indexer behavior.
-  // 4. Truncate — embedding input cap, unchanged from prior policy.
+  // 4. Split — a long turn becomes several parts instead of losing its tail.
+  //    See splitForEmbedding for why head-truncation was retired.
 
-  if (role === "user" && text.length > 20) {
-    if (isNoise(text)) return null;
-    return {
-      id: `${sessionFile}:${lineNumber}`,
-      text: truncateText(text, 2000),
-      sessionFile,
-      project,
-      lineNumber,
-      timestamp,
-      role: "user",
-      source,
-      metadata: { type: "user_message" },
-    };
-  }
+  const minLength = role === "user" ? 20 : 100;
+  if (text.length <= minLength) return [];
+  if (isNoise(text)) return [];
 
-  if (role === "assistant" && text.length > 100) {
-    if (isNoise(text)) return null;
-    return {
-      id: `${sessionFile}:${lineNumber}`,
-      text: truncateText(text, 2000),
-      sessionFile,
-      project,
-      lineNumber,
-      timestamp,
-      role: "assistant",
-      source,
-      metadata: { type: "assistant_response" },
-    };
-  }
+  const parts = splitForEmbedding(text);
+  const metaType = role === "user" ? "user_message" : "assistant_response";
 
-  return null;
+  return parts.map((part, i) => ({
+    // A turn that fits in one part keeps its historical id, so the 70% of
+    // turns that never split are unaffected by this change.
+    id: parts.length === 1
+      ? `${sessionFile}:${lineNumber}`
+      : `${sessionFile}:${lineNumber}#${i}`,
+    text: part,
+    sessionFile,
+    project,
+    lineNumber,
+    timestamp,
+    role: role as "user" | "assistant",
+    source,
+    metadata: (parts.length === 1
+      ? { type: metaType }
+      : { type: metaType, part: String(i), parts: String(parts.length) }) as Record<string, string>,
+  }));
 }
 
 // --- Helpers ---
@@ -497,10 +596,99 @@ function truncateText(text: string, maxLength: number): string {
   return text.slice(0, maxLength) + "...";
 }
 
+/**
+ * Target size of one embedding part, in characters. Same number the old
+ * head-truncation used, so a turn that already fit is unaffected — this changes
+ * what happens to the ones that did NOT fit, not the size of a normal chunk.
+ */
+const CHUNK_TARGET_CHARS = 2000;
+
+/**
+ * A trailing fragment shorter than this is folded back into the previous part
+ * instead of being embedded alone. A 40-character orphan carries no retrievable
+ * meaning but still occupies a row and competes for top-k. Scaled to the target
+ * so a smaller target does not fold whole parts back together.
+ */
+function minTailChars(target: number): number {
+  return Math.min(200, Math.floor(target / 4));
+}
+
+/**
+ * Split a long turn into embedding-sized parts along the text's own boundaries.
+ *
+ * **Why this replaces head-truncation.** Until 2026-09-02 both user and
+ * assistant turns were cut at the first 2,000 characters. Measured over the
+ * corpus that day: 30.3% of user turns exceed 2,000 chars and **51.1% of all
+ * user characters were being discarded**, with the longest turn at 79,928.
+ * GLG's long prompts were in the corpus but only their opening was in the
+ * index, so a decision stated in the second half could never be retrieved. The
+ * corpus exists to recover prompt originals; truncating them at embed time
+ * contradicts the point of keeping them.
+ *
+ * Boundaries are tried widest-first — blank line, then line, then sentence —
+ * so a part lands on a seam the writer actually made. A hard slice is the last
+ * resort for text with no seams at all (a pasted log, a minified blob).
+ *
+ * Splitting, not summarizing: every character survives into exactly one part.
+ */
+export function splitForEmbedding(
+  text: string,
+  target: number = CHUNK_TARGET_CHARS,
+): string[] {
+  if (text.length <= target) return [text];
+
+  const parts: string[] = [];
+  let rest = text;
+
+  while (rest.length > target) {
+    const window = rest.slice(0, target);
+    // Widest seam first. Each index is the END of the kept slice.
+    let cut = window.lastIndexOf("\n\n");
+    if (cut > 0) cut += 2;
+    if (cut <= 0) {
+      cut = window.lastIndexOf("\n");
+      if (cut > 0) cut += 1;
+    }
+    if (cut <= 0) {
+      const sentence = Math.max(
+        window.lastIndexOf(". "),
+        window.lastIndexOf("? "),
+        window.lastIndexOf("! "),
+        window.lastIndexOf("다. "),
+      );
+      if (sentence > 0) cut = sentence + 1;
+    }
+    // No seam anywhere in the window (pasted log, minified blob) → hard slice.
+    // Also guard the degenerate case where the only seam sits at the very
+    // start, which would make no progress and spin forever.
+    if (cut <= 0 || cut > target) cut = target;
+
+    parts.push(rest.slice(0, cut).trimEnd());
+    rest = rest.slice(cut).trimStart();
+  }
+
+  if (rest.length > 0) {
+    // Fold a short tail back rather than embedding it alone.
+    if (rest.length < minTailChars(target) && parts.length > 0) {
+      parts[parts.length - 1] += "\n" + rest;
+    } else {
+      parts.push(rest);
+    }
+  }
+
+  return parts.filter((p) => p.length > 0);
+}
+
 // --- Legacy exports (backward compat with agent-config) ---
 
+/**
+ * Single pi sessions root, for agent-config callers that predate the corpus.
+ * Under a corpus, "the" pi root is no longer one directory — this returns the
+ * first device's, which keeps the legacy signature honest for a single-device
+ * caller. New code should use the discovery functions instead.
+ */
 export function getSessionsBaseDir(): string {
-  return getPiSessionsDir();
+  return getPiSessionsDirs()[0];
 }
 
 // ---------------------------------------------------------------------------
@@ -510,4 +698,8 @@ export function getSessionsBaseDir(): string {
 export const __test = {
   isNativePiSessionFile,
   isExcludedProjectDir,
+  splitForEmbedding,
+  getPiSessionsDirs,
+  getClaudeProjectsDirs,
+  dedupeByBasename,
 };

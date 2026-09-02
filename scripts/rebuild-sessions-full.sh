@@ -22,6 +22,17 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."   # repo root
 
+# --- corpus root: resolve from ~/.env.local when the caller did not export it ---
+# `./run.sh` load_env's the file first, but a direct invocation (or a systemd
+# unit) does not — and an unset corpus root silently falls back to this
+# machine's live stores, which would rebuild the wrong, smaller corpus without
+# saying so. Read it in a subshell so nothing else from that file leaks into
+# this script's carefully scoped SESSION_* environment.
+if [ -z "${ANDENKEN_SESSION_CORPUS:-}" ] && [ -f "$HOME/.env.local" ]; then
+  ANDENKEN_SESSION_CORPUS="$(set -a; . "$HOME/.env.local" >/dev/null 2>&1; printf %s "${ANDENKEN_SESSION_CORPUS:-}")"
+  [ -n "$ANDENKEN_SESSION_CORPUS" ] && export ANDENKEN_SESSION_CORPUS || unset ANDENKEN_SESSION_CORPUS
+fi
+
 # --- env: SESSIONS namespace ONLY ---
 #
 # API KEY TIMING (PR-B v2 boundary):
