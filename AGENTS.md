@@ -128,18 +128,44 @@ queryable only by a provider that emits the same dimension.
 
 | Track | Model / dim | Endpoint | When |
 |-------|-------------|----------|------|
-| **Sessions** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `https://openrouter.ai/api` via `ANDENKEN_SESSION_*` → `data/sessions.lance` | hourly incremental driven by `scripts/sync-sessions.sh` / agent-config `memory-sync` skill; full rebuild via `scripts/rebuild-sessions-full.sh` |
+| **Sessions** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `https://openrouter.ai/api` via `ANDENKEN_SESSION_*` → `data/sessions.lance` | incremental via `scripts/sync-sessions.sh --local` (this device, ssh 0) / `--global` (all devices + publish); corpus `~/repos/gh/session`; full rebuild via `scripts/rebuild-sessions-full.sh`; gated by `ANDENKEN_INDEX_AUTHORITY` |
 | **MD** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `https://openrouter.ai/api` via `ANDENKEN_MD_*` → `data/md.lance` | incremental driven by `./run.sh sync:md`; full index via `./run.sh index:md`; corpus `~/repos/gh/notes/content`; Oracle replication via `./run.sh sync:md:oracle` |
 | **Org** | Qwen3-Embedding-4B / 2560d | `ANDENKEN_ORG_*` / legacy vLLM path → `data/org.lance` | **disabled in production.** Upstream R&D only. Do not run from operator workflow. |
 
 ### Session corpus sources
 
-Sessions index exactly two harness sources:
+Since `v2026.9.3` the input is **not** one machine's live store. It is a
+device-merged, append-only lifetime corpus:
 
-| Source | Directory | Format |
-|--------|-----------|--------|
+```
+~/repos/gh/session/<device>/<the harness's own storage path>
+```
+
+That layout — the live path with one device segment prepended — **is the
+contract.** `detectSource` decides by `/.claude/` and `extractProjectName` reads
+the `projects` / `sessions` segment, so both pass unmodified and the lance schema
+did not change. Two rules: append-only (no `--delete`) and real copies (no
+hardlinks — a shared inode cannot travel to another machine).
+
+Inside each device directory the same two harness sources apply:
+
+| Source | Live path under each device | Format |
+|--------|-----------------------------|--------|
 | `pi` | `~/.pi/agent/sessions` | pi JSONL (`type="message"`, `message.role`) |
 | `claude` | `~/.claude/projects` | Claude Code JSONL (`type="user" | "assistant"`) |
+
+Corpus governance is a checksum manifest, not git — `MANIFEST.json` is the SSOT
+and `MANIFEST.sha256` is `sha256sum -c` compatible, so the corpus is verifiable
+without andenken. `DEVICES.json` is a **separate** roster
+(`state: active|retired`, `transport: local|ssh|push`); using the corpus
+directory listing as the roster means trying to reach a retired machine forever.
+Both files live in the corpus, not in this code repo, so they follow the memory
+when the laptop is replaced.
+
+Surfaces: `corpus:gather` / `corpus:manifest` / `corpus:replicate`. `gather` runs
+as Step 0 of `sync:sessions` and `rebuild:sessions` and **refuses to index if it
+fails** — no index is built on a corpus of unknown freshness. The authority gate
+sits *after* Step 0, so a refused call still completes its gather.
 
 Entwurf sessions are **not a third source**. A spawned/resumed entwurf is just a
 pi session written as `<created-at>_<native session id>.jsonl` under
@@ -279,9 +305,14 @@ Specific operations worth knowing by name:
   contract; do not leave ad-hoc rsync snippets outside `run.sh` / AGENTS.md.
 - `scripts/sync-sessions.sh` — sessions-only incremental path through
   OpenRouter Qwen3-Embedding-8B 4096d. Wrong-dim aborts before API; no-work
-  exits with API 0; optional `--push` to oracle, which rsyncs
-  `data/sessions.lance/` **and** `data/session-manifest.json` (both, always —
-  see INVARIANT 6.6). Used by the agent-config `memory-sync` skill.
+  exits with API 0. **Two modes since 2026-09-03.** `--local` (default) indexes
+  only this device's live sessions, uses no ssh and does not touch the replica —
+  cheap enough for a timer. `--global` gathers every device with `--strict`,
+  embeds, verifies, then publishes index **and** manifest **and** corpus in one
+  act (INVARIANT 6.6: the DB and its manifest always ship together, and pushing
+  an index without its corpus is what produced the 2026-09-03 oracle orphans).
+  `--push` is a deprecated alias. Used by the agent-config `memory-sync` skill;
+  nothing here is automated by default.
 - `scripts/rebuild-sessions-full.sh` — sessions-only full rebuild. Estimate →
   explicit confirmation → 4096d preflight → destroy sessions index → rebuild
   → verify. Human-driven and paid-remote gated.
@@ -336,15 +367,25 @@ workflow. Implications:
 - `session-manifest.json` is treated as a first-class artifact alongside
   `md-manifest.json` (the current production knowledge-axis manifest). Stale
   detection (mtime/size) is the entry point.
-- Hourly (or 30 min) sessions sync is the expected operating cadence. The
-  `memory-sync` skill in agent-config exists for that and only that — full
-  rebuild and oracle full-sync stay human-only.
+- Frequent `--local` incremental sync is the expected cadence, and the
+  `memory-sync` skill in agent-config exists for that. **`--global` is a human
+  call** — it is the moment both machines come to hold the same memory — and so
+  are full rebuild and oracle full-sync. GLG's 2026-09-03 decision was a scope
+  decision, not a refusal of automation: the machine may keep the beat, the
+  human decides the moment of coherence. It was also dated (`당분간`), not a
+  permanent design principle.
 - Verify still runs through `./run.sh verify sessions` after any sync that
   shows non-trivial chunk delta. Skill output alone is not verification.
-- **The local canonical host is the only indexing node. Oracle is a query
-  replica** — it holds session JSONLs of its own, but running the indexer there
-  forks the corpus and the next canonical `--push` (`rsync --delete`) discards
-  the fork. Push from here; never index there. See INVARIANT 7.1.
+- **Only the index authority writes. Oracle is a query replica** — it holds
+  session JSONLs of its own, but running the indexer there forks the corpus and
+  the next canonical publish (`rsync --delete`) discards the fork.
+  `ANDENKEN_INDEX_AUTHORITY` (default `thinkpad`) now enforces this in code and
+  blocks **indexing entry**, not merely the push: blocking only the push keeps
+  the canonical safe while leaving the replica free to fork itself, which is the
+  failure INVARIANT 7.1 actually names (2026-06-19 → 07-06, 27,966 vs 24,882).
+  A replica's own sessions reach search by travelling to the authority as source
+  files and returning inside the pushed index. `ANDENKEN_ALLOW_REPLICA_INDEX=1`
+  is a fork, not a way to catch up. See INVARIANT 7.1.
 
 ## Pointers
 
@@ -355,6 +396,8 @@ workflow. Implications:
 | **Next / parked items this agent should return to** | **[NEXT.md](./NEXT.md)** |
 | Rules that must stay true | [INVARIANT.md](./INVARIANT.md) |
 | Public framing / naming | [README.md](./README.md) |
+| What actually closed, by CalVer snapshot | [CHANGELOG.md](./CHANGELOG.md) |
+| **Who owns the memory — the cross-repo axis (Korean)** | [botlog 20260408T120252](https://notes.junghanacs.com/botlog/20260408T120252.html) |
 | "What can I run?" | `./run.sh` |
 
 When code and docs disagree, trust the code and update the doc. ROADMAP.md is

@@ -8,6 +8,33 @@ Semantic memory for humans and AI agents. Not a corporate RAG pipeline — an
 embedding lens that lets the meaning around one existence's canonical time axis
 return to the present.
 
+## Who owns the memory
+
+The agent-memory field mostly answers *how do we store memory intelligently*.
+beads, Letta, Hermes are one family: the DB is the authority and the system is
+the subject that curates. andenken sits on the opposite vertex — files are the
+authority, and a human sets the coordinates. That is not a claim of superiority;
+it answers a different question.
+
+Three operating consequences follow, and each one is visible in this repo:
+
+- **No automatic dreaming.** Memory refresh is split into four surfaces and
+  none of them run on a timer by default. `--local` is cheap enough to schedule,
+  but *the moment two machines come to hold the same memory* stays an explicit
+  human call (`--global`). The owner is not whoever holds every beat; it is
+  whoever decides the moment of coherence.
+- **Memory follows the person, not the machine.** The session corpus is a
+  device-merged, append-only lifetime folder with its own roster
+  (`~/repos/gh/session`). If the files that own memory live on exactly one
+  machine, then that machine is the real owner.
+- **The doc is the only thing standing between a request and a command.** With
+  no automation, a stale skill doc silently stops the memory axis. Owning the
+  surface means owning its verification.
+
+→ [에이전트 기억층 — 누가 기억의 주인인가](https://notes.junghanacs.com/botlog/20260408T120252.html)
+is the shared reference where andenken, agent-config, dictcli, nixos-config and
+aionsclubs each answer that question from their own repo (Korean).
+
 ## How to Read This
 
 andenken is one layer of a larger memory architecture. Before diving in,
@@ -57,7 +84,7 @@ covers all three.
 
 | Track | Quality bar | Scope |
 |-------|------------|-------|
-| **sessions** | Recover decisions and continuity inside canonical time windows | Core. pi + Claude Code JSONL with stored timestamp/project/role/source/file signals. OpenClaw parity is a technical baseline. |
+| **sessions** | Recover decisions and continuity inside canonical time windows | Core. pi + Claude Code JSONL, indexed from the device-merged corpus (`~/repos/gh/session`) with stored timestamp/project/role/source/file signals. OpenClaw parity is a technical baseline. |
 | **md (public garden)** | Recover durable interpretation attached to dated notes and events | Current production knowledge axis. Direct Markdown embedding over exported `~/repos/gh/notes/content` (~2,200 md / ~27MB). OpenClaw builtin md memory logic + LanceDB backend. |
 | **org** | Currently disabled | 3,000+ Denote notes. Source track. Doctor/chunker/incremental work is upstream R&D, **not** what agents consume right now. |
 
@@ -99,18 +126,27 @@ make, why did I do it, and where do I continue now?**
 ## Architecture
 
 ```
-                    ┌─ Session Indexer ─── pi sessions (.jsonl)
-Query ──→ Embed ──→ │                  └── Claude Code sessions (.jsonl)
+                    ┌─ Session Indexer ─── device-merged session corpus
+Query ──→ Embed ──→ │                       (pi + Claude Code .jsonl, all devices)
   │                 ├─ MD Chunker ──────── public garden (~2,200 .md, exported)
   │                 └─ (Org Chunker) ───── disabled — upstream R&D
   │
   ├─ Vector Search (sessions + md 8B/4096d; org 4B/2560d when re-enabled; LanceDB)
   ├─ Full-Text Search (BM25, Korean particle stripping)
   ├─ Hybrid Merge (weighted sum / RRF)
-  ├─ Temporal Decay (exponential, configurable half-life)
+  ├─ Temporal Decay — OFF in production (see below); `mode=recent` carries recency
   ├─ MMR Diversity Re-ranking
   └─ dictcli Query Expansion (Korean→English cross-lingual)
 ```
+
+`applyRecencyDecay` still exists in `retriever.ts`, but both live tracks pass
+`recencyHalfLifeDays: 0` (`index.ts`, `cli.ts` session path, `md-search.ts`).
+The 14-day half-life removed on 2026-09-03 multiplied scores by
+`exp(-ln2 x age/14)` and then applied `minScore 0.001`, so an ordinary hit fell
+below the floor at roughly 49 days and a strong one at roughly 85. On a memory
+axis built to reach back years, that was a hard delete wearing the costume of a
+ranking signal. Recency intent belongs to `--mode recent`, which is a primary
+sort over stored timestamps, not a multiplier on relevance.
 
 ### Three-layer search
 
@@ -150,22 +186,52 @@ harnesses).
 
 | Track | Model / dim | Endpoint | Status |
 |-------|-------------|----------|--------|
-| **Sessions** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `ANDENKEN_SESSION_*` → `data/sessions.lance` | Live. Closed and stable. |
-| **MD** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `ANDENKEN_MD_*` → `data/md.lance` | Live production knowledge axis. First production cut: 10,119 chunks / 2,192 indexed files, with `doctor --md` explaining the remaining 18 zero-chunk files. |
+| **Sessions** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `ANDENKEN_SESSION_*` → `data/sessions.lance` | Live. Indexed from the device-merged corpus since `v2026.9.3`. 76,044 chunks / 1,627 files (2026-09-03). |
+| **MD** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `ANDENKEN_MD_*` → `data/md.lance` | Live production knowledge axis. 10,704 chunks / 2,230 indexed files (2026-09-03); `doctor --md` accounts for the manifest↔indexed gap. |
 | **Org** | Qwen3-Embedding-4B / 2560d | `ANDENKEN_ORG_*` → `data/org.lance` | **Disabled.** Upstream R&D only. Do not run `index:org` in production. |
 
 LanceDB stores are dimension- and track-separated. Each track's search must use
 its own provider env. The 4096d sessions/md providers and the 2560d org provider
 are not cross-compatible.
 
-### Session sources
+### Session sources — the device-merged corpus
 
-andenken indexes two session sources:
+Since `v2026.9.3` the sessions track does **not** index a single machine's live
+store. Its input is a device-merged lifetime corpus:
 
-| Source | Directory | Notes |
-|--------|-----------|-------|
+```
+~/repos/gh/session/<device>/<the harness's own storage path>
+```
+
+The layout is the live path with one device segment prepended, and that is the
+contract: `detectSource` still decides by `/.claude/`, `extractProjectName`
+still reads the `projects` / `sessions` segment, so both pass unmodified and
+**the lance schema did not change**.
+
+| Source | Live path under each device | Notes |
+|--------|-----------------------------|-------|
 | `pi` | `~/.pi/agent/sessions` | pi-native harness sessions |
 | `claude` | `~/.claude/projects` | standalone Claude Code sessions |
+
+Two rules govern the corpus: **append-only** (never `rsync --delete`) and **real
+copies** (no hardlinks — a shared inode cannot move to another machine).
+
+Why it was needed, measured on 2026-09-02: after filtering, thinkpad held 1,137
+files and oracle 1,008, overlapping on 553 — **455 files (0.69GB) existed only on
+oracle**, including 64 openclaw workspace sessions with no counterpart on the
+laptop. An oracle agent searching its own memory could not find its own work.
+
+Integrity is a checksum manifest, not git. One trial commit of the corpus cost a
+**806MB pack and 47m47s of gitleaks**, and append-only data has no readable diff
+and no history worth rewriting. `MANIFEST.json` is the SSOT and
+`MANIFEST.sha256` is `sha256sum -c` compatible — **verifiable without andenken**.
+`DEVICES.json` is a separate roster (`state: active|retired`,
+`transport: local|ssh|push`) because using the corpus directory listing as the
+roster means trying to reach a retired machine forever.
+
+Surfaces: `corpus:gather` / `corpus:manifest` / `corpus:replicate`. `gather`
+runs as Step 0 of `sync:sessions` and `rebuild:sessions` and **refuses to index
+when it fails** — an index is never built on a corpus of unknown freshness.
 
 Do **not** index `~/.pi/agent/claude-config-overlay/projects`. It is the
 pi-shell-acp Claude overlay and would duplicate work already represented in pi
@@ -199,13 +265,13 @@ therefore much easier to tune than the raw Denote tree.
 | provider env | `ANDENKEN_MD_*` | OpenRouter qwen/qwen3-embedding-8b |
 | md doctor | `./run.sh doctor --md` | provider / DB / manifest / gap explainability |
 
-Current first-cut baseline:
+Current state (2026-09-03):
 
-- `10,119` chunks / `2,192` indexed files / `2,210` manifest entries
-- gap `18` is fully explained by `doctor --md`
-  - `3` files skipped by `noembed_tag`
-  - `15` files skipped by `min_body`
-  - `0` unclassified drift
+- `10,704` chunks / `2,230` indexed files / `2,245` manifest entries
+- the manifest↔indexed gap is accounted for by `doctor --md` through
+  `analyzeMdFile` skip reasons (`noembed_tag`, `min_body`, `all_chunks_short`,
+  `deleted`, `unclassified`); the first production cut on 2026-05-12 closed with
+  `18 = 3 noembed_tag + 15 min_body`, `unclassified=0`
 - chunk count is intentionally much lower than org (`44,916`) because the md
   chunker emits larger, denser OpenClaw-style CJK-weighted chunks rather than
   org's heading/body two-tier fragments.
@@ -229,22 +295,41 @@ sqlite. See [COMPARISON.md](./COMPARISON.md) for the track-by-track matrix.
 
 ```bash
 cd ~/repos/gh/andenken
-scripts/sync-sessions.sh              # sessions incremental (8B/4096d)
-scripts/rebuild-sessions-full.sh      # sessions full rebuild (estimate + confirm)
+./run.sh sync:sessions --local        # this device only, zero ssh, no replica touch
+./run.sh sync:sessions --global       # gather every device → embed → verify → publish
+./run.sh rebuild:sessions             # sessions full rebuild (estimate + confirm)
+./run.sh corpus:gather [--strict]     # collect admitted sessions from every device
+./run.sh corpus:manifest verify       # sha256 integrity over the corpus
 ./run.sh index:md                     # md incremental / full (with gate when needed)
 ./run.sh search:md "<query>"          # md search
 ./run.sh doctor --md                  # md production triage / gap explainability
+./run.sh accept                       # user-facing acceptance (API 0 by default)
 ./run.sh golden                       # transitional component baseline; see NEXT.md
 ```
 
-`sync-sessions.sh` is the operating heartbeat for the sessions track and what
-the agent-config `memory-sync` skill calls. The current golden fixtures still
-contain vocabulary-heavy probes; they are retained only as transitional
-component checks while the gate is rebuilt around canonical timeline evidence.
-The md track follows the same shape (manifest-driven incremental). The legacy mixed-track
-`scripts/rebuild-incremental.sh` / `scripts/rebuild-full.sh` paths are
-deprecated; each track is run on its own. Org indexing is currently disabled
-in production — do not invoke `index:org` outside upstream R&D.
+`scripts/sync-sessions.sh` is the operating heartbeat for the sessions track and
+what the agent-config `memory-sync` skill calls. Since 2026-09-03 it has two
+modes. `--local` (the default) indexes only this device's live sessions, uses no
+ssh, and does not touch the replica — cheap enough to put on a timer.
+`--global` gathers every device with `--strict`, embeds, verifies, and publishes
+the index, the manifest **and** the corpus in one act; that is the moment a human
+is meant to hold. `--push` remains as a deprecated alias. Nothing here is
+automated by default.
+
+**Only the index authority writes.** `ANDENKEN_INDEX_AUTHORITY` (default
+`thinkpad`) gates the indexer itself, not just the push — see
+[INVARIANT.md](./INVARIANT.md) §7.1. The gate sits *after* Step 0, so a refused
+call still completes its gather: a replica's sessions travel to the authority as
+source files and come back inside the index that is pushed to it.
+`ANDENKEN_ALLOW_REPLICA_INDEX=1` is a fork, not a way to catch up.
+
+The current golden fixtures still contain vocabulary-heavy probes; they are
+retained only as transitional component checks while the gate is rebuilt around
+canonical timeline evidence. The md track follows the same shape (manifest-driven
+incremental). The legacy mixed-track `scripts/rebuild-incremental.sh` /
+`scripts/rebuild-full.sh` paths are deprecated; each track is run on its own. Org
+indexing is currently disabled in production — do not invoke `index:org` outside
+upstream R&D.
 
 ## Why the name
 
@@ -263,10 +348,25 @@ In Heidegger, *Geworfenheit* and *Andenken* form a pair. 이기상 rendered
 - **[NEXT.md](./NEXT.md) — the single next thing this agent is doing.** Korean.
 - [AGENTS.md](./AGENTS.md) — agent-in-charge doc (axes, boundaries, ownership)
 - [INVARIANT.md](./INVARIANT.md) — rules that must stay true across changes
+- [CHANGELOG.md](./CHANGELOG.md) — CalVer snapshots of what actually closed
 - `./run.sh` — living command catalogue (what this repo can actually do)
 
 ## Recent milestones
 
+- **2026-09-03** — sessions sync split into `--local` / `--global`, and the
+  device corpus, index and manifest now publish as one act. Sessions reached
+  76,044 chunks / 1,627 files; md 10,704 / 2,230.
+- **2026-09-02** — `v2026.9.3`: the sessions input became a **device-merged
+  lifetime corpus** (`~/repos/gh/session`) governed by a checksum manifest and a
+  device roster, not git. Two long-standing quality defects closed with it — the
+  2K embedding truncation (30.3% of user turns were over 2,000 chars; 51.1% of
+  all user characters sat outside the index) and the 14-day recency decay that
+  was deleting anything older than a season. `ANDENKEN_INDEX_AUTHORITY` now
+  gates indexing itself, per INVARIANT §7.1.
+- **2026-08-10** — `v2026.8.10`: pi corpus admission moved to the current native
+  id suffix `_<UUIDv7>.jsonl`. pi had emitted UUIDv7 since 2026-04-15 and only
+  UUIDv7 from 2026-08-07, so the old garden-id filter had been admitting zero new
+  pi sessions — no error, just the pi half of the corpus going quiet.
 - **2026-05-12** — md first production cut closed. Live knowledge surface
   pivoted from org to md; `knowledge_search` now points at the public garden
   track, Oracle sync handoff is in place, and `doctor --md` explains the

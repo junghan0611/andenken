@@ -30,17 +30,16 @@
 
 # RECENT
 
-- **[2026-09-03] 세션 sync가 두 모드로 갈렸다** (`96d674d`). 기본 `--local`(이 기기만, ssh 0),
-  `--global`(전 기기 gather --strict → embed → verify → 인덱스+매니페스트+코퍼스 publish).
-  셋을 한 act로 묶은 이유: 오퍼레이터가 계속 둘만 했고, 09-03에 양 트랙이 각각 오라클에
-  소스 없는 인덱스를 남겼다. `--push`는 deprecated alias. 자동화는 하지 않는다(GLG) —
-  네 단계 전부 명시 호출이고, `andenken-embed` 맨 위 라우팅 표가 그 계약이다.
-- **[2026-09-03] #10·#11 닫힘, #13 신설.** #10의 마지막 갭은 처방이 뒤집혔다 —
-  "코퍼스 밖"이 아니라 **JSONL이 없다**(sqlite 이관). 그런데 OpenClaw가 이미 6봇 세션을
-  `qwen/qwen3-embedding-8b` 4096d로 임베딩해 뒀다. **우리와 같은 모델·같은 차원이라
-  재임베딩 없이 import**하면 된다(약 80MB, API 0원).
-- **[2026-09-03] 양쪽 최종 상태** — sessions 76,044 / md 10,704 / 코퍼스 2,181 files,
-  verify 양쪽 통과, 코드 `a139078`. 오늘 임베딩 총비용 약 $0.005.
+09-02~09-03에 닫힌 것(코퍼스·sync 두 모드·스킬 문서·#10/#11)은 `v2026.9.3`과
+`v2026.9.4`의 [CHANGELOG.md](./CHANGELOG.md)로 옮겼다. 여기는 다음 한 걸음만 둔다.
+
+- **[2026-09-04] 대문과 담당자 문서가 코퍼스 시대를 따라잡았다** (`v2026.9.4`).
+  README에 `## Who owns the memory`를 세워 공동 레퍼런스
+  [botlog 20260408T120252](https://notes.junghanacs.com/botlog/20260408T120252.html)에
+  연결하고, 아키텍처 도해의 사실 오류(decay가 기능처럼 적혀 있었다)를 고쳤다.
+  AGENTS.md는 세션 소스절·endpoints·cadence를 코퍼스/authority 계약으로 갱신.
+  **남은 사본 점검**: `ROADMAP.md`·`COMPARISON.md`·`INVARIANT.md` §7.1은 아직
+  `--push` 시대의 말로 적혀 있다. 정본이 움직였으니 다음 차례다.
 
 # 백로그 — 굽고 나서 남은 것
 
