@@ -8,6 +8,11 @@ Semantic memory for humans and AI agents. Not a corporate RAG pipeline — an
 embedding lens that lets the meaning around one existence's canonical time axis
 return to the present.
 
+> **Agent-in-charge doc** — [§andenken: 존재의 뜻새김, 시맨틱 메모리를 넘어서](https://notes.junghanacs.com/botlog/20260319T110800.html)
+> (Denote `20260319T110800`, Korean). The public standing report of the agent
+> who owns this repo: what andenken is for, the two turns it must make, where
+> its boundaries are, and why it is named after Heidegger's *Andenken*.
+
 ## Who owns the memory
 
 The agent-memory field mostly answers *how do we store memory intelligently*.
@@ -105,23 +110,72 @@ as the sessions track.
 
 ## What It Does
 
-Records buried in time — session conversations and the exported public garden —
-are embedded into vector space. The current production surface is deliberately
-narrow: sessions recover the reasoning and next move; md recovers durable
-interpretation. A caller supplies or discovers the time coordinate through the
-canonical timeline, then uses andenken to restore meaning around it.
+andenken is not a harness that keeps sessions alive, and it is not a search
+benchmark that finds a few concept words in a garden. It is the embedding memory
+axis that brings the judgements and inventions made inside a session — long after
+that session has flowed away — back around the events on the canonical time axis,
+so they become the next move in the present.
+
+> The bridge calls, the session flows away, the time axis keeps the facts, and
+> andenken helps those facts gain meaning again.
+
+**The time axis is the skeleton; the embedding is the lens.** `timeline` owns
+*when* and *what*; andenken recovers *why*, *which judgement*, and *where it
+continues* out of sessions and md. That runs in both directions:
+
+1. **time → meaning** — given a date or window, read the timeline's events and
+   refs, then find the session judgements and the durable garden interpretation
+   around them.
+2. **meaning → time** — start from today's question, find candidate sessions and
+   notes, then send the timestamps, files and identifiers they yield back to the
+   timeline to confirm the real coordinate and the depth around it.
+
+An explicit date is read first, structurally. **An embedding result never becomes
+the truth about time.**
 
 ```
 andenken search-sessions "why did we stop the paid full rebuild"
 andenken search-sessions "last week's decision" --date-from ... --date-to ...
+andenken search-sessions "corpus 결정" --mode recent --project andenken
 andenken search-md "2026-07-11 장염 복통"
 andenken status
-./run.sh doctor --md       # production md triage / gap explainability
+./run.sh corpus:manifest verify   # is the corpus itself intact?
+./run.sh doctor --md              # production md triage / gap explainability
+./run.sh accept                   # user-facing acceptance (API 0 by default)
 ```
 
 The north-star question is not whether a generic concept term returns
-something. It is whether the system can answer: **what did I live, what did I
-make, why did I do it, and where do I continue now?**
+something. Two days out of the real time axis define it better than any
+vocabulary probe:
+
+- **2026-02-07** — commits, stamps, notes and journal are all silent, yet the day
+  holds 611.6 min of family, 358.6 min of reading, 484.6 min of sleep. Reading
+  only the artifacts and answering "an empty day" is a failure.
+- **2026-07-11** — sleep, reading and family time plus the journal's `장염 복통`
+  and `인간 환멸`, with zero depth-2/3 artifacts. The answer is not "did
+  nothing"; it is to distinguish the *depth* of the record.
+
+So the question the system must answer is: **what did I live, what did I make,
+why did I do it, and where do I continue now?**
+
+### What andenken does not own
+
+The boundaries are as load-bearing as the features. Each line names another
+agent-in-charge who does own it.
+
+| Not ours | Whose | Why the line matters |
+|---|---|---|
+| KST coordinates, event identity, source status, provenance, natural-language dates | `timeline` (agent-config) | A similarity score must never become the truth about time. andenken does not merge `empty / partial / stale / unreadable` on its own. |
+| Calling, waking, resuming a session; transport between garden citizens | `entwurf` / `meta-bridge` | andenken searches what a session left behind; it does not keep sessions alive. |
+| Exposing recall to each harness, composing time facts with embedding evidence | `agent-config` | One capability, but its reach differs per surface — a doc that claims three axes from the CLI misleads a sibling inside pi. |
+| Korean morphology, ko↔en vocabulary pairs | `dictcli` | Layer 1 does not absorb Layer 3. Particle stripping lives here only because it is BM25 preprocessing. |
+| Note structure, backlinks, dblocks | `denotecli` | Layer 2 is navigation, not retrieval. |
+| Bot memory quality, chunking, model | OpenClaw (nixos-config) | Issue #13 is a **harvest**, not a sync. We import; we do not tune their axis. |
+| The garden content itself | GLG | andenken reads the notes; it never curates the source. |
+
+And one rule that reads like a feature but is a boundary: an overlay or a bridge
+mailbox is **never** embedded as a third session source. That work is already
+represented in the pi sessions; indexing it would manufacture duplicate memory.
 
 ## Architecture
 
@@ -173,11 +227,36 @@ Same core serves pi (extension), Claude Code (skill), OpenCode (skill). Tools:
 compatibility alias to `search-md`. See `index.ts` (pi) and `cli.ts` (CLI
 harnesses).
 
+The md path is deliberately **one shared core**: since 2026-08-11 the pi
+extension's `knowledge_search`, the CLI's `search-md`, and the `golden` gate all
+call `searchMdCore()` in `md-search.ts`, so the gate and the agent-facing tool no
+longer measure different pipelines. A copy of a production path is not a
+shortcut — `golden` once kept its own inline decay constant and silently held the
+old value after production changed it.
+
+**A capability is not equally reachable from every surface.** The CLI may carry
+an axis the pi tool surface does not yet expose. Where they differ, this repo
+says so rather than letting a sibling hunt for something that is not there.
+
+### Is it any good? — three layers, and only one of them is automatic
+
+`./run.sh accept` is the user-facing acceptance surface, deliberately separate
+from `golden`:
+
+1. **index / operator health** — API 0.
+2. **retrieval behaviour** — canonical evidence rank, document-level diversity,
+   and an honest `stale-index` / `corpus-miss` / `ranking-miss` classification.
+   `--retrieval` opts into paid query embeddings.
+3. **a human verdict** — `usable` / `partial` / `not-improved`. **No automated
+   run may set this.** A green tally is not user acceptance.
+
+Cases live in `acceptance-cases.json`, so adding one never touches code.
+
 ## Stack
 
 - **Embeddings** Sessions + md: Qwen3-Embedding-8B via OpenRouter (4096d). Org (disabled): Qwen3-Embedding-4B (2560d).
 - **Vector store** LanceDB (file-based, one file per track)
-- **Retrieval** Weighted merge + RRF + temporal decay + MMR
+- **Retrieval** Weighted merge + RRF + MMR. Temporal decay is implemented but off in both live tracks; recency is `--mode recent`.
 - **Chunking** Track-specific. Sessions: message-aware. MD: Markdown-aware. Org (disabled): org 2-tier (heading + direct body).
 - **Query expansion** dictcli personal vocabulary graph
 - **Runtime** TypeScript (tsx)
@@ -339,13 +418,19 @@ upstream R&D.
 In Heidegger, *Geworfenheit* and *Andenken* form a pair. 이기상 rendered
 *Andenken* as 뜻새김 — "engraving meaning through recollection."
 
-→ [Naming document](https://notes.junghanacs.com/botlog/20260319T110800.html) (Korean)
+→ The naming record lives in the ARCHIVE of the agent-in-charge doc:
+[§andenken: 존재의 뜻새김](https://notes.junghanacs.com/botlog/20260319T110800.html)
+(Denote `20260319T110800`, Korean) — including the rejected candidates and how
+the Greek *mnemo* turned into the German *Andenken*.
 
 ## Further reading
 
 - **[ROADMAP.md](./ROADMAP.md) — core document.** OpenClaw vs andenken comparison summary, change history, maintenance signals, role boundaries. Korean.
 - **[COMPARISON.md](./COMPARISON.md) — detailed sessions + md matrix vs OpenClaw.** English.
 - **[NEXT.md](./NEXT.md) — the single next thing this agent is doing.** Korean.
+- **[§andenken 담당자 문서](https://notes.junghanacs.com/botlog/20260319T110800.html)
+  — the public standing report of this repo's agent-in-charge.** Denote
+  `20260319T110800`. Korean.
 - [AGENTS.md](./AGENTS.md) — agent-in-charge doc (axes, boundaries, ownership)
 - [INVARIANT.md](./INVARIANT.md) — rules that must stay true across changes
 - [CHANGELOG.md](./CHANGELOG.md) — CalVer snapshots of what actually closed

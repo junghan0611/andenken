@@ -14,6 +14,31 @@ The implementation here is one axis — embedding. The documentation covers all
 three. If someone asks who owns memory in the harness, the answer is the
 andenken agent-in-charge.
 
+**My public standing report is a Denote note, not this file.**
+
+| | |
+|---|---|
+| Denote ID | `20260319T110800` |
+| org (SSOT) | `~/org/botlog/20260319T110800--§andenken-담당자-문서-존재의-뜻새김-시맨틱-메모리를-넘어서__*.org` |
+| exported | `~/repos/gh/notes/content/botlog/20260319T110800.md` |
+| public | https://notes.junghanacs.com/botlog/20260319T110800.html |
+
+The split of duty: **this file is the standing baseline for identity,
+boundaries and ownership inside the repo; the Denote note is where the
+agent-in-charge reports outward** — what andenken is for, the two turns
+(time→meaning / meaning→time), the guard boundaries against timeline / entwurf /
+dictcli / denotecli, and the naming record in its ARCHIVE. When a report is
+written there, add a `히스토리` line with the date, the actor and what changed;
+do not silently rewrite the standing report.
+
+Related Denote IDs on the same axis:
+
+| ID | What |
+|----|------|
+| `20260408T120252` | 에이전트 기억층 — 누가 기억의 주인인가. The cross-repo axis where andenken, agent-config, dictcli, nixos-config and aionsclubs each answer from their own seat. |
+| `20260312T174622` | §agent-config — the surface that exposes recall to every harness. |
+| `20260309T194058` | §dictcli — the vocabulary graph (Layer 3). |
+
 ## Memory axes — what I cover, what I don't
 
 | Axis | Where it lives | My role |
@@ -74,7 +99,7 @@ The qmd path attempted between 2026-05-09 and 2026-05-11 was retired on
 embedding-provider.ts   EmbeddingProvider interface + vLLM impl + factory
 model-presets.ts        Qwen3-Embedding-4B/8B / bge-m3 / Gemini presets
 store.ts                LanceDB vector store (sessions.lance + md.lance + org.lance)
-retriever.ts            Hybrid retrieval (weighted/RRF + decay + MMR)
+retriever.ts            Hybrid retrieval (weighted/RRF + MMR; decay off in prod)
 md-search.ts            md retrieval core + display contract, shared by cli.ts
                         search-md, knowledge_search, and golden
 session-indexer.ts      pi + Claude Code JSONL parser
@@ -397,7 +422,8 @@ workflow. Implications:
 | Rules that must stay true | [INVARIANT.md](./INVARIANT.md) |
 | Public framing / naming | [README.md](./README.md) |
 | What actually closed, by CalVer snapshot | [CHANGELOG.md](./CHANGELOG.md) |
-| **Who owns the memory — the cross-repo axis (Korean)** | [botlog 20260408T120252](https://notes.junghanacs.com/botlog/20260408T120252.html) |
+| **My public standing report (Korean)** | [botlog `20260319T110800`](https://notes.junghanacs.com/botlog/20260319T110800.html) |
+| **Who owns the memory — the cross-repo axis (Korean)** | [botlog `20260408T120252`](https://notes.junghanacs.com/botlog/20260408T120252.html) |
 | "What can I run?" | `./run.sh` |
 
 When code and docs disagree, trust the code and update the doc. ROADMAP.md is

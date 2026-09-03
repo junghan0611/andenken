@@ -5,6 +5,81 @@ andenken CalVer 스냅샷. 형식 `vYYYY.M.D[-suffix]`. 과거에 *닫힌* 작�
 
 ## Unreleased
 
+## v2026.9.4-docs.1 — 담당자 문서를 대문에 걸고, 사본 다섯 장을 같은 날 옮긴다
+
+`v2026.9.4`가 README와 AGENTS.md만 옮겼다. 그러고 나서 NEXT에
+"`ROADMAP`·`COMPARISON`·`INVARIANT`는 아직 `--push` 시대의 말로 적혀 있다"라고
+적어 두었는데, **그게 정확히 09-03에 일곱 번 반복된 결함의 모양이다** — 정본이
+움직이고 사본이 뒤에 남는다. 그래서 다음 세션으로 넘기지 않고 같은 날 닫는다.
+
+### 담당자 문서를 대문에 건다
+
+- 리포의 공개 담당자 문서는 이 파일들이 아니라 **Denote 노트
+  [`20260319T110800`](https://notes.junghanacs.com/botlog/20260319T110800.html)**
+  (§andenken: 존재의 뜻새김, 시맨틱 메모리를 넘어서)다. README 맨 위와
+  Further reading에 걸었고, `## Why the name`의 링크도 "Naming document"에서
+  **담당자 문서의 ARCHIVE에 네이밍 기록이 있다**로 바로잡았다 — 담당자 문서를
+  각주로 걸어 두고 있었던 셈이다.
+- AGENTS.md §Who I Am에 **Denote ID·org SSOT 경로·export 경로·공개 URL**을 표로
+  박고 역할 분담을 적었다: 이 파일은 리포 안의 상시 기준선, **노트는 담당자가 밖으로
+  내는 보고**. 보고를 쓸 때는 `히스토리` 줄(날짜·행위자·무엇이 바뀌었나)을 남기고
+  조용히 덮어쓰지 않는다. 같은 축의 이웃 ID(`20260408T120252` 기억 주인 축 ·
+  `20260312T174622` agent-config · `20260309T194058` dictcli)도 함께.
+
+### 대문이 하는 일을 보이게
+
+- **`## What It Does`를 다시 썼다.** 담당자 문서의 정의를 그대로 가져왔다 — andenken은
+  세션을 살려 두는 하네스도, 개념어를 잘 찾는 검색 벤치마크도 아니다. 시간축은
+  뼈대이고 임베딩은 렌즈이며, 두 방향(시간→뜻 / 뜻→시간)으로 돈다. **명시된 날짜는
+  구조적으로 먼저 읽고, 임베딩 결과가 시간의 진실이 되는 일은 없다.**
+- 북극성을 어휘 프로브 대신 **실제 시간축의 두 날**로 적었다. 2026-02-07(산출물은
+  전부 침묵하지만 가족 611.6분·독서 358.6분·수면 484.6분을 산 날 — "빈 날"이라
+  답하면 실패)과 2026-07-11(깊이 2·3 산출물 0, 저널엔 `장염 복통`·`인간 환멸` —
+  "아무것도 안 했다"가 아니라 기록의 *깊이*를 구분해야 하는 날).
+- **`### What andenken does not own` 신설.** 경계는 기능만큼 하중을 받는다. 일곱 줄
+  전부 그것을 실제로 소유한 담당자 이름을 댄다(timeline / entwurf·meta-bridge /
+  agent-config / dictcli / denotecli / OpenClaw / GLG). overlay·bridge mailbox를
+  제3의 세션 소스로 임베딩하지 않는다는 규칙도 여기 — 기능처럼 보이지만 경계다.
+- **`### Is it any good?`** — `accept`의 3층(인덱스 건강 API 0 / 회수 거동 /
+  **사람의 판정**)을 적었다. 초록색 집계는 사용자 수용이 아니다.
+- Multi-Harness에 **공유 코어**를 적었다: `knowledge_search`·`search-md`·`golden`이
+  모두 `searchMdCore()`를 부른다. 그리고 표면마다 도달이 다르다는 것 —
+  CLI에 있는 축이 pi 도구면에 없을 수 있고, 그걸 문서가 말해야 형제가 없는 것을
+  찾아 헤매지 않는다.
+
+### 사본 다섯 장 — decay는 넷, `--push`는 셋에 남아 있었다
+
+정정은 **현재 상태를 주장하는 문장**만 건드렸다. 날짜가 박힌 히스토리 항목은
+그때의 사실이므로 그대로 둔다.
+
+- **ROADMAP**: 비교표의 `Temporal decay | enabled | 30d vs 14d` 행, 세션 규모
+  (`1,600+ / 28,537` → **1,627 files / 76,044 chunks**), md 규모
+  (**2,230 indexed / 10,704 chunks**). 운영 신호 표에서 `시간당`으로 적혀 있던
+  `sync-sessions.sh` 한 줄을 `--local` / `--global` / `corpus:gather` /
+  `corpus:manifest verify` 네 줄로 갈랐고, "sessions → oracle **자동화 미정**
+  (ad-hoc rsync)"을 `--global` publish 계약과 authority 게이트로 교체. 역할 분담의
+  OpenClaw 행에 **#13은 회수이지 동기화가 아니다**를 명시. History에 08-10 ·
+  09-02 · 09-03 · 09-04 추가.
+- **COMPARISON**: `Time signal`, parity 표의 `Temporal decay`, OpenClaw 포팅
+  검토표의 "session 14일 / md 0일이라 정합" 판단, Hermes 3자 비교표의
+  `hybrid + MMR + decay` — 네 곳. 특히 "값 차이는 코퍼스 성격 차이라 정합"이라는
+  옛 판단은 **세션 코퍼스가 몇 년을 거슬러 올라가는 축**이라는 사실 앞에서 뒤집혔다.
+- **INVARIANT**: §0의 파이프라인 서술에서 decay 제거. §6.6을 **코퍼스까지 확장** —
+  세션 트랙은 인덱스·매니페스트·코퍼스가 함께 publish된다(인덱스만 밀면 소스 없는
+  orphan, 09-03 실측 7건). §7.1을 `ANDENKEN_INDEX_AUTHORITY`로 다시 쓰고 **push가
+  아니라 색인 진입을 막는다**는 것과 게이트가 Step 0 뒤에 있는 이유를 적었다.
+  **§7.2 신설 — 최근성은 정렬이지 곱셈이 아니다.** 새 트랙이 0이 아닌 half-life를
+  조용히 되살리지 못하게 하고, `golden-queries.ts`가 인라인 사본으로 옛 상수를
+  들고 있었던 사건(`f048a0a`)을 그 자리에 증거로 남긴다.
+- **README·AGENTS**: Stack / `retriever.ts` 한 줄 설명에 남아 있던 decay 표기 정정.
+
+### 검증
+
+- `test:unit` 197 passed / 0 failed.
+- 잔여 검사: 다섯 문서에서 `--push`는 deprecated alias 표기와 2026-07-14 관측
+  기록만, decay는 "꺼져 있다"는 서술과 §7.2 본문만 남는다.
+
+
 ## v2026.9.4 — 기억 갱신이 두 박자로 갈리고, 대문이 그 자리를 따라간다
 
 `v2026.9.3`이 **입력면**(기기 합본 코퍼스)을 바꿨다면, 이번은 **호출면**이다.

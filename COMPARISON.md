@@ -41,7 +41,7 @@ except where they change corpus boundaries or operator expectations.
 | Chunking style | Flattened transcript → message-aware chunking | JSONL transcript parsing → message-aware chunking |
 | Retrieval shape | Hybrid retrieval | Hybrid retrieval |
 | Shared tuning baseline | 2026-05-08 parity work aligned chunking / hybrid / MMR assumptions | Same baseline; then moved to 8B/4096d on 2026-05-10 |
-| Time signal | Runtime memory stack can promote/demote across layers | Exponential temporal decay inside the retriever |
+| Time signal | Runtime memory stack can promote/demote across layers | **No decay since 2026-09-03** (`recencyHalfLifeDays: 0` on both live tracks). Recency is an explicit `--mode recent` primary sort over stored timestamps, not a multiplier on relevance. |
 | Live operator surface | OpenClaw runtime / plugin / gateway side | `session_search`, `search-sessions`, `scripts/sync-sessions.sh` |
 | Current state | Reference implementation for bot transcript memory | **Closed/stable** as of 2026-05-11 |
 
@@ -99,7 +99,7 @@ identical.
 | Session chunk budget | `400` tokens / `80` overlap | Same parity target for sessions |
 | Hybrid merge | vector `0.7` / text `0.3` | vector `0.7` / BM25 `0.3` |
 | MMR | enabled, `λ=0.7` baseline | enabled, `λ=0.7` |
-| Temporal decay | enabled; 5/8 baseline noted `30d` half-life | enabled; default `14d` half-life |
+| Temporal decay | enabled; 5/8 baseline noted `30d` half-life | **disabled** since 2026-09-03. The 5/8-era `14d` half-life put an ordinary hit under `minScore` at ~49 days — a hard delete wearing a ranking signal's costume — on an axis meant to reach back years. |
 | CJK full-text path | SQLite FTS5 trigram | BM25 + substring fallback |
 | Markdown chunker lineage | builtin `chunkMarkdown` | direct port of `chunkMarkdown` |
 
@@ -367,7 +367,7 @@ andenken NEXT.md의 "우선순위 1 — golden contract cleanup"이 정확히 �
 | 표면 | 참조 | 판단 |
 |---|---|---|
 | FTS-only 폴백용 stop-word 제거 | `host/query-expansion.ts` | 영어/중국어 stop-word 목록. 한국어가 없어 그대로는 못 쓴다. `dictcli` stem과 합칠 여지는 있음 |
-| temporal decay 기본값 | `memory/temporal-decay.ts` (half-life 30일) | andenken은 session 14일 / md 0일(의도적 무감쇠). 값 차이는 코퍼스 성격 차이라 정합 |
+| temporal decay 기본값 | `memory/temporal-decay.ts` (half-life 30일) | **andenken은 2026-09-03부터 세션도 0일** — 두 라이브 트랙 모두 무감쇠다. 예전 판단("session 14일 / md 0일, 값 차이는 코퍼스 성격 차이라 정합")은 세션 코퍼스가 몇 년을 거슬러 올라가는 축이라는 사실 앞에서 뒤집혔다. |
 | render-aware chunking | `packages/markdown-core/src/render-aware-chunking.ts` | 전송 크기 제한용 청킹이지 임베딩 청킹이 아니다. 이름이 비슷해 혼동 주의 |
 | QA 시나리오 YAML 실행기 | `qa/scenarios/memory/*.yaml` + qa-lab | 게이트웨이/에이전트 런타임을 띄우는 e2e 하네스. andenken은 런타임이 없어 통째로는 부적합 |
 
@@ -658,7 +658,7 @@ it.
 | Memory concern | OpenClaw | Hermes Agent | andenken |
 |---|---|---|---|
 | Recall before reply | active-memory layer in runtime | provider prefetch (background, **non-blocking**) + frozen system-prompt block | out of scope; must expose graceful-degrade contract |
-| Semantic retrieval | `sqlite-vec` + FTS5 hybrid, builtin | **none in core**; external providers only | **owned** — LanceDB, Qwen3-8B/4096d, hybrid + MMR + decay |
+| Semantic retrieval | `sqlite-vec` + FTS5 hybrid, builtin | **none in core**; external providers only | **owned** — LanceDB, Qwen3-8B/4096d, hybrid + MMR (decay off since 2026-09-03) |
 | Keyword retrieval | FTS5 (trigram for CJK) | FTS5 + sanitizer + session scroll (`~20ms`, no LLM) | BM25 + substring fallback, particle stripping |
 | Curated always-on facts | promotion across short/long layers | **`MEMORY.md` 2,200 chars + `USER.md` 1,375 chars**, hard-capped | none — andenken has no bounded store |
 | Procedural memory | — | **`SKILL.md` library**, agent-written, curator-pruned | none |

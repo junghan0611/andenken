@@ -15,8 +15,10 @@ andenken implements the **embedding axis only**. Boundaries with the other two
 memory axes (active memory, dream) and the sidecars (dictcli, denotecli) must
 not drift.
 
-- andenken **never calls LLMs for recall**. Retrieval is vector + BM25 + merge + decay + MMR.
-  If an LLM-in-the-loop is ever needed, it is a harness concern (active memory), not andenken.
+- andenken **never calls LLMs for recall**. Retrieval is vector + BM25 + merge + MMR.
+  (Recency decay is implemented but switched off in both live tracks since
+  2026-09-03 — see 7.2.) If an LLM-in-the-loop is ever needed, it is a harness
+  concern (active memory), not andenken.
 - The harness-side `timeline` skill is the canonical source for KST coordinates,
   event identity, source status, and provenance. andenken must not infer a date
   from similarity, turn a day-only event into midnight, or collapse
@@ -227,15 +229,22 @@ encodes this discipline explicitly.
 
 ### 6.6 Replication ships the DB and its manifest together
 
-Oracle replication (`scripts/sync-md-to-oracle.sh`, `scripts/sync-sessions.sh
---push`) must rsync **both** the `.lance` directory and its manifest. Pushing
-the DB alone leaves the remote manifest claiming files the pushed DB no longer
-contains, so any indexing run on the replica skips them forever — the same
-silent-strand failure as 6.4, arriving over the wire.
+Oracle replication (`scripts/sync-md-to-oracle.sh`, the publish step of
+`scripts/sync-sessions.sh --global`) must rsync **both** the `.lance` directory
+and its manifest. Pushing the DB alone leaves the remote manifest claiming files
+the pushed DB no longer contains, so any indexing run on the replica skips them
+forever — the same silent-strand failure as 6.4, arriving over the wire.
 
 Observed 2026-07-14: `--push` shipped `sessions.lance` without
 `session-manifest.json`, and oracle kept a manifest from a local run five days
 older than the DB it now held.
+
+**Extended 2026-09-03 to the corpus.** For the sessions track the same rule now
+reaches one artifact further: index, manifest **and** the device corpus publish
+together. Shipping an index whose corpus is behind the gather leaves rows on the
+replica whose source file is not there — seven such orphans were measured that
+day. This is why `--global` is a single act rather than three commands an
+operator is trusted to run in order.
 
 ## 7. Single-writer invariant
 
@@ -254,14 +263,24 @@ If you change write buffering, preserve:
 
 ### 7.1 Oracle is a query replica, not an indexing node
 
-The single writer is the **local canonical host** (currently thinkpad). Oracle
-serves queries from a pushed DB and must not run the indexer against its own
-session transcripts.
+The single writer is the **index authority** — `ANDENKEN_INDEX_AUTHORITY`,
+default `thinkpad`. Oracle serves queries from a pushed DB and must not run the
+indexer against its own session transcripts.
 
 Invariant:
-- indexing writes happen on the canonical host; oracle receives them by rsync
+- indexing writes happen on the authority; oracle receives them by rsync
 - the DB is replaced, never merged — `rsync --delete` on the canonical push is
   correct, and rows the replica indexed on its own are expected to disappear
+
+**Since 2026-09-03 this is enforced in code, and it blocks indexing entry — not
+just the push.** Guarding only the push keeps the canonical safe while leaving
+the replica free to fork *itself*, which is precisely the failure named below.
+The gate sits **after** Step 0, so a refused call still completes its gather:
+the replica's own sessions travel to the authority as source files and return
+inside the index pushed back to it. That is the supported path, and it is why
+`ANDENKEN_ALLOW_REPLICA_INDEX=1` is a fork rather than a way to catch up.
+Moving the authority is a deliberate act — set `ANDENKEN_INDEX_AUTHORITY` on
+purpose; do not reach for the override.
 
 Oracle owns session JSONLs of its own (it runs agents too), so a local indexing
 run there silently forks the corpus: the replica ends up with canonical rows
@@ -269,7 +288,28 @@ run there silently forks the corpus: the replica ends up with canonical rows
 2026-06-19 and 2026-07-06 (oracle drifted to 27,966 chunks / 667 files against
 the canonical 24,882 / 624) and was resolved by re-establishing the canonical
 push. If oracle-native sessions ever need to be searchable, they must reach the
-canonical host as source files — not as replica-side embeddings.
+canonical host as source files — not as replica-side embeddings. Since
+`v2026.9.3` the device corpus (`~/repos/gh/session`) *is* that path: `gather`
+collects each device's admitted sessions, and a replica's work reaches search
+without a replica-side embedding run.
+
+### 7.2 Recency is a sort, never a multiplier
+
+`applyRecencyDecay` exists in `retriever.ts`, but both live tracks pass
+`recencyHalfLifeDays: 0` (`index.ts`, the `cli.ts` session path,
+`md-search.ts`). A new track must not silently reintroduce a nonzero half-life.
+
+The 14-day decay removed on 2026-09-03 multiplied scores by `exp(-ln2 x age/14)`
+and *then* applied `minScore 0.001`, so an ordinary hit fell under the floor at
+roughly 49 days and a strong one at roughly 85. On a memory axis built to reach
+back years, a decay that erases a season is a **hard delete wearing a ranking
+signal's costume** — the result disappears rather than ranking lower, and no
+caller can tell the difference from a corpus miss.
+
+Recency intent belongs to `mode=recent`, which is a primary sort over stored
+timestamps. A copy of the pipeline that keeps its own decay constant is a
+defect: `golden-queries.ts` held exactly that inline duplicate and had to be
+corrected separately (`f048a0a`) after production changed.
 
 ## 8. Test invariants
 

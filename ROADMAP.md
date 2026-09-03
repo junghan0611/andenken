@@ -25,7 +25,7 @@
 | 청킹 | 400 tokens / 80 overlap | 동일 |
 | Hybrid 가중치 | vector 0.7 / text 0.3 | 동일 |
 | MMR | enabled (λ=0.7) | 동일 |
-| Temporal decay | enabled | half-life 다름 (OpenClaw 30d / andenken 14d) |
+| Temporal decay | ~~enabled~~ | **더 이상 정렬 축이 아니다.** 2026-09-03에 andenken은 두 라이브 트랙 모두 `recencyHalfLifeDays: 0`으로 감쇠를 껐다(`index.ts` · `cli.ts` 세션 분기 · `md-search.ts`). 5/8 baseline 당시의 값(OpenClaw 30d / andenken 14d)은 히스토리다. |
 
 → 5/8 nixos-config 담당자가 OpenClaw에 baseline SSOT v2를 박은 후, **retrieval 튜닝 우위 차이는 사실상 사라졌습니다**. 5/10에는 andenken sessions track만 OpenRouter Qwen3-Embedding-8B 4096d로 먼저 전환했습니다.
 
@@ -44,8 +44,8 @@
 | 축 | 규모 | 의의 |
 |----|-----|------|
 | **org corpus** | ~45,000 chunks / 2,198 files | org-mode KB. 차별점의 본체이지만 **현재 production에서는 disable**. 업스트림 R&D로 분리. |
-| **md corpus (public garden)** | 2,218 .md / ~27MB | 가든 export를 직접 임베딩. 통제된 surface라 튜닝 빠름. 에이전트가 당장 쓰는 지식축. |
-| pi sessions + Claude Code 통합 | 1,600+ sessions / 28,537 chunks | OpenClaw는 봇별 transcript. 우리는 *나*의 모든 세션. 2026-05-11 sessions track 안정화 종료. |
+| **md corpus (public garden)** | **2,230 indexed / 2,245 manifest / 10,704 chunks** (2026-09-03) | 가든 export를 직접 임베딩. 통제된 surface라 튜닝 빠름. 에이전트가 당장 쓰는 지식축. |
+| pi sessions + Claude Code 통합 | **1,627 files / 76,044 chunks** (2026-09-03) | OpenClaw는 봇별 transcript. 우리는 *나*의 모든 세션. 2026-05-11에 8B/4096d로 안정화(28,537 chunks)했고, 2026-09-02 `v2026.9.3`에서 입력이 **기기 합본 코퍼스**(`~/repos/gh/session`)로 바뀌며 2K 절단이 사라져 규모가 다시 올라갔다. |
 | **canonical personal timeline** | agent-config `timeline` skill | KST event coordinates across timelog/journal/agenda/note/git; andenken consumes its windows and refs but does not own it |
 | **denote graph** | denotecli sidecar | back-link / 카테고리 / exact note navigation |
 | 한국어 형태소 | dictcli sidecar | Kiwi stem + 한↔영 expand |
@@ -65,6 +65,10 @@
 
 새 변화는 위에 추가. 시간 역순.
 
+- **2026-09-04** — 문서면이 코퍼스 시대를 따라잡았다 (`v2026.9.4`). README에 `Who owns the memory`와 담당자 문서(`20260319T110800`) 링크를 세우고, 아키텍처 도해의 사실 오류(감쇠가 기능처럼 적혀 있었다)를 고쳤다. AGENTS.md에 담당자 문서 Denote ID를 박고 세션 소스절·endpoints·cadence를 코퍼스/authority 계약으로 갱신. ROADMAP·COMPARISON·INVARIANT의 `--push`·decay 시대 문장도 함께 정정 — **정본이 움직이면 사본 전부를 같은 날 옮긴다**는 09-03의 교훈을 그대로 적용한 것이다.
+- **2026-09-03** — 세션 sync가 `--local` / `--global` 두 모드로 갈렸다 (`v2026.9.4`, `96d674d`). 기본 `--local`은 ssh를 쓰지 않고 복제본을 건드리지 않아 타이머로 돌릴 만큼 싸다. `--global`은 전 기기 gather → embed → verify → 인덱스·매니페스트·코퍼스 publish를 한 act로 묶는다 — 셋을 나눠 밀다가 오라클에 소스 없는 인덱스(orphan 7건)가 남은 실측이 근거다. GLG는 자동화를 걸지 않기로 했고, 이는 *거절*이 아니라 **범위 결정**이다(잦은 증분은 기계, 정합의 순간은 사람). `당분간`이 붙은 날짜 박힌 결정이다. #10·#11 닫힘, #13(OpenClaw 회수) 신설.
+- **2026-09-02** — `v2026.9.3`. 세션 트랙의 **입력면**이 바뀌었다: 한 기계의 라이브 저장소가 아니라 기기 합본 평생 코퍼스(`~/repos/gh/session/<device>/<원래 경로>`)를 색인한다. git 대신 체크섬 매니페스트(`MANIFEST.json` SSOT + `sha256sum -c` 호환 `MANIFEST.sha256`), roster는 `DEVICES.json`으로 분리. 함께 닫힌 품질 결함 둘 — **2K 절단 폐기**(user turn의 30.3%가 2,000자 초과, 전체 user 문자의 51.1%가 색인 밖이었다)와 **14일 recency decay 제거**(보통 hit 약 49일 / 강한 hit 약 85일에 `minScore` 아래로 사라지는, 랭킹 신호의 탈을 쓴 하드 삭제). `ANDENKEN_INDEX_AUTHORITY` 게이트 도입.
+- **2026-08-10** — `v2026.8.10`. pi 코퍼스 admission을 현재 native id 접미사 `_<UUIDv7>.jsonl`로 정렬. pi는 2026-04-15부터 UUIDv7을 써 왔고 2026-08-07부터는 그것만 쓴다 — 옛 garden-id 필터는 그날 이후 새 pi 세션을 **0건** 받아들이고 있었다(에러 없이 조용히). 사용자 수용검수면(`./run.sh accept`) 도착.
 - **2026-07-27** — Quality direction reset around the canonical time axis. Generic vocabulary probes such as `보편 학문` and `설계했다` are no longer the north-star definition of embedding quality. `timeline` owns exact KST coordinates, event identity, source status, and provenance; andenken keeps sessions + md as the semantic evidence layer for two turns: time→meaning and meaning→time. Existing score-semantics / fusion findings remain valid component work, but implementation follows real timeline scenarios and canonical evidence anchors. No `timeline.lance` is presumed.
 - **2026-05-21** — md legacy migration 첫 사이클 완료 + sessions oracle push 누락 발견. md: 2217 files / 10178 chunks / 31.6분 / $0.080 / errors 0 (예측 $0.0961에서 -17%). 직후 `estimate:md` 재실행에서 `missing-hash=0`, `to_index=0` 확인 — 5/20 정책(payload-hash + size-guard)이 의도대로 작동, 다음 publish 사이클부터는 mtime-touched 파일이 hash-match path로 빠져 비용이 0 근처로 수렴할 예정. sessions: 35 incremental / 746 chunks / $0.003. oracle sync 중 `sync-md-to-oracle.sh`는 있지만 `sync-sessions-to-oracle.sh`는 없는 정책 누락 발견 — oracle sessions DB가 5/11 fresh full rebuild 이후 stale (31546 chunks, 10일치 1819 file). 즉시 ad-hoc rsync로 동기화 (1.5GB → 100MB delta, manifest 1969 entries 포함). 부수 신호 2개 검출 (해결 필요 별 항목): (1) `verify sessions`가 query-only oracle 호스트를 가정하지 않아 279 orphan false alarm. (2) oracle 자체 fs에 별도 session JSONL이 누적되어 status에 `new=577 deleted=287` — oracle에서도 claude/pi-shell-acp 세션이 생성됨 신호.
 - **2026-05-20** — md incremental stale policy (size-guard + payload-hash). 5/20 sync에서 `new 3 / stale 2214 / ~$0.08 / 2205 calls`로 측정. `~/repos/gh/notes`를 추적해보니 publish commit (`c31fc0b2`)의 git-changed content/*.md는 66건인데 working tree mtime은 2220/2225이 publish 시각 ±5분 안 — Hugo가 변경 여부와 무관하게 모든 파일을 재기록하는 동작 확정. 이전 stale 판정이 mtime만 보던 것에 size-guard(`stat.size !== entry.size`)와 payload-hash(`sha256(joined embeddingInput)`)를 함께 적용. md 전용 분류기 `getMdStaleFiles` 도입: `staleByMeta` / `suspectFiles` (mtime newer + size same) / `ghostZoneFiles` / `newFiles`. suspect는 chunker로 payload-hash 비교: 일치=skip, 불일치=re-embed, 이전 hash 없음=size-guard 신뢰 + hash 기록만(첫 sync aggressive baseline). 4-way 분류 dry-run 검증 통과(synthetic backdate). `estimate:md` / `status` / `status:json`에 "why stale" breakdown 추가 — `stale-by-meta` / `suspect (match=… baseline=… mismatch=…)` / `ghost-zone`. sessions/org 트랙은 영향 없음(기존 `getStaleFiles` 보존).
@@ -100,9 +104,13 @@
 | `./run.sh verify md` | md 인덱싱 후 무결성 확인 | sync 후 |
 | `./run.sh doctor --org` | malformed block / oversize / zero-chunk / hard-guard skip 신호 | **업스트림 R&D 한정** (org disable 상태) |
 | `./run.sh verify sessions` | sessions 인덱싱 후 무결성 확인 | sync 후 |
-| `scripts/sync-sessions.sh` | sessions 증분 (OpenRouter 8B 4096d, wrong-dim API0 abort) | 시간당 |
+| `./run.sh sync:sessions --local` | 이 기기 세션만 증분. **ssh 0, 복제본 무접촉** (OpenRouter 8B 4096d, wrong-dim API0 abort) | 잦게 — 타이머로 돌릴 만큼 싸다 |
+| `./run.sh sync:sessions --global` | 전 기기 gather `--strict` → embed → verify → 인덱스·매니페스트·**코퍼스** 한 묶음 publish | **사람이 부른다** — 두 기계가 같은 기억을 갖는 순간 |
+| `./run.sh corpus:gather [--strict]` | 기기별 세션을 코퍼스로 수집. `sync:sessions`·`rebuild:sessions`의 Step 0 | sync에 포함 (단독 호출도 가능) |
+| `./run.sh corpus:manifest verify` | 코퍼스 sha256 무결성. `MANIFEST.sha256`은 `sha256sum -c` 호환 | 코퍼스 이동 후 |
 | `scripts/sync-md-to-oracle.sh` | 로컬 md 인덱스를 oracle로 rsync (API 0 mirror) | md sync 직후 |
-| sessions → oracle | **자동화 미정** (현재 ad-hoc `rsync data/sessions.lance/ + data/session-manifest.json`). 5/21 이전까지 누락. | sessions sync 직후 |
+| sessions → oracle | `sync:sessions --global`의 publish 단계가 담당. 인덱스·매니페스트·코퍼스를 **함께** 민다 — 인덱스만 밀면 리플리카에 소스 없는 orphan이 남는다(2026-09-03 실측 7건). `--push`는 deprecated alias. | `--global` 안에서 |
+| `ANDENKEN_INDEX_AUTHORITY` | 기본 `thinkpad`. **push가 아니라 색인 진입**을 막는다(INVARIANT 7.1). 게이트는 Step 0 뒤라 거절된 호출도 gather는 마친다 | 상시 |
 | agent-config `memory-sync` skill | 위 스크립트의 skill wrapper | 사용자 호출 |
 
 ## 역할 분담 — 다른 담당자와의 경계
@@ -116,7 +124,7 @@
 | **denotecli** | org 구조 그래프 (Layer 2). dblock / backlink. |
 | **dictcli** | 한국어 형태소 + 한↔영 확장 (Layer 3). |
 | **bibcli** | bibliography (citation graph). |
-| **nixos-config / OpenClaw** | 봇 inference + active / short / long / dream layer. 봇별 transcript memory. |
+| **nixos-config / OpenClaw** | 봇 inference + active / short / long / dream layer. 봇별 transcript memory. **품질은 OpenClaw 소관** — andenken은 [#13](https://github.com/junghan0611/andenken/issues/13)에서 그 기억을 *회수(harvest)* 할 뿐 동기화하지 않는다. 같은 `qwen/qwen3-embedding-8b` 4096d라 재임베딩 없이 import된다. |
 
 ## 관련 문서
 

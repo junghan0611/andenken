@@ -33,13 +33,15 @@
 09-02~09-03에 닫힌 것(코퍼스·sync 두 모드·스킬 문서·#10/#11)은 `v2026.9.3`과
 `v2026.9.4`의 [CHANGELOG.md](./CHANGELOG.md)로 옮겼다. 여기는 다음 한 걸음만 둔다.
 
-- **[2026-09-04] 대문과 담당자 문서가 코퍼스 시대를 따라잡았다** (`v2026.9.4`).
-  README에 `## Who owns the memory`를 세워 공동 레퍼런스
-  [botlog 20260408T120252](https://notes.junghanacs.com/botlog/20260408T120252.html)에
-  연결하고, 아키텍처 도해의 사실 오류(decay가 기능처럼 적혀 있었다)를 고쳤다.
-  AGENTS.md는 세션 소스절·endpoints·cadence를 코퍼스/authority 계약으로 갱신.
-  **남은 사본 점검**: `ROADMAP.md`·`COMPARISON.md`·`INVARIANT.md` §7.1은 아직
-  `--push` 시대의 말로 적혀 있다. 정본이 움직였으니 다음 차례다.
+- **[2026-09-04] 문서면 다섯 장을 같은 날 다 옮겼다** (`v2026.9.4`, `v2026.9.4-docs.1`).
+  09-03의 교훈이 "정본이 움직일 때 사본이 조용히 뒤에 남는다"였으므로, 사본을
+  하나씩이 아니라 **한 번에** 옮겼다 — README·AGENTS·ROADMAP·COMPARISON·INVARIANT.
+  decay가 다섯 장 중 네 장에서 기능처럼 적혀 있었고(실제로는 두 라이브 트랙 모두
+  `recencyHalfLifeDays: 0`), `--push`는 세 장에 남아 있었다.
+  INVARIANT에 §7.2(최근성은 정렬이지 곱셈이 아니다)를 신설하고 §7.1을
+  authority 게이트로, §6.6을 코퍼스까지 확장했다. 담당자 문서
+  [`20260319T110800`](https://notes.junghanacs.com/botlog/20260319T110800.html)를
+  README 상단과 AGENTS.md 신원절에 Denote ID로 박았다.
 
 # 백로그 — 굽고 나서 남은 것
 
