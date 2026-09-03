@@ -1,15 +1,25 @@
 # NEXT — andenken
 
-> RAIL: 세션 코퍼스 통합 ✅ → **[NOW] 굽고 나서 남은 것** → 배포면 정리
+> RAIL: 세션 코퍼스 통합 ✅ → 2면 SSOT 동기화 ✅ → **[NOW] 3면 배선([#13](https://github.com/junghan0611/andenken/issues/13))** → 회수 품질([#12](https://github.com/junghan0611/andenken/issues/12))
 >
 > `v2026.9.3`으로 통합 세션 임베딩이 닫혔다 → [CHANGELOG.md](./CHANGELOG.md).
-> 실행 기록·측정치는 [#11](https://github.com/junghan0611/andenken/issues/11).
-> 여기 남은 것은 그 정렬이 **열어놓고 간 것들**이다.
+> 실행 기록이던 #10·#11은 2026-09-03에 닫혔고, 남은 갭은 #13이 받았다.
 
-## NOW — 굽고 나서
+## NOW — OpenClaw 면을 배선한다 ([#13](https://github.com/junghan0611/andenken/issues/13))
 
-인덱스는 살아 있다(75,290 chunks / 4096d / 양쪽 verify ✅). 아래는 그 위에서
-이어지는 것들이고, 순서는 위험한 것부터다.
+**역할 경계 (GLG 확정 2026-09-03): 우리는 동기화와 시맨틱 검색 배선을 책임진다.**
+OpenClaw 임베딩 자체는 OpenClaw 설정 소관이고, 회수 품질은 #12의 별도 레인이다.
+배선이 먼저다 — "결과가 별로다"는 배선이 선 다음에 나눠서 푼다.
+
+핵심 측정 (2026-09-03): **OpenClaw는 이미 6봇 전부의 세션을 `qwen/qwen3-embedding-8b`
+4096d로 임베딩해 두었다** — andenken sessions/md와 같은 모델·같은 차원이다.
+`memory_index_chunks` 행이 `text`와 `embedding`을 같이 들고 있으므로 **재임베딩 없이
+import**하면 된다(API 0원). sessions 2,391 + memory 2,292 chunks. 상세·미결정
+항목(새니타이즈 충돌, memory 소스 포함 여부, 검색 표면 모양, retention)은 #13.
+
+### 그 아래 — 굽고 나서 남은 것
+
+인덱스는 살아 있다(75,922 chunks / 4096d / 양쪽 verify ✅). 순서는 위험한 것부터다.
 
 1. **인덱스 배포 방향을 표면으로 만든다.** 지금은 `sync:sessions --push`가 유일한
    경로이고 방향이 사람 손에 달려 있다. 오라클이 당기는 `pull:index`를 신설하고
@@ -37,6 +47,23 @@
    실패가 재현가능성에 맞다. (이제 authority 게이트도 이 값을 읽는다.)
 9. **winner path churn doctor.** chunk id가 `sessionFile:lineNumber`이고 삭제/재삽입이
    물리 경로 기준이라, dedup 승자가 바뀌면 옛 경로 row가 남는다.
+
+## 닫힘 — 3면 중 2면 SSOT 동기화 완주 + 이슈 정리 (2026-09-03 16:38)
+
+`andenken-embed`의 6줄 표준 시퀀스를 끝까지 돌렸다. 양쪽 그린.
+
+| | thinkpad (authority) | oracle (replica) |
+|---|---|---|
+| sessions | 75,922 chunks / 1,624 files | 동일 ✅ |
+| md | 10,704 chunks / 2,230 files | 동일 ✅ |
+| verify | dim 4096 · dup 0 · orphan 0 · row 일치 | 통과 ✅ |
+| 코퍼스 | 2,178 files / 3.13 GB | replicate 완료 ✅ |
+
+증분 비용은 오늘 총 $0.003(세션 22건 / 922 chunks), md는 to_index=0.
+
+**이슈 정리** — #10 닫음(인프라 목적 완료, 갭 처방이 측정으로 뒤집혀 #13이 받음),
+#11 닫음(굽기 완료로 인수인계 소임 종료), #13 신설, nixos-config#5에 영수증 코멘트
+(6봇 sessions 소스가 이미 켜져 있고 provider가 우리와 정렬됨).
 
 ## 닫힘 — 가드 없는 창 (2026-09-03 06:14)
 
@@ -81,10 +108,6 @@ sessions는 `corpus:replicate`, md는 오라클에서 `git -C ~/repos/gh/notes p
 
 ## GLG 결정 대기
 
-- **이슈 [#11](https://github.com/junghan0611/andenken/issues/11) 닫을지** —
-  후속 코멘트 [게시 완료](https://github.com/junghan0611/andenken/issues/11#issuecomment-5516585307).
-  §3 "굽기 전" 5항목은 전부 닫혔다. 남은 것들은 NEXT로 옮겨왔으니 닫아도 되는데,
-  #10의 인수인계 사슬을 어디서 끊을지는 GLG 판단이라 열어뒀다.
 - **형제 브로드캐스트** — GLG가 직접 부를 자리다. 문서면은 이미 원격에 있어
   (agent-config `b3d8d01`, andenken `v2026.9.3`) 세션 시작에 읽히므로, 발신은
   선택이지 blocker가 아니다. 에이전트가 형제 전체에 일방 발신하지 않는다.
