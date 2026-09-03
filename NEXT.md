@@ -1,23 +1,51 @@
 # NEXT — andenken
 
-> RAIL: 세션 코퍼스 통합 ✅ → 2면 SSOT 동기화 ✅ → **[NOW] 3면 배선([#13](https://github.com/junghan0611/andenken/issues/13))** → 회수 품질([#12](https://github.com/junghan0611/andenken/issues/12))
->
-> `v2026.9.3`으로 통합 세션 임베딩이 닫혔다 → [CHANGELOG.md](./CHANGELOG.md).
-> 실행 기록이던 #10·#11은 2026-09-03에 닫혔고, 남은 갭은 #13이 받았다.
+> `AGENTS.md`는 상시 기준선, 여기는 다음 한 걸음. 닫힌 이력은 커밋과 이슈에 있다.
 
-## NOW — OpenClaw 면을 배선한다 ([#13](https://github.com/junghan0611/andenken/issues/13))
+# RAIL — 현재 좌표
 
-**역할 경계 (GLG 확정 2026-09-03): 우리는 동기화와 시맨틱 검색 배선을 책임진다.**
-OpenClaw 임베딩 자체는 OpenClaw 설정 소관이고, 회수 품질은 #12의 별도 레인이다.
-배선이 먼저다 — "결과가 별로다"는 배선이 선 다음에 나눠서 푼다.
+- [x] **1. 세션 코퍼스 통합** — 평생 폴더 + device roster (`v2026.9.3`, #10·#11 닫힘)
+- [x] **2. 2면 SSOT 동기화** — thinkpad↔oracle, 인덱스·매니페스트·코퍼스 한 묶음
+- [ ] **3. OpenClaw 면 회수** ([#13](https://github.com/junghan0611/andenken/issues/13)) ← CURRENT: `sync:openclaw` 착수 승인 대기
+- [ ] **4. 회수 품질** ([#12](https://github.com/junghan0611/andenken/issues/12)) ← PAUSED: 골든 세션 분기 추출이 선행(아래 백로그 4번)
 
-핵심 측정 (2026-09-03): **OpenClaw는 이미 6봇 전부의 세션을 `qwen/qwen3-embedding-8b`
-4096d로 임베딩해 두었다** — andenken sessions/md와 같은 모델·같은 차원이다.
-`memory_index_chunks` 행이 `text`와 `embedding`을 같이 들고 있으므로 **재임베딩 없이
-import**하면 된다(API 0원). sessions 2,391 + memory 2,292 chunks. 상세·미결정
-항목(새니타이즈 충돌, memory 소스 포함 여부, 검색 표면 모양, retention)은 #13.
+현재 좌표: 2 완료 → 3 승인 대기 → 4 보류
 
-### 그 아래 — 굽고 나서 남은 것
+# NOW — OpenClaw 회수 배선 ([#13](https://github.com/junghan0611/andenken/issues/13))
+
+- **Current**: 3면 중 2면은 섰다. 네 단계 운영 표면(1 노트북 / 2 글로벌 / 3 가든 / 4 OpenClaw)이
+  확정됐고 1·2는 구현·검증 완료. 4번만 코드가 없다.
+- **Next**: (1) 새니타이즈 정책 GLG 확정 → (2) 오라클에서 `memory_index_chunks` delta export
+  → (3) `openclaw.lance` + importer → (4) `run.sh`에 `sync:openclaw` 등록 →
+  (5) `search-openclaw` CLI + pi `openclaw_search` 도구.
+- **Blocker**: GLG 결정 1건 — 새니타이즈. OpenClaw 청크는 **이미 임베딩된** 텍스트라
+  텍스트만 고치면 벡터와 어긋난다. (a) 원문 그대로 받고 text는 표시/FTS용 / (b) 크레덴셜
+  검출 시 청크 통째 드롭. **권고는 (b)** — 어긋난 벡터는 재임베딩 없이 못 고친다.
+  나머지 둘(`source="memory"` 2,292 포함 여부 · retention)은 **재보고 정한다**, 지금은 추측이다.
+- **Read**: [#13](https://github.com/junghan0611/andenken/issues/13) 본문 + 코멘트 3개(운영 절차 / GLG 검색면 결정 / 테스터 검증).
+  본문과 스레드가 어긋나면 스레드가 이긴다.
+- **Do not touch**: OpenClaw 설정·청킹·모델. **4번은 회수(harvest)이지 동기화가 아니다** —
+  품질은 OpenClaw 소관이라는 GLG 판정이다. 그리고 append-only로 받아라: 인덱스는 삭제된
+  세션 청크도 들고 있어서, 덮어쓰면 그쪽이 지울 때 우리도 잃는다.
+
+# RECENT
+
+- **[2026-09-03] 세션 sync가 두 모드로 갈렸다** (`96d674d`). 기본 `--local`(이 기기만, ssh 0),
+  `--global`(전 기기 gather --strict → embed → verify → 인덱스+매니페스트+코퍼스 publish).
+  셋을 한 act로 묶은 이유: 오퍼레이터가 계속 둘만 했고, 09-03에 양 트랙이 각각 오라클에
+  소스 없는 인덱스를 남겼다. `--push`는 deprecated alias. 자동화는 하지 않는다(GLG) —
+  네 단계 전부 명시 호출이고, `andenken-embed` 맨 위 라우팅 표가 그 계약이다.
+- **[2026-09-03] #10·#11 닫힘, #13 신설.** #10의 마지막 갭은 처방이 뒤집혔다 —
+  "코퍼스 밖"이 아니라 **JSONL이 없다**(sqlite 이관). 그런데 OpenClaw가 이미 6봇 세션을
+  `qwen/qwen3-embedding-8b` 4096d로 임베딩해 뒀다. **우리와 같은 모델·같은 차원이라
+  재임베딩 없이 import**하면 된다(약 80MB, API 0원).
+- **[2026-09-03] 양쪽 최종 상태** — sessions 76,044 / md 10,704 / 코퍼스 2,181 files,
+  verify 양쪽 통과, 코드 `a139078`. 오늘 임베딩 총비용 약 $0.005.
+
+# 백로그 — 굽고 나서 남은 것
+
+순서는 위험한 것부터. 4번은 RAIL 4(#12)의 선행 조건이다.
+
 
 인덱스는 살아 있다(75,922 chunks / 4096d / 양쪽 verify ✅). 순서는 위험한 것부터다.
 
@@ -48,64 +76,6 @@ import**하면 된다(API 0원). sessions 2,391 + memory 2,292 chunks. 상세·�
 9. **winner path churn doctor.** chunk id가 `sessionFile:lineNumber`이고 삭제/재삽입이
    물리 경로 기준이라, dedup 승자가 바뀌면 옛 경로 row가 남는다.
 
-## 닫힘 — 3면 중 2면 SSOT 동기화 완주 + 이슈 정리 (2026-09-03 16:38)
-
-`andenken-embed`의 6줄 표준 시퀀스를 끝까지 돌렸다. 양쪽 그린.
-
-| | thinkpad (authority) | oracle (replica) |
-|---|---|---|
-| sessions | 75,922 chunks / 1,624 files | 동일 ✅ |
-| md | 10,704 chunks / 2,230 files | 동일 ✅ |
-| verify | dim 4096 · dup 0 · orphan 0 · row 일치 | 통과 ✅ |
-| 코퍼스 | 2,178 files / 3.13 GB | replicate 완료 ✅ |
-
-증분 비용은 오늘 총 $0.003(세션 22건 / 922 chunks), md는 to_index=0.
-
-**이슈 정리** — #10 닫음(인프라 목적 완료, 갭 처방이 측정으로 뒤집혀 #13이 받음),
-#11 닫음(굽기 완료로 인수인계 소임 종료), #13 신설, nixos-config#5에 영수증 코멘트
-(6봇 sessions 소스가 이미 켜져 있고 provider가 우리와 정렬됨).
-
-## 닫힘 — 가드 없는 창 (2026-09-03 06:14)
-
-`v2026.9.3` 푸시 + 오라클 `git pull` 완료. 오라클 코드 `501cfe8`.
-**"오라클에서 부르지 않는다"는 더 이상 유일한 방어가 아니다** — 스크립트가 막는다.
-오라클에서 직접 실행해 확인: `sync:sessions`가 **gather는 마치고 인덱싱만 거절**하며,
-왜 뒤처지지 않는지까지 출력한다. 실수로 불러도 코퍼스는 포크되지 않는다.
-agent-config 쪽 8개도 GLG 지시로 푸시됨(`b3d8d01`).
-
-## 닫힘 — 스킬 재현 테스트 (2026-09-03 06:41)
-
-GLG의 실제 운영 방식은 **"소넷 불러서 세션·가든 임베딩하고 오라클 동기화해줘"
-한두 턴**이다. 그게 재현되는지 소넷(claude-sonnet-5)을 힌트 없이 불러 검증했다.
-
-**통과.** 스킬 즉시 발견 → `~/.current-device`로 authority 확인 → sync:sessions →
-sync:md → verify 양쪽 → 오라클 push 양쪽. 자기 말로 *"표준 시퀀스를 그대로
-따라가서 막힘 없이 끝났음"*. 결과: sessions 98 chunks / md 220 chunks / $0.002.
-
-**테스트 전에 고친 것 셋** — 전부 재현을 막을 자리였다:
-- **그 요청 자체가 스킬에서 제일 찾기 어려운 자리에 있었다.** 어젯밤 코퍼스 근거를
-  140줄 앞에 붙이면서 실행 순서가 뒤로 밀렸다. 맨 위에 `## The usual ask` 블록
-  신설(복붙 5줄 + 틀리기 쉬운 넷).
-- **`Whole flow at once`에 오라클 푸시가 빠져 있었다** — 그대로 따르면 요청의
-  절반만 하고 끝난다.
-- **푸시 단계가 "after GLG confirms"**였다. GLG 워크플로에서는 **요청이 곧
-  승인**인데, 그대로 읽으면 멈추고 되묻는다 — 한두 턴 세션에서 그게 삽질이다.
-
-**소넷이 막힌 한 곳이 진짜 결함이었다.** 오라클 md verify에 orphan 1건. 소넷은
-false positive로 추정하고 문서를 뒤졌으나 답이 없었다. **추정이 틀렸다** —
-`verify`는 DB 모든 경로에 `fs.existsSync`를 걸므로 리플리카 orphan은 *"리플리카가
-인덱스가 가리키는 소스를 아직 안 가졌다"*는 참인 신호다. 실측:
-`content/journal/20260831T000000.md`, 오라클 가든 `214cf972c` vs thinkpad
-`fd690e367`. 오라클에서 `git pull` 후 그린.
-
-**9/2 세션 축 orphan 7건과 같은 모양이고 축만 다르다.** 스킬에 두 축 표로 박았다:
-sessions는 `corpus:replicate`, md는 오라클에서 `git -C ~/repos/gh/notes pull`.
-**인덱스를 밀면 그 인덱스가 가리키는 것도 같이 밀어야 한다.**
-
-운영 메모: 소넷 태스크에 **"헤맨 지점도 같이 보고하라"**를 넣은 것이 이 결함을
-잡았다. 다음에도 그 문장은 넣는다. 그리고 **형제 간 전달은 entwurf가 프로토콜**이다
-— Claude Code 빌트인 cross-session은 GLG가 꺼뒀다(설정이지 고장이 아니다).
-
 ## GLG 결정 대기
 
 - **형제 브로드캐스트** — GLG가 직접 부를 자리다. 문서면은 이미 원격에 있어
@@ -119,25 +89,9 @@ sessions는 `corpus:replicate`, md는 오라클에서 `git -C ~/repos/gh/notes p
   남아 검색이 당분간 찾는다(의도된 상태). 매니페스트↔디스커버리 drift가 생기고 증분
   sync는 스스로 제거하지 않는다. 유지 vs `./run.sh cleanup sessions`.
 
-## 닫힘 — 300KB floor (GLG 판정, 2026-09-03)
+## 이번에 배운 것 — 결함 7건이 전부 같은 모양이었다
 
-**모순이 아니었다. "모든"의 범위가 답이었다.**
-
-#10의 "모든 프롬프트 원문 회수"에서 *모든*은 **회수할 가치가 있는 세션 전체**를
-뜻한다. 잠깐 몇 마디 하고 끝난 세션의 프롬프트는 회수 대상이 아니다. 그래서
-"모든 프롬프트 원문 회수"와 "300KB 이하 제외"는 동시에 참일 수 있고, 내가 둘을
-모순으로 세운 것이 틀렸다.
-
-300KB는 그 "가치 있는 세션"을 고르는 **현재의 대리 지표**이지 정의가 아니다.
-**기준은 바뀔 수 있다**(GLG). 그러니 이건 열린 결정이 아니라, 더 나은 대리
-지표가 나오면 갈아끼우는 자리다. 참고 실측: 300KB 이하 962파일 중 925개가 의미
-있는 user text를 갖고 프롬프트 5,688개 / 4.05M자가 admission 밖인데, 파일 크기는
-대부분 tool 페이로드라 **재는 것과 굽는 것이 다르다** — 크기를 대리 지표로 쓰는 한
-이 어긋남은 남는다.
-
-## 이번에 배운 것 — 결함 5건이 전부 같은 모양이었다
-
-한쪽만 공유 경로를 안 쓴다. **넷 다 그 한쪽만 보면 안 보인다.**
+한쪽만 정본을 안 따라간다. **전부 그 한쪽만 보면 안 보인다.**
 
 | 결함 | 공유 경로 | 안 쓰던 쪽 |
 |---|---|---|
@@ -146,6 +100,8 @@ sessions는 `corpus:replicate`, md는 오라클에서 `git -C ~/repos/gh/notes p
 | 골든 decay | md 분기의 `searchMdCore` | 세션 분기만 인라인 복제 |
 | 좁은 가드 | 인덱싱 경로 | `push_replica()` 안에만 |
 | 빈 문자열 해석 | 같은 변수 | 생산자 `-z` vs 소비자 `in os.environ` |
+| `--help` 범위 (09-03) | 헤더 코멘트 블록 | `sed -n '2,32p'` 고정 줄번호 — 헤더가 자라 Usage를 잘라먹음 |
+| 스킬 아래쪽 절 (09-03) | 상단 usual-ask | 아래 넷이 `--push`를 계속 권함 |
 
 **넷 중 셋은 어제까지 옳았던 코드다.** `os.environ`만 보는 건 env가 바뀌기 전엔
 맞았고, 좁은 가드는 리플리카가 인덱싱을 안 하던 동안엔 충분했고, 골든의 `14`는
@@ -156,6 +112,13 @@ sessions는 `corpus:replicate`, md는 오라클에서 `git -C ~/repos/gh/notes p
 
 부수: **리포를 건너가는 줄번호는 하룻밤을 못 넘긴다.** 하루에 셋이 서로의 커밋에
 밀렸다. 건너가는 인용은 줄번호가 아니라 **이름과 위치**로 쓴다.
+
+**09-03 오후에 둘이 더 나왔고, 둘 다 같은 과다.** `--help`의 고정 줄번호는 파일
+안에서조차 정본을 못 따라간다 — 내가 `--strict` 문단을 넣자마자 Usage가 범위 밖으로
+밀렸다. 그래서 범위를 줄번호가 아니라 **코멘트 블록 끝에 앵커**했다. 스킬 아래쪽
+절은 상단을 고치고 아래를 안 본 경우다. **일곱 중 다섯을 남이 잡았다** — 형제 둘,
+테스터 하나. 저자는 자기가 방금 고친 자리를 보고, 결함은 **고치지 않은 자리**에
+남는다. 교차검수가 사치가 아니라 이 결함군의 유일한 검출 수단이다.
 
 ## 보류 — 자격증명
 
@@ -214,7 +177,7 @@ replicate 0). 임베딩 입력과의 교집합은 6 chunks / 4파일, 전부 `ro
 
 > 아래는 그 위에서 이어지는 retrieval 품질 작업.
 
-## Now — derive embedding quality from the canonical time axis
+## 백로그 — derive embedding quality from the canonical time axis
 
 The direction changed on 2026-07-27 after reviewing the harness-side
 `timeline` contract (`~/repos/gh/agent-config/skills/timeline/README.md`). The
@@ -671,6 +634,11 @@ cost: subscription-backed (낮음)
 4. DB + manifest까지 완전 청소면 `scripts/rebuild-sessions-full.sh`
 
 ## Parked — openclaw memory-axis 동기화 검토 (baseline `v2026.6.8`, 결론: 포팅 없음)
+
+> **2026-09-03 주의**: 아래 "포팅 없음" 결론은 **알고리즘을 베껴올 것이 있느냐**에 대한
+> 답이고 지금도 유효하다. **OpenClaw 인덱스를 회수하는 것은 별개 사안**이며 [#13](https://github.com/junghan0611/andenken/issues/13)이
+> 받았다 — 코드를 가져오는 게 아니라 이미 구운 벡터를 가져온다. 이 절을 근거로
+> "openclaw는 볼 것 없다"로 읽지 마라.
 
 `~/repos/3rd/openclaw`를 stable **`v2026.6.8`** (2026-06-19 재정비, 직전 baseline
 `v2026.6.1`)로 checkout하고 우리가 포팅해온 기억축 로직과 대조했다.
