@@ -6,7 +6,7 @@
 #
 # Safety boundaries (PR-B):
 #   - Wrong sessions DB dim → API 0 abort. (operator must run rebuild-sessions-full.sh first)
-#   - to_index == 0          → API 0 exit, or rsync-only replica push with --push.
+#   - to_index == 0          → API 0 exit; --global still publishes (catch-up).
 #   - to_index >= 1          → preflight 1 API call, then incremental embed.
 #   - org track              → never touched. This script never reads/writes
 #                              ANDENKEN_ORG_*, ANDENKEN_VLLM_*, or org.lance.
@@ -19,8 +19,31 @@
 #   scripts/rebuild-sessions-full.sh completion notice for details.
 #
 # Usage:
-#   ./scripts/sync-sessions.sh             # incremental, no oracle push
-#   ./scripts/sync-sessions.sh --push      # also rsync sessions.lance → oracle
+#   ./scripts/sync-sessions.sh             # LOCAL  (default): this device only, ssh 0
+#   ./scripts/sync-sessions.sh --local     # same, stated explicitly
+#   ./scripts/sync-sessions.sh --global    # every device + publish to the replica
+#   ./scripts/sync-sessions.sh --push      # deprecated alias for --global
+#
+# Two modes, because "keep my memory fresh" and "make both machines agree" are
+# different jobs with different costs.
+#
+#   mode    | gather              | ssh | embeds | replica gets      | fails when
+#   --------+---------------------+-----+--------+-------------------+---------------------
+#   local   | this device only    |  0  |  yes   | nothing           | local rsync fails
+#   global  | every active device | yes |  yes   | index + manifest  | a rostered active
+#           | (--strict)          |     |        | + corpus          | device is unreachable
+#
+#   local   is the frequent/automatic tier. It is NOT "no gather": the indexer
+#           reads the corpus and never the live store, so skipping the gather
+#           would index a frozen snapshot and report to_index=0 forever. What it
+#           drops is the WAIT — no ssh connect timeout, no remote enumeration.
+#           (An unreachable peer was already only a warning, so availability was
+#           never the difference; latency and determinism are.)
+#   global  is the tier you call when the answer has to be "both machines agree".
+#           verify → push → replicate run as one act: splitting them is what left
+#           oracle holding an index whose source files it did not have
+#           (2026-09-03, both tracks). It publishes even when to_index=0, because
+#           the replica may be behind from earlier local runs.
 set -euo pipefail
 cd "$(dirname "$0")/.."   # repo root
 
@@ -36,14 +59,39 @@ if [ -z "${ANDENKEN_SESSION_CORPUS:-}" ] && [ -f "$HOME/.env.local" ]; then
 fi
 
 # --- args ---
-PUSH=0
+# MODE is the only knob. `--push` survives as a deprecated alias so the documented
+# six-line sequence keeps working while the skill docs catch up; it is not a third
+# mode and cannot be combined with one.
+MODE=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --push) PUSH=1; shift ;;
-    --help|-h) sed -n '2,18p' "$0"; exit 0 ;;
+    --local)
+      [ -z "$MODE" ] || { echo "❌ --local and --global are exclusive (got both)"; exit 2; }
+      MODE=local; shift ;;
+    --global)
+      [ -z "$MODE" ] || { echo "❌ --local and --global are exclusive (got both)"; exit 2; }
+      MODE=global; shift ;;
+    --push)
+      [ -z "$MODE" ] || { echo "❌ --push is an alias for --global and cannot be combined with a mode"; exit 2; }
+      echo "⚠ --push is deprecated — it now means --global (index + manifest + corpus publish together)."
+      MODE=global; shift ;;
+    # Anchored to the end of the comment block, not a line number: the same
+    # fixed range in gather-corpus.sh silently stopped covering its own Usage
+    # block the moment the header grew (found by a tester, 2026-09-03).
+    --help|-h) sed -n "2,$(($(grep -n '^set -euo pipefail' "$0" | head -1 | cut -d: -f1) - 1))p" "$0"; exit 0 ;;
     *) echo "unknown arg: $1"; exit 2 ;;
   esac
 done
+MODE="${MODE:-local}"
+
+# Needed by Step 0 (which device to gather) and by the authority gate below.
+# The GATE still runs after Step 0 on purpose — see its comment — but the value
+# it reads has to exist before the gather can name a device.
+INDEX_AUTHORITY="${ANDENKEN_INDEX_AUTHORITY:-thinkpad}"
+LOCAL_DEVICE="$(cat "$HOME/.current-device" 2>/dev/null || hostname)"
+LOCAL_DEVICE="${LOCAL_DEVICE//[[:space:]]/}"
+[ -n "$LOCAL_DEVICE" ] || { echo "cannot determine local device name" >&2; exit 1; }
+echo "mode: $MODE (device=$LOCAL_DEVICE)"
 
 # --- Single-writer lock (flock) ---
 # The sessions index is a single-writer LanceDB store. The hourly cron and a
@@ -72,8 +120,21 @@ fi
 # steady-state corpus of ~2.1k files). An unreachable device is a warning inside
 # gather-corpus.sh, so a laptop off the network still indexes its own sessions.
 if [ -n "${ANDENKEN_SESSION_CORPUS:-}" ] && [ "${SKIP_GATHER:-0}" != "1" ]; then
-  echo "== gather corpus: $ANDENKEN_SESSION_CORPUS =="
-  if ! ./scripts/gather-corpus.sh > "$LOCKFILE.gather" 2>&1; then
+  # local  → this device only. No roster, no ssh: `--only <local>` skips the peer
+  #          loop entirely, so a run costs one local rsync and nothing else.
+  # global → every rostered device, and --strict turns an unreachable active
+  #          device into a failure. That inverts gather's own default on purpose:
+  #          gather is lenient because a laptop off the network must still index
+  #          itself, but "global" is a claim that both sides agree, and a claim
+  #          you could not check is not one you get to make.
+  if [ "$MODE" = "local" ]; then
+    GATHER_ARGS=(--only "$LOCAL_DEVICE")
+    echo "== gather corpus (local: $LOCAL_DEVICE): $ANDENKEN_SESSION_CORPUS =="
+  else
+    GATHER_ARGS=(--strict)
+    echo "== gather corpus (all devices, strict): $ANDENKEN_SESSION_CORPUS =="
+  fi
+  if ! ./scripts/gather-corpus.sh "${GATHER_ARGS[@]}" > "$LOCKFILE.gather" 2>&1; then
     echo "❌ gather-corpus failed — refusing to index a corpus of unknown freshness"
     tail -20 "$LOCKFILE.gather"
     exit 1
@@ -120,10 +181,8 @@ export ANDENKEN_SESSION_PRICE_PER_M_TOKENS="${ANDENKEN_SESSION_PRICE_PER_M_TOKEN
 # the half a replica SHOULD do. Its sessions are in the corpus and reach the
 # index by the authority's next run. Refused does not mean nothing happened, and
 # it does not mean this machine falls behind.
-INDEX_AUTHORITY="${ANDENKEN_INDEX_AUTHORITY:-thinkpad}"
-LOCAL_DEVICE="$(cat "$HOME/.current-device" 2>/dev/null || hostname)"
-LOCAL_DEVICE="${LOCAL_DEVICE//[[:space:]]/}"
-
+# (INDEX_AUTHORITY / LOCAL_DEVICE are resolved in the args block above, because
+# Step 0 needs the device name to gather. Only the CHECK belongs here.)
 if [ "$LOCAL_DEVICE" != "$INDEX_AUTHORITY" ] && [ "${ANDENKEN_ALLOW_REPLICA_INDEX:-0}" != "1" ]; then
   echo "❌ refused: this is '$LOCAL_DEVICE'; only the index authority '$INDEX_AUTHORITY' writes the index."
   echo "   INVARIANT.md §7.1 — a replica that indexes its own sessions forks the corpus,"
@@ -203,11 +262,37 @@ push_replica() {
     2>&1 | tail -3
 }
 
-# --- Step 3: no-work guard (API 0; --push still replicates local maintenance) ---
+# publish = verify, then ship the index AND the sources it points at, as one act.
+#
+# Two rules are folded in here rather than left to the caller, because both were
+# learned the same way — by a caller doing only half:
+#
+#   verify first   `push_replica` is `rsync --delete` onto the replica. Shipping
+#                  an index nobody checked replaces a good replica with a bad one.
+#                  API 0, so it costs nothing to make it unconditional.
+#   corpus too     the index stores absolute session paths and the replica's
+#                  `verify` calls existsSync on each. Pushing the index alone
+#                  produced orphans on oracle on 2026-09-03 — not a bad index,
+#                  a replica that did not yet have the sources.
+publish_replica() {
+  echo "== verify sessions before publish (API 0) =="
+  if ! pnpm exec tsx indexer.ts verify sessions; then
+    echo "❌ publish refused: verify failed — not overwriting the replica with this index"
+    return 1
+  fi
+  push_replica || return 1
+  echo "== replicate corpus → replica =="
+  ./scripts/replicate-corpus.sh
+}
+
+# --- Step 3: no-work guard (API 0; --global still publishes) ---
+# Nothing to embed does not mean nothing to ship: the replica may still be behind
+# from an earlier local-mode run. That catch-up path is exactly why --global is a
+# thing an operator calls on purpose.
 if [ "$TO_INDEX" = "0" ]; then
   echo "✅ sessions: to-index=0 — no embedding work, no API call"
-  if [ "$PUSH" = "1" ]; then
-    push_replica
+  if [ "$MODE" = "global" ]; then
+    publish_replica
   fi
   exit 0
 fi
@@ -238,12 +323,12 @@ if pnpm exec tsx indexer.ts sessions; then
   INDEX_OK=1
 fi
 
-# --- Step 6: optional oracle push (only on successful index) ---
-if [ "$PUSH" = "1" ]; then
+# --- Step 6: publish (global only, and only on a clean index) ---
+if [ "$MODE" = "global" ]; then
   if [ "$INDEX_OK" = "1" ]; then
-    push_replica
+    publish_replica
   else
-    echo "⚠ skipping --push: index step did not complete cleanly"
+    echo "⚠ skipping publish: index step did not complete cleanly"
   fi
 fi
 

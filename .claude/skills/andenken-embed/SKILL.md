@@ -1,6 +1,6 @@
 ---
 name: andenken-embed
-description: "andenken embedding-maintenance workbench — the fixed flow the repo steward runs every time: gather corpus → status → sync(sessions+md) → verify → compact → oracle push. Multi-device session corpus (gather/manifest/replicate), re-embed/incremental for session + garden(md) indexes, integrity checks, defrag (pinned to 4 cores), oracle replication. Triggers: 'reindex', 'sync sessions', 'sync md', 'compact', 'oracle push', 'verify index', 'gather corpus', 'corpus manifest', 'device sessions', '통합 세션 임베딩', '임베딩 다시 하자', '세션/가든 임베딩', 'andenken 인덱스 정리'."
+description: "andenken embedding-maintenance workbench — routes GLG's four explicit asks to one command each: 1) 노트북 세션 증분 2) 글로벌 세션 동기화(오라클까지) 3) 가든(md) 임베딩 4) OpenClaw 회수. Also: multi-device session corpus (gather/manifest/replicate), integrity checks, defrag (pinned to 4 cores), full-rebuild human gate. Nothing here runs on a timer — GLG asks each time, so the routing table at the top is the contract. Triggers: '세션 임베딩', '기억 최신화', '글로벌', '오라클까지', '오라클 동기화', '가든 임베딩', 'openclaw 가져와', 'openclaw 회수', 'reindex', 'sync sessions', 'sync md', 'sync openclaw', 'compact', 'verify index', 'gather corpus', 'corpus manifest', '통합 세션 임베딩', '임베딩 다시 하자', 'andenken 인덱스 정리'."
 user_invocable: true
 ---
 
@@ -12,9 +12,35 @@ rediscovered each time (saves tokens) and any agent/pi can pick it up in this re
 **Run everything from the repo root (`~/repos/gh/andenken`) via `./run.sh`.** run.sh
 sources `~/.env.local` for provider/keys and enforces the provider/dim guards.
 
-- Just need a **light, live session-only bump**? → use the `memory-sync` skill instead.
-  This skill is the **full workbench**: sessions + md maintenance + compact + oracle replication.
 - Search (search-sessions / search-md) is not here — that's `semantic-memory`.
+- Nothing here runs on a timer. **GLG asks each time** (ruling 2026-09-03), so the
+  only thing standing between an ask and the right command is the table below.
+
+## Route the ask — four tiers, one command each
+
+GLG separated the work into four explicit asks. Match what was said to a row; do
+not compose your own sequence.
+
+| GLG says | tier | command | ssh | replica gets |
+|---|---|---|---|---|
+| "세션 임베딩", "기억 최신화" | 1 | `./run.sh sync:sessions` | 0 | nothing |
+| "글로벌", "오라클까지", "양쪽 맞춰줘" | 2 | `./run.sh sync:sessions --global` | yes | index + manifest + corpus |
+| "가든 임베딩", "노트도" | 3 | `./run.sh sync:md` → `./run.sh verify md` → `./run.sh sync:md:oracle` | yes | md.lance + md-manifest |
+| "openclaw 가져와", "회수" | 4 | **아직 없다** — `sync:openclaw` 미구현, [andenken#13](https://github.com/junghan0611/andenken/issues/13) | — | — |
+
+Reading the rows:
+
+- **1 and 2 are the same script, different mode.** `memory-sync` (agent-config skill)
+  is the same two tiers with a thinner surface; either entry point is correct.
+  1 does not touch oracle *on purpose* — the bot's memory is as of the last tier 2.
+- **"세션·가든 임베딩하고 오라클에 동기화해줘" = 2 + 3**, in that order. That combined
+  ask is common enough to have its own block below.
+- **Tier 4 is a harvest, not a sync** (GLG ruling): OpenClaw embeds its own sessions
+  and owns that quality; we only fetch and make it searchable. Do not offer to tune
+  it, and do not invent the command — it does not exist yet. Say so and point at #13.
+- **Tier 3's oracle half is not automatic.** md's source is the garden checkout, so
+  after `sync:md:oracle` the replica may still need `git -C ~/repos/gh/notes pull`
+  **on oracle**. Sessions carries its corpus itself inside `--global`; md does not.
 
 ## The usual ask — "세션·가든 임베딩하고 오라클에 동기화해줘"
 
@@ -23,29 +49,48 @@ you do not need the rest of this file to do it.
 
 ```bash
 cd ~/repos/gh/andenken
-./run.sh sync:sessions          # gathers every device's sessions, then embeds
-./run.sh sync:md                # garden markdown
-./run.sh verify sessions && ./run.sh verify md
-./run.sh sync:sessions --push   # → oracle: sessions.lance + session-manifest.json
-./run.sh corpus:replicate       # → oracle: the sources that index points at
-./run.sh sync:md:oracle         # → oracle: md.lance + md-manifest.json
+./run.sh sync:sessions --global   # all devices → embed → verify → publish index+manifest+corpus
+./run.sh sync:md                  # garden markdown
+./run.sh verify md
+./run.sh sync:md:oracle           # → oracle: md.lance + md-manifest.json
 ```
 
-Four things that are easy to get wrong here:
+That used to be six lines. The sessions half collapsed into one on 2026-09-03
+because the three steps that used to be separate — verify, push the index, ship
+the corpus — are the ones an operator kept doing only two of. `--global` performs
+them as a single act or not at all.
 
-- **Verify BEFORE pushing.** The push is `rsync --delete` onto oracle. Shipping
-  an index you have not verified replaces a good replica with a bad one.
-- **Ship the sources too, or oracle's verify fails.** `sync:sessions --push`
-  moves the index, not the transcripts it indexes, so `corpus:replicate` belongs
-  in the same breath. The md track has the same debt, paid on oracle with
-  `git -C ~/repos/gh/notes pull`. Measured twice on 2026-09-03: skipping either
-  one left exactly one orphan on the replica.
+**`sync:sessions` has two modes and the default is the cheap one.**
+
+| | what it does | ssh | replica |
+|---|---|---|---|
+| `sync:sessions` (= `--local`) | gather THIS device only, then embed | 0 | untouched |
+| `sync:sessions --global` | gather every rostered device (strict), embed, verify, publish | yes | index + manifest + corpus |
+
+`--local` is the frequent/automatic tier; it is what the `memory-sync` skill calls
+with no argument. `--global` is the one you call when the answer has to be "both
+machines agree." `--push` still works as a deprecated alias for `--global`.
+
+Things that are easy to get wrong here:
+
+- **`--local` does not update the replica, on purpose.** So the bot on oracle sees
+  memory as of the last `--global`. That is the trade the two tiers buy; if oracle's
+  recall feels a day behind, the fix is `--global`, not a rebuild.
+- **Ship the sources too — the md track still needs this by hand.** sessions now
+  carries its corpus automatically inside `--global`. md does not: its source is
+  the garden checkout, caught up on oracle with `git -C ~/repos/gh/notes pull`.
+  Measured twice on 2026-09-03, skipping either left exactly one orphan on the
+  replica.
 - **The request IS the confirmation.** Being asked to sync oracle authorizes the
   push; do not stop to ask again. (Destructive *rebuilds* are different — those
   keep their own human gate, below.)
-- **`--push` re-runs the gather**, so it costs a corpus rsync even when there is
-  nothing to embed (`to_index=0` still exits API-0 and ships the DB). That is the
-  current shape of the surface, not a mistake you made.
+- **`--global` re-runs the gather and publishes even when `to_index=0`.** That is
+  the catch-up path, not a wasted run: the replica may be behind from earlier
+  `--local` runs.
+- **`--global` fails if a rostered active device is unreachable.** Deliberate:
+  gather itself is lenient (a laptop off the network must keep indexing itself),
+  but "global" is a claim that both sides agree, and a claim you could not check
+  is not one you get to make. Use `--local` when a peer is down.
 - **Long runs go in the background** and you wait for the completion signal.
   Never poll by re-running a sync — that is a single-writer race.
 
@@ -158,9 +203,9 @@ oracle  :  receives index by rsync            →  query only
 
 ssh runs `thinkpad → oracle` only, and pull symmetry is pointless anyway — a
 closed laptop cannot be pulled from. So the corpus travels by push
-(`corpus:replicate`) and the index travels by push (`sync:sessions --push`).
+(`corpus:replicate`) and the index travels by push — both inside `sync:sessions --global`.
 
-`sync:sessions` refuses **entirely** — not just `--push` — unless
+`sync:sessions` refuses **entirely** — not just the publish half — unless
 `$ANDENKEN_INDEX_AUTHORITY` (default `thinkpad`) matches `~/.current-device`.
 Two different disasters, one gate:
 
@@ -202,7 +247,7 @@ ANDENKEN_ALLOW_REPLICA_INDEX=1      # override once — this forks the corpus
 
 | Track | provider | dim | index | incremental command |
 |-------|----------|-----|-------|---------------------|
-| **sessions** | OpenRouter `qwen/qwen3-embedding-8b` | 4096d | `data/sessions.lance` | `./run.sh sync:sessions [--push]` |
+| **sessions** | OpenRouter `qwen/qwen3-embedding-8b` | 4096d | `data/sessions.lance` | `./run.sh sync:sessions [--local|--global]` |
 | **md (garden)** | same 8B | 4096d | `data/md.lance` | `./run.sh sync:md` + `./run.sh sync:md:oracle` |
 | org | (768d mismatch) | — | `data/org.lance` | **production-disabled — do not touch** |
 
@@ -227,6 +272,9 @@ cd ~/repos/gh/andenken
 ./run.sh estimate:md            # md to embed (payload-hash probe included)
 
 # 3. Sessions incremental — dim 4096 preflight (1 call) → to_index=0 exits API-0
+#    THIS DEVICE ONLY (tier 1). If the ask includes oracle, skip this line and run
+#    step 7's --global instead — it does the gather, the embed AND the verify.
+#    Running both just embeds twice.
 ./run.sh sync:sessions
 
 # 4. Garden (md) incremental
@@ -240,9 +288,10 @@ cd ~/repos/gh/andenken
 ./run.sh compact sessions
 ./run.sh compact md
 
-# 7. Oracle replication — DB + manifest together (below). Being asked to sync
-#    oracle is the confirmation; verify must have passed first.
-./run.sh sync:sessions --push   # sessions.lance + session-manifest.json → oracle
+# 7. Oracle replication. Being asked to sync oracle is the confirmation.
+#    sessions: --global gathers, embeds, VERIFIES, then ships index + manifest +
+#    corpus as one act — so steps 3/5 above are already inside it for that track.
+./run.sh sync:sessions --global # index + manifest + corpus → oracle
 ./run.sh sync:md:oracle         # md.lance + md-manifest.json → oracle
 ```
 
@@ -252,22 +301,34 @@ a single-writer race.
 
 ### Whole flow at once (background recommended)
 
+Local only (tier 1 + 3, no oracle):
+
 ```bash
 ./run.sh sync:sessions && ./run.sh sync:md \
   && ./run.sh verify sessions && ./run.sh verify md
 ```
 
-**This stops before oracle.** If the ask included replication, chain the two push
-commands after it — see the top of this file for the full sequence.
+Including oracle (tier 2 + 3) — this is "세션·가든 임베딩하고 오라클에 동기화해줘":
+
+```bash
+./run.sh sync:sessions --global \
+  && ./run.sh sync:md && ./run.sh verify md && ./run.sh sync:md:oracle
+```
+
+`--global` already gathered, embedded, verified and shipped the sessions side, so
+there is no separate `verify sessions` or `corpus:replicate` line. **If oracle's md
+verify then reports an orphan, it is the garden checkout, not the index** —
+`git -C ~/repos/gh/notes pull` on oracle.
 
 ## Safety guards (already enforced by the scripts)
 
 - **dim 4096 preflight**: each incremental confirms the provider dim with 1 call
   before embedding. On mismatch with the DB dim → **API-0 abort** — never embed at
   the wrong dim. That case needs a full rebuild (`scripts/rebuild-sessions-full.sh`) first.
-- **to_index=0 → API-0 exit**: nothing to embed → no probe. With `--push`, it
-  still rsyncs the local DB and manifest (for example after compact), also at
-  zero API cost.
+- **to_index=0 → API-0 exit**: nothing to embed → no probe. With `--global` it
+  still publishes — DB, manifest and corpus — at zero API cost. That is the
+  catch-up path: the replica can be behind from earlier `--local` runs even when
+  there is nothing new to embed (also true after a compact).
 - **org isolation**: the sessions script never reads or writes `ANDENKEN_ORG_*`,
   `ANDENKEN_VLLM_*`, or `org.lance`.
 
@@ -290,7 +351,8 @@ ANDENKEN_COMPACT_CPUS=0-7 ./run.sh compact md    # override to 8 cores
 ## Oracle replication — DB and manifest travel together
 
 thinkpad is the **canonical host**, oracle is a **query replica** (see the
-corpus section above for why, and for the `--push` authority guard). Rules:
+corpus section above for why, and for the authority guard, which refuses the
+whole sessions command — not just its publish half). Rules:
 
 - **§6.6 (INVARIANT.md)**: don't ship only the `.lance` DB. Sessions must rsync
   `session-manifest.json`, md must rsync `md-manifest.json` **alongside** — otherwise
@@ -362,9 +424,11 @@ and prints `✅ preflight dim=4096`. Copy what the probe said.
 | Defrag (4 cores) | `./run.sh compact sessions\|md` |
 | dedup+orphan+manifest repair | `./run.sh cleanup sessions\|md` (includes compact, pinned) |
 | Operator triage | `./run.sh doctor --sessions\|--md [--json]` |
-| Oracle replicate | `./run.sh sync:sessions --push` / `./run.sh sync:md:oracle` |
+| Sessions, this device only | `./run.sh sync:sessions` (= `--local`, ssh 0, replica untouched) |
+| Sessions, all devices + publish | `./run.sh sync:sessions --global` (gather strict → embed → verify → index+manifest+corpus) |
+| Oracle replicate (md) | `./run.sh sync:md:oracle` |
 | Cost estimate (API-0) | `./run.sh estimate:sessions\|md [--full]` |
-| Gather all devices' sessions | `./run.sh corpus:gather [--dry-run]` |
+| Gather all devices' sessions | `./run.sh corpus:gather [--dry-run] [--strict]` |
 | Corpus inventory / integrity | `./run.sh corpus:manifest update\|verify\|status` |
 | Push corpus to a push-only device | `./run.sh corpus:replicate [--to X]` |
 

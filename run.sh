@@ -70,7 +70,10 @@ Usage: ./run.sh <command> [args]
 === Sessions full rebuild / sync (PR-B) ===
   rebuild:sessions[:dry]      scripts/rebuild-sessions-full.sh [--dry-run]
                               estimate → confirm → preflight → destroy → rebuild
-  sync:sessions [--push]      scripts/sync-sessions.sh
+  sync:sessions [--local|--global]
+                              scripts/sync-sessions.sh (default --local: this
+                              device only, ssh 0; --global: all devices + verify
+                              + publish index/manifest/corpus together)
                               wrong-dim → API0 abort
                               to_index=0 → API0 exit (or rsync-only with --push)
                               else → preflight 1 + incremental
@@ -103,7 +106,8 @@ Usage: ./run.sh <command> [args]
   test:split                  Fixture tests for long-turn embedding split (API 0)
 
 === Session corpus (~/repos/gh/session) ===
-  corpus:gather [--dry-run]   Collect admitted sessions from every device
+  corpus:gather [--dry-run] [--strict]
+                              Collect admitted sessions from every device
   corpus:manifest [update|verify|status]
                               Inventory + sha256 integrity (git replacement)
   corpus:replicate [--to X]   Push the corpus to devices that cannot be pulled

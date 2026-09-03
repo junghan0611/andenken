@@ -48,6 +48,12 @@
 #   ./scripts/gather-corpus.sh                  # all devices
 #   ./scripts/gather-corpus.sh --dry-run        # plan only, copy nothing
 #   ./scripts/gather-corpus.sh --only oracle    # one device
+#   ./scripts/gather-corpus.sh --strict         # an unreachable active device FAILS
+#
+# --strict inverts the leniency below for callers that need a complete corpus.
+# The default stays lenient on purpose (a laptop off the network must keep
+# indexing itself); --strict exists for `sync-sessions.sh --global`, whose whole
+# promise is that both machines agree afterwards.
 set -euo pipefail
 cd "$(dirname "$0")/.."   # repo root
 
@@ -64,11 +70,17 @@ ROSTER="$CORPUS/DEVICES.json"
 
 DRY=0
 ONLY=""
+STRICT=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run|-n) DRY=1; shift ;;
     --only) ONLY="${2:?--only needs a device name}"; shift 2 ;;
-    --help|-h) sed -n '2,32p' "$0"; exit 0 ;;
+    --strict) STRICT=1; shift ;;
+    # Print the whole header, Usage block included. It used to stop at line 32,
+    # which cut off exactly the part a caller asks --help FOR — the flags. A help
+    # range pinned to a line number drifts every time the header grows; this one
+    # is anchored to the end of the comment block instead.
+    --help|-h) sed -n "2,$(($(grep -n '^set -euo pipefail' "$0" | head -1 | cut -d: -f1) - 1))p" "$0"; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -170,5 +182,16 @@ fi
 # new or changed files are hashed, so a steady-state run costs milliseconds.
 if [ "$DRY" = "0" ]; then
   ./scripts/corpus-manifest.sh update | tail -n +2
+fi
+
+# --strict fails LAST, after everything reachable was gathered and the manifest
+# refreshed. A strict run that touched a peer it could not finish still leaves the
+# corpus better than it found it — the exit code reports incompleteness, it does
+# not undo work.
+if [ "$STRICT" = "1" ] && [ ${#UNREACHABLE[@]} -gt 0 ]; then
+  echo "❌ --strict: active device(s) not gathered: ${UNREACHABLE[*]}"
+  echo "   The corpus is now incomplete for this run, so any claim that every"
+  echo "   device is represented would be false. Reachable devices WERE gathered."
+  exit 1
 fi
 exit 0
