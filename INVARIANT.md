@@ -323,6 +323,16 @@ must be added deliberately and in the same direction as every other track
 (authority → replica); the fetch being inverted does not invert the publish. Until
 then, do not describe this track as replicated.
 
+**Because there is no publish, the authority gate matters MORE here than in 7.1,
+and it is enforced in code** (`scripts/export-openclaw.sh`, the `INDEX_AUTHORITY`
+test — grep the name, not a line number). A replica that indexes its own sessions
+forks a corpus that a later canonical push can at least overwrite; a replica that
+harvests OpenClaw on its own forks a store that **no rsync exists to reconcile**.
+The gate runs before anything else, unlike the sessions one, because a refused
+harvest has no local half to preserve — every row would have come over ssh. This
+is not theoretical: `ANDENKEN_OPENCLAW_HOST` defaults to `oracle`, so running the
+harvest on oracle would succeed by connecting to itself.
+
 Three rules hold this track:
 
 1. **Append-only.** The importer never deletes a row the export did not return.

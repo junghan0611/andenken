@@ -57,6 +57,12 @@ Reading the rows:
   `compact all`: ask for it by name. Measured 2026-09-04: one 481-row import took
   it 1 → 4 fragments, and a compact returned 7 → 1 (96M → 82M). Nothing else
   maintains that file — it lives on the authority only, with no push step.
+- **Tier 4 runs on the index authority only, and the script enforces it.** Same
+  `INDEX_AUTHORITY` rule as sessions, but stricter in consequence: with no push
+  step, a replica-side harvest forks a store no rsync can reconcile. The gate is
+  first in `export-openclaw.sh`, so a refused run makes no ssh at all. If oracle
+  needs this axis, the authority harvests and someone adds a publish deliberately
+  — do not run the harvest there to "catch it up".
 - **Tier 3's oracle half is not automatic.** md's source is the garden checkout, so
   after `sync:md:oracle` the replica may still need `git -C ~/repos/gh/notes pull`
   **on oracle**. Sessions carries its corpus itself inside `--global`; md does not.

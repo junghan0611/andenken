@@ -116,6 +116,23 @@ model이 이미 들어 있으므로 같은 id·같은 stamp면 같은 행이다.
 전송 비용은 남아 있다(9MB/런). 그건 openclaw가 주는 대로 받는다는 정책의 값이고,
 우리가 관리하는 건 우리 저장소 쪽이다.
 
+## harvest는 authority 전용 — 이제 코드가 막는다 (2026-09-04, 오라클 pull 직후 발견)
+
+오라클에 코드를 올린 순간 생긴 자리다. `INDEX_AUTHORITY` 검사는 `sync-sessions.sh`에만
+있었고(`:186` 인덱싱 진입, `:242` push) **harvest에는 없었다.** `ANDENKEN_OPENCLAW_HOST`
+기본값이 `oracle`이라, 오라클에서 `sync:openclaw`를 치면 **자기 자신에게 ssh해서 성사된다.**
+
+§7.1보다 더 나쁜 자리다: 세션은 갈라져도 다음 canonical push가 덮지만, `openclaw.lance`는
+publish 단계가 없어서 **되돌릴 rsync가 아예 없다.**
+
+게이트를 `export-openclaw.sh` 맨 앞에 뒀다 — sessions는 gather라는 자기 몫이 있어서
+게이트가 Step 0 뒤지만, harvest는 모든 행이 ssh로 오므로 거절이 **연결조차 안 하는** 게
+맞다. 실측: `ANDENKEN_INDEX_AUTHORITY=somewhere-else`로 거절 확인(exit 1, ssh 0),
+thinkpad에서는 정상 통과(449 exported / 0 written).
+
+전략(GLG, 09-04): 노트북이 오라클 것까지 가져와서 인덱싱하고 넣어준다. openclaw 세션도
+같은 방식. 오라클은 질의 레플리카.
+
 # RECENT
 
 09-02~09-03에 닫힌 것(코퍼스·sync 두 모드·스킬 문서·#10/#11)은 `v2026.9.3`과

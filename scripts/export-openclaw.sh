@@ -43,6 +43,8 @@
 #   ./scripts/export-openclaw.sh                 # delta since the local watermark
 #   ./scripts/export-openclaw.sh --full          # every row, ignore the watermark
 #   ./scripts/export-openclaw.sh --host NAME     # override the openclaw host
+#
+# RUNS ON THE INDEX AUTHORITY ONLY (see the gate below).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -60,6 +62,35 @@ while [ $# -gt 0 ]; do
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
+
+# --- Authority gate ---
+#
+# The harvest runs on the index authority and nowhere else. This gate is FIRST,
+# unlike the sessions one: sync-sessions.sh puts its gate after Step 0 because a
+# refused replica has still done its half (gathering its own sessions). Here
+# there is no half to do — every row comes from the OpenClaw host over ssh — so a
+# refused run should cost nothing at all, not even a connection.
+#
+# It matters more here than for sessions, not less. `openclaw.lance` has NO
+# publish step (INVARIANT §7.3), so a replica that harvests on its own does not
+# just fork the corpus — it forks it with no rsync that could ever reconcile the
+# two. And ANDENKEN_OPENCLAW_HOST defaults to `oracle`, which means running this
+# on oracle would quietly succeed by ssh-ing to itself.
+INDEX_AUTHORITY="${ANDENKEN_INDEX_AUTHORITY:-thinkpad}"
+LOCAL_DEVICE="$(cat "$HOME/.current-device" 2>/dev/null || hostname)"
+LOCAL_DEVICE="${LOCAL_DEVICE//[[:space:]]/}"
+[ -n "$LOCAL_DEVICE" ] || { echo "cannot determine local device name" >&2; exit 1; }
+
+if [ "$LOCAL_DEVICE" != "$INDEX_AUTHORITY" ] && [ "${ANDENKEN_ALLOW_REPLICA_INDEX:-0}" != "1" ]; then
+  echo "❌ refused: this is '$LOCAL_DEVICE'; only the index authority '$INDEX_AUTHORITY' harvests." >&2
+  echo "   INVARIANT.md §7.3 — openclaw.lance is authority-only and has no publish step," >&2
+  echo "   so a second copy built here could never be reconciled with the canonical one." >&2
+  echo "   The authority reaches this host's OpenClaw databases over ssh by itself." >&2
+  echo "   To move the authority:  ANDENKEN_INDEX_AUTHORITY=$LOCAL_DEVICE" >&2
+  echo "   To override once:       ANDENKEN_ALLOW_REPLICA_INDEX=1  (forks it — know why)" >&2
+  echo "   (nothing was fetched; no ssh was made)" >&2
+  exit 1
+fi
 
 mkdir -p "$STAGE"
 
