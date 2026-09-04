@@ -91,6 +91,7 @@ covers all three.
 |-------|------------|-------|
 | **sessions** | Recover decisions and continuity inside canonical time windows | Core. pi + Claude Code JSONL, indexed from the device-merged corpus (`~/repos/gh/session`) with stored timestamp/project/role/source/file signals. OpenClaw parity is a technical baseline. |
 | **md (public garden)** | Recover durable interpretation attached to dated notes and events | Current production knowledge axis. Direct Markdown embedding over exported `~/repos/gh/notes/content` (~2,200 md / ~27MB). OpenClaw builtin md memory logic + LanceDB backend. |
+| **openclaw (harvest)** | Recover what the bots said and kept, as its own nameable axis | Landed 2026-09-03. OpenClaw already embeds its agents' sessions and memory with `qwen/qwen3-embedding-8b` at 4096d — the same model we use, chosen independently — so the rows arrive carrying both text and vector and the import costs **zero embedding API calls**. Append-only, local only, and never a search fallback. |
 | **org** | Currently disabled | 3,000+ Denote notes. Source track. Doctor/chunker/incremental work is upstream R&D, **not** what agents consume right now. |
 
 **Split of effort.** The agent-in-charge separates *what we ship to agents now*
@@ -170,7 +171,8 @@ agent-in-charge who does own it.
 | Exposing recall to each harness, composing time facts with embedding evidence | `agent-config` | One capability, but its reach differs per surface — a doc that claims three axes from the CLI misleads a sibling inside pi. |
 | Korean morphology, ko↔en vocabulary pairs | `dictcli` | Layer 1 does not absorb Layer 3. Particle stripping lives here only because it is BM25 preprocessing. |
 | Note structure, backlinks, dblocks | `denotecli` | Layer 2 is navigation, not retrieval. |
-| Bot memory quality, chunking, model | OpenClaw (nixos-config) | Issue #13 is a **harvest**, not a sync. We import; we do not tune their axis. |
+| Bot memory quality, chunking, model, retention — and their `openclaw-agent.sqlite` itself | OpenClaw (nixos-config) | The tier-4 track is a **harvest**, not a sync. We import; we do not tune their axis. Their databases are opened `sqlite3 -readonly` and snapshotted; we never write to them and never compact them. |
+| `data/openclaw.lance` — the store those vectors land in | **andenken** | The mirror image of the row above, and the names make it easy to miss. Their vectors, our LanceDB: our schema, our ids, our FTS index, fragmented by our own import writes. So compacting it is ours to do, by name (`compact openclaw`), and nothing else will — the file exists on the authority alone. |
 | The garden content itself | GLG | andenken reads the notes; it never curates the source. |
 
 And one rule that reads like a feature but is a boundary: an overlay or a bridge
@@ -381,6 +383,9 @@ cd ~/repos/gh/andenken
 ./run.sh corpus:manifest verify       # sha256 integrity over the corpus
 ./run.sh index:md                     # md incremental / full (with gate when needed)
 ./run.sh search:md "<query>"          # md search
+./run.sh sync:openclaw [--full]       # harvest OpenClaw's own index (API 0)
+./run.sh search:openclaw "<query>"    # the harvest axis — by name, never a fallback
+./run.sh compact openclaw             # defrag our harvest DB (not part of `all`)
 ./run.sh doctor --md                  # md production triage / gap explainability
 ./run.sh accept                       # user-facing acceptance (API 0 by default)
 ./run.sh golden                       # transitional component baseline; see NEXT.md

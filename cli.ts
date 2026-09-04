@@ -20,7 +20,7 @@ import {
   createMdProviderFromEnv,
   type EmbeddingProvider,
 } from "./embedding-provider.js";
-import { VectorStore, getSessionsDbPath, getOrgDbPath, getMdDbPath, getDataDir, type SearchResult, type SearchFilters } from "./store.js";
+import { VectorStore, getSessionsDbPath, getOrgDbPath, getMdDbPath, getOpenclawDbPath, getDataDir, type SearchResult, type SearchFilters } from "./store.js";
 import { findSessionFiles, extractSessionChunks, normalizeSourceFilter } from "./session-indexer.js";
 import { retrieve, expandQueryForBM25, getShortCJKTokens, sortByTimestampDesc, type MergeStrategy } from "./retriever.js";
 import { readSessionExcerpt, type SessionExcerpt } from "./session-excerpt.js";
@@ -673,6 +673,77 @@ function parseArgs() {
 
 // --- Main ---
 
+/**
+ * search-openclaw — the harvest axis.
+ *
+ * Its own call, never a fallback. GLG's ruling on 2026-09-03 was to keep the
+ * three axes apart so an answer can say which one it came from — a provenance
+ * rule, not a partition of subject matter. Family, health and engineering sit in
+ * the same chunks here and that is deliberate ("가족은 하나야. 그러려고 합친 거야"),
+ * so nothing in this path filters by topic. What every hit does state is its agent
+ * and whether it came from what the bot SAID (`sessions`) or KEPT (`memory`):
+ * those are different kinds of evidence and must not be quoted as if they were.
+ *
+ * The query embeds with the sessions provider on purpose: OpenClaw independently
+ * chose the same `qwen/qwen3-embedding-8b` at 4096d, which is the coincidence that
+ * lets a query vector from here land in a space built over there.
+ */
+async function searchOpenclaw(query: string, limit: number, full: boolean): Promise<void> {
+  const provider = getSessionsProvider();
+  const store = new VectorStore(getOpenclawDbPath(), 4096);
+  await store.init();
+
+  const dimCheck = await store.checkCompatibleDim();
+  if (!dimCheck.ok) {
+    console.error(
+      JSON.stringify({
+        error: `openclaw search refused: ${dimCheck.reason ?? "dim incompatible"}`,
+        configured: dimCheck.configured,
+        actual: dimCheck.actual,
+      }),
+    );
+    process.exit(1);
+  }
+
+  // No dictcli expansion here. The axis is the bots' own words, and the
+  // expansion contract is under review (#12); harvesting should not inherit an
+  // open question from another lane.
+  const candidates = Math.min(limit * 4, 200);
+  const queryVector = await provider.embedQuery(query);
+  const vectorResults = await store.search(queryVector, candidates, 0.05);
+  const ftsResults = await store.fullTextSearch(expandQueryForBM25(query), candidates);
+
+  // `minScore` is read on the SCALE OF THE MERGE, and rrf and weighted do not
+  // share one. An rrf score is `weight/(60+rank+1)` plus a top-rank bonus, so its
+  // ceiling is about 0.066 and a hit ranked #2 scores ~0.031. The md track's
+  // 0.05 floor is a WEIGHTED-scale number (`md-search.ts`), and pairing it with
+  // rrf here silently cut the axis down to whatever ranked #1: measured
+  // 2026-09-04, `search-openclaw "가족 건강" --limit 10` returned exactly 1 row.
+  // The session axis is the one this merge was copied from, and it pairs rrf
+  // with 0.001 (`cli.ts` session path, `index.ts`) — match it.
+  const results = await retrieve(query, vectorResults, ftsResults, {
+    vectorWeight: 0.7,
+    bm25Weight: 0.3,
+    recencyHalfLifeDays: 0,
+    minScore: 0.001,
+    mmr: { enabled: true, lambda: 0.7 },
+    mergeStrategy: "rrf" as MergeStrategy,
+  });
+
+  const out = results.slice(0, limit).map((r) => ({
+    agent: r.project,
+    source: r.source,
+    path: r.sessionFile,
+    updated_at: r.timestamp,
+    score: Number(r.score.toFixed(4)),
+    text: full ? r.text : r.text.slice(0, 400),
+  }));
+
+  console.log(JSON.stringify({ axis: "openclaw", query, count: out.length, results: out }, null, 2));
+  await store.close();
+}
+
+
 async function main() {
   const { cmd, positional, flags } = parseArgs();
   const limit = parseInt(flags.limit ?? "10", 10);
@@ -777,6 +848,16 @@ async function main() {
       await searchMd(query, mdLimit, mdFull);
       break;
     }
+    case "search-openclaw":
+    case "openclaw": {
+      const query = positional.join(" ");
+      if (!query) {
+        console.error(JSON.stringify({ error: "Usage: search-openclaw <query> [--limit N] [--full]" }));
+        process.exit(1);
+      }
+      await searchOpenclaw(query, mdLimit, mdFull);
+      break;
+    }
     case "status":
       await status();
       break;
@@ -787,7 +868,7 @@ async function main() {
       console.error(
         JSON.stringify({
           error: "Unknown command",
-          usage: "cli.ts <search-sessions|search-md|search-knowledge|status|reindex> [args]",
+          usage: "cli.ts <search-sessions|search-md|search-knowledge|search-openclaw|status|reindex> [args]",
         }),
       );
       process.exit(1);

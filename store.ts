@@ -148,6 +148,21 @@ export function getMdDbPath(): string {
   return path.join(getDataDir(), "md.lance");
 }
 
+/**
+ * OpenClaw harvest track. Same 4096d as sessions and md — not by agreement but
+ * because OpenClaw independently chose `qwen/qwen3-embedding-8b` too, which is
+ * what makes importing its vectors possible at all. Still its own file: the
+ * chunking is theirs (400-token chunks), the provenance is theirs, and one DB is
+ * never a fallback for another.
+ *
+ * LOCAL AND REPLICA ONLY. This track holds the bots' own memory and speech, which
+ * on inspection includes GLG's private world — family health, money, home. It must
+ * never reach the md track: md is the axis that gets exported to the public garden.
+ */
+export function getOpenclawDbPath(): string {
+  return path.join(getDataDir(), "openclaw.lance");
+}
+
 export class VectorStore {
   private db: LanceDB.Connection | null = null;
   private table: LanceDB.Table | null = null;
@@ -221,6 +236,27 @@ export class VectorStore {
     if (!this.table) {
       await this.createTable();
     }
+  }
+
+  /**
+   * Delete a batch of chunks by id.
+   *
+   * The openclaw harvest needs this and the file-scoped delete above will not do:
+   * one OpenClaw source path produces many chunks, and a re-export may return
+   * only some of them. Deleting by file would remove chunks this run did not
+   * bring back, which is exactly the append-only rule that track must not break.
+   * One statement per batch — an id-at-a-time loop over thousands of rows spends
+   * more time in LanceDB than the import itself.
+   */
+  async deleteByIds(ids: string[]): Promise<void> {
+    await this.ensureTable();
+    if (!this.table || ids.length === 0) return;
+    const quoted = ids.map((i) => `'${i.replace(/'/g, "''")}'`).join(", ");
+    // No catch here. A LanceDB delete that matches nothing SUCCEEDS, so the only
+    // thing a swallow could hide is a real failure — and a failed delete followed
+    // by a successful insert leaves the same id twice, which surfaces later as
+    // duplicate search hits rather than as the error it was.
+    await this.table.delete(`\`id\` IN (${quoted})`);
   }
 
   /**

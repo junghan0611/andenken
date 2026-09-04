@@ -48,7 +48,12 @@ Usage: ./run.sh <command> [args]
   index:md [--force]          Index public garden Markdown (issue #8)
   index:org [--force]         Index org-mode KB (disabled in production — upstream R&D)
   sync:md                     md incremental (alias for index:md without --force)
-  compact [sessions|md|org]   Defragment LanceDB (CPU-pinned to ANDENKEN_COMPACT_CPUS, default 0-3)
+  compact [sessions|md|org|openclaw]
+                              Defragment LanceDB (CPU-pinned to ANDENKEN_COMPACT_CPUS, default 0-3)
+                              `all` = sessions+md+org. openclaw by name: it is our
+                              own harvest DB (their vectors, our store), fragmented
+                              by our own import writes. OpenClaw's sqlite is never
+                              touched — the export opens it read-only
   cleanup [sessions|md|org]   Dedup + orphan removal + manifest repair + compact (CPU-pinned)
   cleanup [target] --dry-run  Dry-run (report only)
   verify [sessions|md|org|all] Post-indexing integrity check
@@ -64,6 +69,9 @@ Usage: ./run.sh <command> [args]
                               CJK-weighted token model, per-folder breakdown
                               price: ANDENKEN_MD_PRICE_PER_M_TOKENS
                                   > OPENROUTER_QWEN_8B_PRICE > 0.01
+  sync:openclaw [--full]      Harvest OpenClaw's own index (export + import).
+                              Zero embedding cost — the vectors come already
+                              computed. Append-only; never mirrors their deletes
   sync:md:oracle [flags]      Rsync completed data/md.lance + md-manifest.json to Oracle
                               flags: --dry-run --no-verify --smoke --host <ssh-host>
 
@@ -88,6 +96,10 @@ Usage: ./run.sh <command> [args]
                                      --session-file path --session-file-contains substr
                                      --mode semantic|hybrid|recent
                               recent = stored-signal scan + timestamp DESC (no NL time parsing)
+  search:openclaw <query> [--limit N] [--full]
+                              Harvested OpenClaw bot memory. Its own axis, never a
+                              fallback — every hit names its agent and whether the
+                              bot SAID it (sessions) or KEPT it (memory)
   search:md <query> [--limit N] [--full]
                               Search md (public garden). Default limit 5,
                               document-grouped; --full widens each snippet.
@@ -104,6 +116,8 @@ Usage: ./run.sh <command> [args]
   test:filename               Fixture tests for pi corpus admission by filename (API 0)
   test:corpus                 Fixture tests for corpus-backed device discovery (API 0)
   test:split                  Fixture tests for long-turn embedding split (API 0)
+  test:openclaw               Fixture tests for the OpenClaw harvest policy (API 0)
+  test:parity                 Credential regex parity: python ↔ typescript (API 0)
 
 === Session corpus (~/repos/gh/session) ===
   corpus:gather [--dry-run] [--strict]
@@ -231,6 +245,10 @@ case "${1:-help}" in
     cd "$SCRIPT_DIR" && pnpm exec tsx session-corpus.test.ts ;;
   test:split)
     cd "$SCRIPT_DIR" && pnpm exec tsx session-split.test.ts ;;
+  test:openclaw)
+    load_env; cd "$SCRIPT_DIR" && pnpm exec tsx openclaw-import.test.ts ;;
+  test:parity)
+    cd "$SCRIPT_DIR" && pnpm exec tsx credential-parity.test.ts ;;
 
   # === Session corpus ===
   corpus:gather)
@@ -330,6 +348,12 @@ case "${1:-help}" in
     load_env; cd "$SCRIPT_DIR" && bash scripts/rebuild-sessions-full.sh --dry-run ;;
   sync:sessions)
     shift; load_env; cd "$SCRIPT_DIR" && bash scripts/sync-sessions.sh "$@" ;;
+  sync:openclaw)
+    shift; load_env; cd "$SCRIPT_DIR" \
+      && bash scripts/export-openclaw.sh "$@" \
+      && pnpm exec tsx openclaw-importer.ts ;;
+  search:openclaw)
+    shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx cli.ts search-openclaw "$@" ;;
   rebuild:full)
     cd "$SCRIPT_DIR" && bash scripts/rebuild-full.sh ;;
   rebuild:incremental)

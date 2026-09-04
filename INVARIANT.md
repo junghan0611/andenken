@@ -311,6 +311,48 @@ timestamps. A copy of the pipeline that keeps its own decay constant is a
 defect: `golden-queries.ts` held exactly that inline duplicate and had to be
 corrected separately (`f048a0a`) after production changed.
 
+### 7.3 The OpenClaw harvest travels the other way, and never reaches the garden
+
+Every other track is built here and pushed to the replica. This one is not built
+here at all: the vectors already exist on the OpenClaw host, so the flow is **pull
+to the authority and import**. There it stops — **there is no publish step today**,
+and `openclaw.lance` exists on this machine only.
+
+That is a current fact, not a rule. If the replica ever needs this axis, the push
+must be added deliberately and in the same direction as every other track
+(authority → replica); the fetch being inverted does not invert the publish. Until
+then, do not describe this track as replicated.
+
+Three rules hold this track:
+
+1. **Append-only.** The importer never deletes a row the export did not return.
+   OpenClaw's index still holds chunks for sessions whose transcripts it already
+   deleted, and its retention rule is unmeasured. Mirroring its deletions would
+   turn their cleanup into our loss. A row with the same id replaces itself;
+   nothing else moves.
+2. **`openclaw.lance` is local only** (and, if a publish is ever added, replica). It must never reach the md
+   track by any path. The line here is **local versus public**, and it is the only
+   line: md is the axis that gets exported to the public garden, and this track
+   holds conversations that were never written for that. Family, health and money
+   sit next to engineering in these chunks — measured 2026-09-03 in the
+   `source=sessions` sample — and that is the point of the axis, not a hazard in
+   it. GLG's ruling the same day: *"괜찮아. 가족은 하나야. 그러려고 합친 거야."*
+   **Do not build a personal/coding split inside the local side.** One wall,
+   drawn at export.
+3. **Never a fallback.** `search-openclaw` / `openclaw_search` answer only when
+   asked for by name. "Sessions found nothing, try the bot memory" erases which
+   axis an answer came from, and an answer that cannot name its source is the
+   system's recollection rather than the person's. `session_search` and
+   `knowledge_search` must not mix openclaw rows into their results — the pi tool
+   surface matters more here than the CLI, because agents call it on their own
+   judgment.
+
+The credential policy is drop-the-chunk, not redact. These vectors were computed
+by someone else from the text we would be editing, so a redacted chunk would
+retrieve as the unredacted one and display as something else. Measured
+2026-09-03: 0 of 4,683 chunks trip the detector, so the policy costs nothing today
+and exists for the day it does not.
+
 ## 8. Test invariants
 
 At minimum, unit tests must prove:

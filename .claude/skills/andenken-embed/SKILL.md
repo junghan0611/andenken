@@ -26,7 +26,7 @@ not compose your own sequence.
 | "세션 임베딩", "기억 최신화" | 1 | `./run.sh sync:sessions` | 0 | nothing |
 | "글로벌", "오라클까지", "양쪽 맞춰줘" | 2 | `./run.sh sync:sessions --global` | yes | index + manifest + corpus |
 | "가든 임베딩", "노트도" | 3 | `./run.sh sync:md` → `./run.sh verify md` → `./run.sh sync:md:oracle` | yes | md.lance + md-manifest |
-| "openclaw 가져와", "회수" | 4 | **아직 없다** — `sync:openclaw` 미구현, [andenken#13](https://github.com/junghan0611/andenken/issues/13) | — | — |
+| "openclaw 가져와", "회수" | 4 | `./run.sh sync:openclaw` | yes | — (로컬 전용) |
 
 Reading the rows:
 
@@ -37,7 +37,26 @@ Reading the rows:
   ask is common enough to have its own block below.
 - **Tier 4 is a harvest, not a sync** (GLG ruling): OpenClaw embeds its own sessions
   and owns that quality; we only fetch and make it searchable. Do not offer to tune
-  it, and do not invent the command — it does not exist yet. Say so and point at #13.
+  its chunking or model. It costs **zero embedding API calls** — the vectors arrive
+  already computed, because OpenClaw independently picked the same
+  `qwen/qwen3-embedding-8b` at 4096d. Append-only: it never mirrors their deletes,
+  because their index still holds chunks for transcripts they already removed.
+- **Tier 4's axis is `search:openclaw`, and it is never a fallback.** Do not reach
+  for it because sessions came back empty — that erases which axis answered. Every
+  hit states its `agent` and whether it came from what the bot SAID (`sessions`) or
+  KEPT (`memory`); those are different kinds of evidence. `openclaw.lance` is
+  **local only — there is no push step** — and must never reach the md track,
+  which is exported.
+  That export line is the only line — do not filter this axis by subject.
+- **Two databases, two owners, and the names invite confusing them.** OpenClaw's
+  `openclaw-agent.sqlite` (on the openclaw host, one per bot) is theirs: their
+  chunking, model, retention. The export opens it with `sqlite3 -readonly` and
+  snapshots it; we never write to it and never compact it. `data/openclaw.lance`
+  is **ours** — our schema, our ids, our FTS index — holding vectors they
+  computed. So `./run.sh compact openclaw` IS our maintenance, and it is not in
+  `compact all`: ask for it by name. Measured 2026-09-04: one 481-row import took
+  it 1 → 4 fragments, and a compact returned 7 → 1 (96M → 82M). Nothing else
+  maintains that file — it lives on the authority only, with no push step.
 - **Tier 3's oracle half is not automatic.** md's source is the garden checkout, so
   after `sync:md:oracle` the replica may still need `git -C ~/repos/gh/notes pull`
   **on oracle**. Sessions carries its corpus itself inside `--global`; md does not.
@@ -341,12 +360,16 @@ core set to 4 caps the threads to 4.
 
 ```bash
 ./run.sh compact md                              # default: cores 0-3 (4)
+./run.sh compact openclaw                        # our harvest DB; not in `all`
 ANDENKEN_COMPACT_CPUS=0-7 ./run.sh compact md    # override to 8 cores
 ```
 
 - Default `0-3`. Override with `ANDENKEN_COMPACT_CPUS` in taskset `-c` syntax (`0-3`, `0,2,4,6`).
 - compact **only when fragments grew a lot** — not every increment. md was once
-  compacted 162 → 1 fragment. `verify` reports the fragment count.
+  compacted 162 → 1 fragment. `verify` reports the fragment count; for openclaw,
+  `./run.sh status` does (it has no manifest).
+- `compact all` is sessions+md+org. **openclaw is asked for by name** — the
+  harvest runs on explicit call, so its defrag does too.
 
 ## Oracle replication — DB and manifest travel together
 
@@ -421,7 +444,7 @@ and prints `✅ preflight dim=4096`. Copy what the probe said.
 | Sessions incremental | `./run.sh sync:sessions` |
 | Garden incremental | `./run.sh sync:md` |
 | Verify | `./run.sh verify sessions\|md\|all` |
-| Defrag (4 cores) | `./run.sh compact sessions\|md` |
+| Defrag (4 cores) | `./run.sh compact sessions\|md\|openclaw` |
 | dedup+orphan+manifest repair | `./run.sh cleanup sessions\|md` (includes compact, pinned) |
 | Operator triage | `./run.sh doctor --sessions\|--md [--json]` |
 | Sessions, this device only | `./run.sh sync:sessions` (= `--local`, ssh 0, replica untouched) |

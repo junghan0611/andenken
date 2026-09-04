@@ -23,7 +23,7 @@ import {
   DEFAULT_CONCURRENCY,
   type EmbeddingProvider,
 } from "./embedding-provider.js";
-import { VectorStore, getSessionsDbPath, getOrgDbPath, getMdDbPath, getDataDir } from "./store.js";
+import { VectorStore, getSessionsDbPath, getOrgDbPath, getMdDbPath, getOpenclawDbPath, getDataDir } from "./store.js";
 import { findSessionFiles, extractSessionChunks } from "./session-indexer.js";
 import { findOrgFiles, chunkOrgFile, shouldIndexOrgFile } from "./org-chunker.js";
 import { findMdFiles, chunkMdFile, mdChunkToStoreRow } from "./md-chunker.js";
@@ -1090,6 +1090,18 @@ async function indexOrg(force: boolean) {
 async function compact(target: string) {
   const lancedb = await import("@lancedb/lancedb");
 
+  // `all` deliberately does not include openclaw: the harvest runs on explicit
+  // call, so its defrag is an explicit call too.
+  //
+  // Compacting IS ours to do, and the reason is worth stating because the name
+  // invites the opposite reading. `openclaw.lance` is OUR LanceDB — our schema,
+  // our ids, our FTS index — holding vectors OpenClaw computed. The fragments in
+  // it are made by OUR writes (the importer's 200-row batched delete+add):
+  // measured 2026-09-04, one 481-row import took it from 1 fragment to 4, while
+  // OpenClaw's own databases were only ever read. This file exists on the
+  // authority alone and nothing else maintains it. What is NOT ours is upstream:
+  // their chunking, their model, their retention, and their sqlite — which the
+  // export opens read-only and never compacts.
   const targets =
     target === "all"
       ? ["sessions", "md", "org"]
@@ -1101,7 +1113,9 @@ async function compact(target: string) {
         ? getSessionsDbPath()
         : t === "md"
           ? getMdDbPath()
-          : getOrgDbPath();
+          : t === "openclaw"
+            ? getOpenclawDbPath()
+            : getOrgDbPath();
 
     if (!fs.existsSync(dbPath)) {
       console.log(`${t}: not found`);
@@ -1447,6 +1461,50 @@ async function status() {
     }
   } else {
     console.log("📚 Org: not indexed (track currently disabled in production — upstream R&D only)");
+  }
+
+  // OpenClaw harvest. Reported here because `status` is the surface an operator
+  // calls daily, and an axis missing from it is an axis whose freshness nobody
+  // can ask about — a cross-review on 2026-09-03 asked exactly that and came
+  // back empty-handed. It has no manifest: this track's cursor is the per-agent
+  // watermark, so freshness is stated as "how recent is the newest chunk we
+  // hold, per bot" rather than as an indexed/total file ratio.
+  if (fs.existsSync(getOpenclawDbPath())) {
+    const ocStore = new VectorStore(getOpenclawDbPath(), 4096);
+    await ocStore.init();
+    const ocCount = await ocStore.getCount();
+    const ocDim = await ocStore.getActualVectorDim();
+    await ocStore.close();
+
+    const ocFragDir = path.join(getOpenclawDbPath(), "session_chunks.lance", "data");
+    const ocFrags = fs.existsSync(ocFragDir) ? fs.readdirSync(ocFragDir).length : 0;
+    const ocSize = execSync(`du -sh ${getOpenclawDbPath()}`).toString().split("\t")[0];
+    console.log(
+      `🤖 OpenClaw (${ocDim ?? "?"}d): ${ocCount} chunks | ${ocFrags} frags | ${ocSize} | harvested, not embedded here`,
+    );
+
+    const wmPath = path.join(getDataDir(), "openclaw-watermark.json");
+    if (fs.existsSync(wmPath)) {
+      try {
+        const wm: Record<string, unknown> = JSON.parse(fs.readFileSync(wmPath, "utf-8"));
+        // `_host` is metadata about the cursor, not a cursor. Printing it as an
+        // agent would render an Invalid Date and invent a seventh bot.
+        const host = typeof wm._host === "string" ? wm._host : null;
+        const parts = Object.entries(wm)
+          .filter((e): e is [string, number] => e[0] !== "_host" && typeof e[1] === "number")
+          .sort((a, b) => b[1] - a[1])
+          .map(([agent, ms]) => `${agent}=${new Date(ms).toISOString().slice(0, 16).replace("T", " ")}`);
+        console.log(
+          `   ↳ watermark (newest chunk held, per agent${host ? `, host ${host}` : ""}): ${parts.join(" · ")}`,
+        );
+      } catch {
+        console.log("   ↳ watermark: unreadable");
+      }
+    } else {
+      console.log("   ↳ watermark: none yet — next sync:openclaw harvests from zero");
+    }
+  } else {
+    console.log("🤖 OpenClaw: not harvested yet — ./run.sh sync:openclaw");
   }
 }
 
