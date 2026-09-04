@@ -118,6 +118,37 @@ export function prepareRow(r: OpenclawRow): RowVerdict {
 }
 
 /**
+ * Which of these rows actually have to be written.
+ *
+ * The export asks `updated_at >= watermark`, so a run with nothing new still
+ * brings the whole boundary millisecond back — measured 2026-09-04, 449 rows
+ * (gpt 266, bbot 101, main 78), reproduced identically by two agents fourteen
+ * minutes apart with the watermark unmoved. Rewriting those cost three LanceDB
+ * fragments per run for zero new information.
+ *
+ * The fix is here and not in the query: the boundary must still be ASKED for,
+ * because a row can commit in the same millisecond as the one that set the mark
+ * but after our snapshot, and a strict `>` would lose it forever. What we can
+ * skip is writing a row we already hold unchanged. Identity is (id, updated_at):
+ * the id already encodes source, path, line span, chunk hash and model, so a
+ * same-id row with the same stamp is the same row. A changed stamp — the case
+ * only the time cursor can see, e.g. a re-embed under the same model string —
+ * still writes.
+ */
+export function partitionByChange(
+	batch: PreparedChunk[],
+	held: Map<string, string>,
+): { write: PreparedChunk[]; unchanged: number } {
+	const write: PreparedChunk[] = [];
+	let unchanged = 0;
+	for (const c of batch) {
+		if (held.get(c.id) === c.timestamp) unchanged++;
+		else write.push(c);
+	}
+	return { write, unchanged };
+}
+
+/**
  * Advance one agent's watermark. Per agent because the bots reindex on their own
  * schedules — measured 2026-09-03, glg at 16:05 while mini was still on 09-02 —
  * and one global high-water mark would let a fast agent's clock hide a slow
@@ -148,6 +179,8 @@ export interface ImportStats {
 	droppedCredential: number;
 	droppedBoilerplate: number;
 	droppedDim: number;
+	/** Rows we already held with the same stamp — accepted, but not rewritten. */
+	unchanged: number;
 	byAgent: Record<string, number>;
 	watermark: Record<string, number>;
 }
@@ -260,6 +293,7 @@ export async function importOpenclaw(
 		droppedCredential: 0,
 		droppedBoilerplate: 0,
 		droppedDim: 0,
+		unchanged: 0,
 		byAgent: {},
 		watermark: readWatermark(),
 	};
@@ -291,13 +325,21 @@ export async function importOpenclaw(
 	let batch: Parameters<VectorStore["addChunksRaw"]>[0] = [];
 	const flush = async () => {
 		if (batch.length === 0) return;
-		if (!opts.dryRun) {
+		// Ask the store what it already holds, then write only what differs. The
+		// boundary re-fetch is accepted in full and simply lands on rows we have.
+		const held = await store.getStoredStamps(batch.map((c) => c.id));
+		const { write, unchanged } = partitionByChange(batch, held);
+		stats.unchanged += unchanged;
+		if (!opts.dryRun && write.length > 0) {
 			// Same id replaces itself. Deleting first keeps a re-exported chunk from
 			// existing twice; it does not remove anything this import did not see.
-			await store.deleteByIds(batch.map((c) => c.id));
-			await store.addChunksRaw(batch);
+			await store.deleteByIds(write.map((c) => c.id));
+			await store.addChunksRaw(write);
 		}
-		stats.imported += batch.length;
+		// by-agent counts what was WRITTEN, so the line cannot claim work that the
+		// unchanged skip just avoided.
+		for (const c of write) stats.byAgent[c.project] = (stats.byAgent[c.project] ?? 0) + 1;
+		stats.imported += write.length;
 		batch = [];
 	};
 
@@ -312,7 +354,8 @@ export async function importOpenclaw(
 		if (verdict.kind === "drop-vector") { stats.droppedDim++; continue; }
 
 		batch.push(verdict.chunk);
-		stats.byAgent[r.agent] = (stats.byAgent[r.agent] ?? 0) + 1;
+		// The watermark advances on every ACCEPTED row, including one we end up not
+		// rewriting: we did take it, and the cursor records what we took.
 		mergeWatermark(stats.watermark, r.agent, r.updated_at);
 
 		if (batch.length >= 200) await flush();
@@ -343,8 +386,13 @@ async function main(): Promise<void> {
 	const stats = await importOpenclaw(getStagingPath(), { dryRun });
 
 	console.log(
-		`📥 OpenClaw harvest: ${stats.imported} chunks imported (of ${stats.seen} exported)`,
+		`📥 OpenClaw harvest: ${stats.imported} chunks written (of ${stats.seen} exported)`,
 	);
+	if (stats.unchanged > 0) {
+		console.log(
+			`   unchanged: ${stats.unchanged} already held with the same stamp — accepted, not rewritten`,
+		);
+	}
 	const dropped =
 		stats.droppedCredential + stats.droppedBoilerplate + stats.droppedDim;
 	if (dropped > 0) {

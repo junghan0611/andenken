@@ -22,6 +22,8 @@ import * as path from "path";
 import {
 	prepareRow,
 	mergeWatermark,
+	partitionByChange,
+	type PreparedChunk,
 	assertWatermarkHost,
 	readWatermark,
 	readWatermarkHost,
@@ -176,6 +178,35 @@ console.log("\n=== watermark ===");
 	// across six agents, gpt alone 228.
 	mergeWatermark(m, "bbot", 0);
 	ok("a first-seen agent starts from its own row", m.bbot === 0);
+}
+
+console.log("\n=== unchanged rows are accepted, not rewritten ===");
+
+{
+	const chunk = (id: string, ts: string): PreparedChunk => ({
+		id, text: "", vector: [], sessionFile: "", project: "glg",
+		lineNumber: 0, timestamp: ts, role: "", source: "sessions", metadata: {},
+	});
+	const A = "2026-09-03T14:05:00.000Z";
+	const B = "2026-09-03T15:00:00.000Z";
+
+	const batch = [chunk("glg:1", A), chunk("glg:2", A), chunk("glg:3", B)];
+
+	// The boundary case this exists for: every row came back and every row is
+	// already held with the same stamp.
+	const all = partitionByChange(batch, new Map([["glg:1", A], ["glg:2", A], ["glg:3", B]]));
+	ok("a pure boundary re-fetch writes nothing", all.write.length === 0 && all.unchanged === 3);
+
+	// A row whose stamp moved must still be written — that is the case only the
+	// time cursor can see (same model string, different provider/embedding version).
+	const moved = partitionByChange(batch, new Map([["glg:1", A], ["glg:2", B], ["glg:3", B]]));
+	ok("a changed stamp still writes", moved.write.length === 1 && moved.write[0].id === "glg:2");
+
+	// Never seen before → always written.
+	const fresh = partitionByChange(batch, new Map([["glg:1", A]]));
+	ok("rows we do not hold are written", fresh.write.length === 2 && fresh.unchanged === 1);
+
+	ok("an empty store writes everything", partitionByChange(batch, new Map()).write.length === 3);
 }
 
 console.log("\n=== watermark host scoping ===");

@@ -239,6 +239,32 @@ export class VectorStore {
   }
 
   /**
+   * For a batch of ids, what this store already holds — id → stored timestamp.
+   *
+   * The openclaw harvest needs it to answer a narrow question: "is the row I am
+   * about to write the row that is already there?" It reads the DB rather than a
+   * sidecar manifest on purpose — a second record of what we hold is a second
+   * thing that can be wrong, and the store is the one that decides search results.
+   * Ids not present simply do not appear in the map.
+   */
+  async getStoredStamps(ids: string[]): Promise<Map<string, string>> {
+    await this.ensureTable();
+    const out = new Map<string, string>();
+    if (!this.table || ids.length === 0) return out;
+
+    const quoted = ids.map((i) => `'${i.replace(/'/g, "''")}'`).join(", ");
+    const rows = await this.table
+      .query()
+      .where(`\`id\` IN (${quoted})`)
+      .select(["id", "timestamp"])
+      .limit(ids.length)
+      .toArray();
+
+    for (const r of rows) out.set(r.id as string, r.timestamp as string);
+    return out;
+  }
+
+  /**
    * Delete a batch of chunks by id.
    *
    * The openclaw harvest needs this and the file-scoped delete above will not do:
