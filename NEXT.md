@@ -6,20 +6,21 @@
 
 - [x] **1. 세션 코퍼스 통합** — 평생 폴더 + device roster (`v2026.9.3`, #10·#11 닫힘)
 - [x] **2. 2면 SSOT 동기화** — thinkpad↔oracle, 인덱스·매니페스트·코퍼스 한 묶음
-- [x] **3. OpenClaw 면 회수** ([#13](https://github.com/junghan0611/andenken/issues/13)) — 4,737 chunks / API 0 / 교차검수 + 방향 재점검 통과, 커밋 대기
+- [x] **3. OpenClaw 면 회수** ([#13](https://github.com/junghan0611/andenken/issues/13)) — 4,737 chunks / API 0 / 교차검수 + 방향 재점검 통과, `0fbc92a`…`3143d07` push 완료
 - [ ] **4. 근본 정리** ← CURRENT: 위 §근본 1·2·3 — 오늘 정정 16건이 가리킨 자리
 - [ ] **5. 회수 품질** ([#12](https://github.com/junghan0611/andenken/issues/12)) ← PAUSED: 골든 세션 분기 추출이 선행(백로그 4번)
 
-현재 좌표: 3 완료(커밋 대기) → 4 진행 → 5 보류
+현재 좌표: 3 완료 → 4 진행(§sorge#1 반환분 닫힘, MD 축 freshness 남음) → 5 보류
 
 # NOW — 근본 정리 (오늘 정정 16건이 가리킨 자리)
 
-- **Current**: tier 4는 섰고, 커밋 전에 고칠 것 셋이 **전부 수리됐다**(아래 ✅절).
-  커밋 대기 상태 그대로다. 남은 것은 기능이 아니라 **09-03의 16건이 드러낸 세 자리**다
-  — 아래 §근본 1·2·3.
+- **Current**: tier 4는 섰고 **전부 push 됐다**(09-04 harvest 넷 + 09-06 `1e61698`).
+  남은 것은 기능이 아니라 **09-03의 16건이 드러낸 세 자리**다 — 아래 §근본 1·2·3.
+  그리고 sorge#1이 남긴 **MD 축 freshness** 한 자리(아래 §sorge#1 반환).
 - **Next**: (1) §근본 1의 한 줄을 `AGENTS.md`에 넣을지 GLG 판정 → (2) §근본 2의
-  문서↔`--help` 대조 테스트 → (3) §근본 3으로 `doctor`의 0 신호 훑기.
-- **Blocker**: (1)만 GLG 판정. (2)(3)은 판정 없이 시작 가능. 09-04에 `run.sh` 도움말이
+  문서↔`--help` 대조 테스트 → (3) §근본 3으로 `doctor`의 0 신호 훑기 →
+  (4) MD 축 `export → 재색인` 순서와 `state:"stale"`.
+- **Blocker**: (1)만 GLG 판정. (2)(3)(4)는 판정 없이 시작 가능.  09-04에 `run.sh` 도움말이
   또 코드 뒤에 남아 있었으므로 (2)의 근거는 하나 더 늘었다.
 - **Read**: 아래 §근본 절. 그리고 [#13](https://github.com/junghan0611/andenken/issues/13)
   코멘트 5개 — 특히 마지막 둘(구현 결과·교차검수). 본문과 스레드가 어긋나면 스레드가 이긴다.
@@ -172,7 +173,23 @@ thinkpad에서는 정상 통과(449 exported / 0 written).
   `partitionByChange`와 어긋남). `md-search.ts`도 같이 넣었다.
 - 새 테스트: `./run.sh test:absent` (API 0, 25건). 이 고장은 **조용해서** 라이브 런으로는
   구분이 안 된다 — fixture만이 잡는다(INVARIANT §8).
-- **커밋 대기.** GLG가 정한다.
+- **커밋 `1e61698` · push 완료** (2026-09-06 15:40 KST, 어젠다 도장). 10파일 +673/−44.
+
+**이슈 쪽 귀결 (sorge 인계, 2026-09-06):** 이 커밋이 완료조건 **1·2b**를 닫았고, 그것이
+9번(`agent-config` wrapper 은퇴)의 조건①이었다. oracle receipt(`55ef65d`)로 조건②까지 서서
+**7번도 닫혔다** — 오라클에서 wrapper·raw CLI·컨테이너 세 경로 전부 exit 4, **§1의
+`os error 30` 소멸**, 그리고 **세 경로로 읽었는데도 잔여물이 안 생겼다**(게이트가 실제
+호스트에서 섰다는 receipt). 6번은 「캐시 정리」에서 **「기억축 복구」로 승급**해 oracle /
+`nixos-config` 로 갔다 — semantic search latency 가 embedding 바이트에 선형(≈0.5초/MB)이라
+glg 가 85.4초, 봇 도구의 15초 게이트를 통과하는 건 mini 하나뿐이다. **우리 축 아니다.**
+
+**남은 내 몫 둘:**
+
+- [ ] **4번 MD 축 freshness** — `export → 재색인` 순서(§2, 18:43 index vs 19:17 export).
+      openclaw 축은 import receipt 로 닫혔지만 **MD 는 다른 수선**이다. `state` 에 `"stale"`
+      자리를 비워 뒀다(INVARIANT §7.4 규칙 2).
+- [ ] **`verify openclaw` 계열을 문서에 남기기** — 축이 없을 때 **다른 축의 답을 내는**
+      모양은 오늘 없앤 `count:0 exit 0` 과 같은 계열이다. ROADMAP 의 유지보수 절에 한 줄.
 
 # RECENT
 
