@@ -78,7 +78,13 @@ API 0, 4,651 → 4,737 chunks(두 번째 449행은 전부 자기 자리 교체, 
 
 - [ ] pi extension `openclaw_search` — 없으면 pi 형제는 이 축을 영영 못 본다.
       CLI만 나누면 GLG의 "축을 나눠라"가 절반만 지켜진다
-- [ ] `verify openclaw` — `verify` 대상이 아직 `[sessions|md|org|all]`이다
+- [x] ~~`verify openclaw`~~ — **09-06 닫힘.** 대상으로 추가했고, 더 나쁜 자리를 하나
+      찾았다: 모르는 대상은 **조용히 org로 떨어졌다.** `verify openclaw`가 org의
+      44,916행과 orphan 373건을 openclaw 이름으로 찍고 있었다 — C-b와 같은 모양의
+      "읽기 명령이 딴 축을 자신 있게 답하는" 고장. 이제 거절한다(exit 1).
+      openclaw의 orphan 검사는 건너뛴다 — `sessionFile`이 harvest 호스트의 경로이고
+      OpenClaw가 이미 지운 전사의 경로도 섞여 있다(append-only의 의도). 실측:
+      4,737 unique · 261 source paths · 1 frag/82M · all passed
 - [ ] 재군음 사건당 전량 재전송 — 정확도는 지금이 최선(`updated_at` ⊃ id-diff ⊃ hash).
       2단계(원격 id manifest 후 로컬 diff)는 키가 id여야 하고 **provider 변경 실명을
       GLG가 승인**해야 한다
@@ -132,6 +138,41 @@ thinkpad에서는 정상 통과(449 exported / 0 written).
 
 전략(GLG, 09-04): 노트북이 오라클 것까지 가져와서 인덱싱하고 넣어준다. openclaw 세션도
 같은 방식. 오라클은 질의 레플리카.
+
+## sorge#1 반환 — read 경로가 write 한다 (2026-09-06, C-b + B층 판정)
+
+`sorge`가 세 집에 나눠 돌린 이슈의 andenken 몫. **두 가지를 receipt로 되돌리고**
+근본 불변식을 닫았다. 상세는 [INVARIANT §7.4 / §7.5](./INVARIANT.md).
+
+- **되돌림 1 — B층은 pending이 아니라 접혀 있었다.** 이슈 C-3은 색인 mtime 12:04 <
+  staging mtime 12:13만 보고 449행이 미반영이라 읽었다. `--dry-run` 실측:
+  **0 written / 449 already held with the same stamp.** 449는 경계 재fetch이고,
+  아무것도 안 쓰는 게 이 importer의 정답이라 파편 mtime이 뒤에 남는 게 정상이다.
+  → **mtime을 증거로 쓰지 않게 만들었다**: `openclaw-staging/last-import.json`이
+  자기 결과를 읽은 아티팩트의 mtime에 묶어 기록하고, `status`가 folded/PENDING을
+  그 키로 답한다. 449는 09-06에 실제로 접어 receipt를 남겼다(파편 mtime 12:04 불변).
+- **되돌림 2 — C-b는 openclaw 전용이 아니었다. sessions가 더 크다.** 빈
+  `ANDENKEN_DATA` 실측: `search-openclaw`도 `search`도 lance를 **만들고** `count:0`
+  exit 0. md만 게이트가 있었다(`cli.ts:447`). pi 확장은 `session_start` hover에서도
+  만들고 있었다 — 보고하는 행위가 대상을 존재하게 했다.
+  → `VectorStore`에 opt-in `readOnly`. mkdir·connect 앞에서 거절하고
+  `AxisAbsentError`를 던진다. 4축 공유라 `doInitialize()`를 통째로 막지 않았고,
+  인덱서는 그대로 쓴다(테스트가 그 자리를 지킨다).
+- **계약**: `agent-config` wrapper(`ad347ef`)와 같은 JSON·같은 **exit 4**.
+  wrapper는 이제 빠른 길이지 유일한 문이 아니다. `state`는 축을 불문하고 한 값이다 —
+  `absent`/`not-indexed` 분리를 잠깐 넣었다가 `agent-config` 논거로 뺐다: 그 차이는
+  축의 성질이 아니라 **(축, 호스트) 쌍의 성질**이고(thinkpad에 md 없음=빌드해라,
+  oracle에 md 없음=복제가 안 왔다), 축에 박으면 레플리카에 authority의 답을 줘서
+  이 이슈가 시작된 자리로 돌아간다. 판별자는 이미 payload의 `host === authority`이고,
+  `state` 자리는 완료조건 4번의 `"stale"`이 쓴다. 갈래는 `reason`/`next` 산문이 든다.
+- 부수: `status`의 워터마크가 **UTC를 라벨 없이** 찍고 있었다(KST와 9시간). KST 표기로
+  고쳤다 — `SKILL.md`의 "this machine"이 공간에서 낸 것과 같은 고장이 시간에서 난 것.
+  `openclaw-importer.ts`는 tsconfig `include`에 없어 **한 번도 타입체크된 적이 없었고**,
+  넣자마자 실제 타입 오류가 하나 나왔다(`batch`가 store 파라미터 타입을 빌려 써서
+  `partitionByChange`와 어긋남). `md-search.ts`도 같이 넣었다.
+- 새 테스트: `./run.sh test:absent` (API 0, 25건). 이 고장은 **조용해서** 라이브 런으로는
+  구분이 안 된다 — fixture만이 잡는다(INVARIANT §8).
+- **커밋 대기.** GLG가 정한다.
 
 # RECENT
 

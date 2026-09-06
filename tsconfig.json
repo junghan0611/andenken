@@ -22,7 +22,9 @@
     "retriever.ts",
     "org-chunker.ts",
     "md-chunker.ts",
-    "indexer.ts"
+    "indexer.ts",
+    "openclaw-importer.ts",
+    "md-search.ts"
   ],
   "exclude": ["test.ts", "benchmark.ts", "node_modules"]
 }

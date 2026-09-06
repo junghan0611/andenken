@@ -11,6 +11,7 @@
 import type * as LanceDB from "@lancedb/lancedb";
 import * as path from "node:path";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import type { SessionSource } from "./session-indexer.js";
 
 // Lazy import to avoid startup cost
@@ -163,16 +164,214 @@ export function getOpenclawDbPath(): string {
   return path.join(getDataDir(), "openclaw.lance");
 }
 
+/**
+ * ── Absent axis ────────────────────────────────────────────────────────────
+ *
+ * A READ CALL MUST NOT CREATE AN AXIS. `lancedb.connect()` is not a read: it
+ * creates the dataset directory it is pointed at, so every search path that
+ * opened a store before checking whether the index existed was a writer wearing
+ * a reader's name.
+ *
+ * That was not a cosmetic mistake. Measured on thinkpad 2026-09-06 against an
+ * empty `ANDENKEN_DATA` scratch dir (sorge#1 C-b):
+ *
+ *   read-only host   `search-openclaw` → EACCES(13), exit 1
+ *                    (oracle saw the same shape as EROFS(30), sorge#1 §1)
+ *   writable host    `search-openclaw` → a fresh EMPTY openclaw.lance is created,
+ *                    then `{"count":0,"results":[]}` with **exit 0**
+ *                    `search` (sessions) → same, creating sessions.lance
+ *
+ * The loud failure was the lucky one. The silent one answers every question with
+ * "nothing found" and looks like success — indistinguishable from "the bots never
+ * said that" on an axis that holds GLG's family, health and money. Widening a
+ * mount would not have fixed that; it would have made the loud host silent too.
+ *
+ * So absent is a STATE, not a failure and not an empty result. The contract here
+ * is the same JSON and the same exit 4 that the agent-config `semantic-memory`
+ * wrapper answers with (commit ad347ef) — that wrapper is now the fast path, not
+ * the only door, because `./run.sh search:*`, a direct `cli.ts` call and any
+ * future pi tool all come through here.
+ *
+ * The gate is opt-in (`readOnly`) rather than a blanket read-only `doInitialize()`
+ * because this class is shared by all four axes AND by the indexers, which must
+ * still create. Read paths ask for it; write paths do not.
+ */
+export const EXIT_AXIS_ABSENT = 4;
+
+/**
+ * `state` is ONE value for every axis, and stays that way on purpose.
+ *
+ * The split that got proposed on 2026-09-06 — `absent` vs `not-indexed` — was
+ * argued down and correctly: the difference it names (the operator can fix this
+ * here / there is nothing to fix here) is a property of the (axis, HOST) pair,
+ * not of the axis. md missing on thinkpad means "build it"; md missing on oracle
+ * means "replication has not arrived". Fixing a second `state` value to the axis
+ * would hand oracle the thinkpad answer and send a bot to run `index:md` on a
+ * read-only consumer — which is exactly the accident sorge#1 opened on.
+ *
+ * The discriminator is already in the payload: `host === authority`. And `state`
+ * has a real claimant waiting — `"stale"`, for an index older than its source
+ * (sorge#1 §4). Spending that budget on "who fixes it" would leave no room for a
+ * state that actually is one. The remedy branch lives in `reason` / `next`.
+ */
+export interface AxisAbsence {
+	axis: string;
+	state: "absent";
+	host: string;
+	authority: string;
+	path: string;
+	reason: string;
+	next: string;
+}
+
+/** `sessions.lance` → `sessions`. The axis IS the file name; nothing else names it. */
+export function axisNameForDbPath(dbPath: string): string {
+	return path.basename(dbPath).replace(/\.lance$/, "");
+}
+
+/**
+ * The host this process runs on, by the same rule the agent-config wrapper uses:
+ * `~/.current-device` first, `hostname` only as a fallback. A host must name
+ * itself the same way on both sides or the two answers cannot be compared.
+ */
+function currentHost(): string {
+	const deviceFile = path.join(process.env.HOME ?? "", ".current-device");
+	try {
+		const v = fs.readFileSync(deviceFile, "utf-8").trim();
+		if (v.length > 0) return v;
+	} catch {
+		/* fall through to hostname */
+	}
+	try {
+		return os.hostname();
+	} catch {
+		return "unknown";
+	}
+}
+
+/**
+ * Who is allowed to write this axis. `ANDENKEN_INDEX_AUTHORITY` is the same
+ * variable `scripts/sync-sessions.sh` and `scripts/export-openclaw.sh` gate on
+ * (INVARIANT 7.1); `ANDENKEN_OPENCLAW_AUTHORITY` exists because the agent-config
+ * wrapper already reads it for this one axis, and two names for one host would
+ * let the wrapper and the CLI disagree about where to send the reader.
+ */
+function authorityForAxis(axis: string): string {
+	if (axis === "openclaw" && process.env.ANDENKEN_OPENCLAW_AUTHORITY) {
+		return process.env.ANDENKEN_OPENCLAW_AUTHORITY;
+	}
+	return process.env.ANDENKEN_INDEX_AUTHORITY ?? "thinkpad";
+}
+
+/** How this axis is built here, once it is known that it is not present. */
+function absenceCopy(
+	axis: string,
+	authority: string,
+	onAuthority: boolean,
+): { reason: string; next: string } {
+	if (!onAuthority) {
+		const detail =
+			axis === "openclaw"
+				? "the openclaw index is deliberately not replicated; this host is a consumer with no copy of the axis"
+				: `no ${axis} index on this host; only the index authority builds it and replicas receive it by rsync`;
+		return {
+			reason: detail,
+			next: `ask the authority host (${authority}), or search another axis and say which axis you searched`,
+		};
+	}
+	switch (axis) {
+		case "openclaw":
+			return {
+				reason: "this host is the openclaw authority but has not harvested yet",
+				next: "./run.sh sync:openclaw (API 0 — OpenClaw already embedded these chunks)",
+			};
+		case "sessions":
+			return {
+				reason: "this host is the index authority but the sessions index has not been built",
+				next: "scripts/sync-sessions.sh --local (this device) or --global (every device, then publish)",
+			};
+		case "md":
+			return {
+				reason: "this host is the index authority but the md (public garden) index has not been built",
+				next: "./run.sh index:md, then ./run.sh sync:md:oracle to replicate",
+			};
+		default:
+			return {
+				reason: `this host is the index authority but the ${axis} index has not been built`,
+				next: "see ./run.sh for this track's index command",
+			};
+	}
+}
+
+/**
+ * Absent is reported for two shapes, because both answer every query with
+ * nothing: the path does not exist, and the path exists but holds no table.
+ * The second is exactly the residue the create-on-read bug left behind, so a
+ * host already carrying an empty dataset must not be told it has an axis.
+ */
+export function describeAxisAbsence(dbPath: string): AxisAbsence | null {
+	const hasDir = fs.existsSync(dbPath);
+	const hasTable = hasDir && fs.existsSync(path.join(dbPath, `${TABLE_NAME}.lance`));
+	if (hasDir && hasTable) return null;
+
+	const axis = axisNameForDbPath(dbPath);
+	const authority = authorityForAxis(axis);
+	const host = currentHost();
+	const onAuthority = host === authority;
+	const { reason, next } = absenceCopy(axis, authority, onAuthority);
+	return {
+		axis,
+		state: "absent",
+		host,
+		authority,
+		path: dbPath,
+		reason: hasDir ? `${reason} (the directory exists but holds no index)` : reason,
+		next,
+	};
+}
+
+/** Thrown by a read-only store asked to open an axis this host does not have. */
+export class AxisAbsentError extends Error {
+	readonly absence: AxisAbsence;
+	constructor(absence: AxisAbsence) {
+		super(`${absence.axis} axis absent on ${absence.host}: ${absence.reason}`);
+		this.name = "AxisAbsentError";
+		this.absence = absence;
+	}
+}
+
+export function isAxisAbsentError(err: unknown): err is AxisAbsentError {
+	return err instanceof AxisAbsentError;
+}
+
+/** Read paths call this before spending anything — an embedding call included. */
+export function assertAxisPresent(dbPath: string): void {
+	const absence = describeAxisAbsence(dbPath);
+	if (absence) throw new AxisAbsentError(absence);
+}
+
 export class VectorStore {
   private db: LanceDB.Connection | null = null;
   private table: LanceDB.Table | null = null;
   private initPromise: Promise<void> | null = null;
   private dbPath: string;
   private vectorDim: number;
+  private readOnly: boolean;
 
-  constructor(dbPath?: string, vectorDim: number = 2560) {
+  /**
+   * `readOnly` makes this instance a reader in the only sense that matters to a
+   * filesystem: it never creates the dataset it is pointed at. Absent throws
+   * `AxisAbsentError` from `init()` instead of connecting a fresh empty store —
+   * see the "Absent axis" note above for what that silence cost.
+   */
+  constructor(
+    dbPath?: string,
+    vectorDim: number = 2560,
+    opts: { readOnly?: boolean } = {},
+  ) {
     this.dbPath = dbPath ?? getSessionsDbPath();
     this.vectorDim = vectorDim;
+    this.readOnly = opts.readOnly ?? false;
   }
 
   private async ensureInitialized(): Promise<void> {
@@ -183,9 +382,15 @@ export class VectorStore {
   }
 
   private async doInitialize(): Promise<void> {
-    const dir = path.dirname(this.dbPath);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
+    // Order matters: the check has to come before mkdirSync AND before
+    // connect(), because either one of them is already the write.
+    if (this.readOnly) {
+      assertAxisPresent(this.dbPath);
+    } else {
+      const dir = path.dirname(this.dbPath);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
     }
 
     const lancedb = await loadLanceDB();

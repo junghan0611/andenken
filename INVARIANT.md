@@ -363,6 +363,74 @@ retrieve as the unredacted one and display as something else. Measured
 2026-09-03: 0 of 4,683 chunks trip the detector, so the policy costs nothing today
 and exists for the day it does not.
 
+### 7.4 A read never creates an axis
+
+`lancedb.connect()` creates the dataset it is pointed at. So every search path
+that opened a store before checking whether the index existed was a **writer
+wearing a reader's name**, and a host with no copy of an axis answered questions
+about it by first bringing an empty one into being.
+
+Measured on thinkpad 2026-09-06 against an empty `ANDENKEN_DATA` scratch dir
+(sorge#1 C-b):
+
+| host is | before | after |
+|---|---|---|
+| read-only | `EACCES(13)`, exit 1 — the same shape oracle saw as `EROFS(30)` | `state:"absent"`, exit 4 |
+| **writable** | **an empty `*.lance` created, then `{"count":0,"results":[]}` with exit 0** | `state:"absent"`, exit 4, nothing created |
+
+The loud failure was the lucky one; it is why an issue got opened. The silent one
+answers every question with "nothing found" and looks like success —
+indistinguishable from "the bots never said that" on an axis holding GLG's family,
+health and money. **This is why widening a mount is forbidden as a fix: it does
+not remove the bug, it moves the loud host into the silent column.**
+
+Invariant:
+
+1. **Absent is a state, not a failure and not an empty result.** Contract:
+   `{"axis","state":"absent","host","authority","path","reason","next"}` with
+   **exit 4** — not 0 (an absent axis that exits 0 with `count:0` is read as
+   "asked and found nothing") and not 1 (nothing failed). Identical to what the
+   agent-config `semantic-memory` wrapper answers (`ad347ef`); that wrapper is a
+   fast path, **not the only door**, because `./run.sh search:*`, a direct
+   `cli.ts` call and the pi tools all arrive here.
+2. **`state` is one value, and the remedy is not a state.** "The operator can fix
+   this here" vs "there is nothing to fix here" is a property of the (axis, HOST)
+   pair, not of the axis: md missing on thinkpad means *build it*, md missing on
+   oracle means *replication has not arrived*. A second `state` value keyed to the
+   axis would give a replica the authority's answer and send a bot to run
+   `index:md` on a read-only consumer — the accident this issue opened on. The
+   discriminator is already in the payload (`host === authority`); the remedy
+   branch lives in `reason` / `next`. `state` is also where **`"stale"`** goes
+   when an index is older than its source (sorge#1 §4) — do not spend it here.
+3. **The gate is opt-in, in the library.** `new VectorStore(path, dim, {readOnly:
+   true})` refuses before `mkdirSync` and before `connect`. It is not a blanket
+   read-only `doInitialize()`, because that class is shared by all four axes *and*
+   by the indexers, which must still create. Read paths ask for it; write paths do
+   not. Do not re-implement this as an `existsSync` at each call site — five copies
+   is how md ended up the only guarded axis.
+4. **A directory with no table is absent too.** That is exactly the residue this
+   bug left on hosts that already ran it; a host carrying an empty dataset must
+   not be told it has an axis.
+
+### 7.5 On the openclaw track, mtime is not evidence
+
+This importer's **correct** answer to a boundary re-fetch is to write nothing:
+the export asks `updated_at >= watermark`, so a run with no new rows still returns
+the whole boundary millisecond, and `partitionByChange` accepts them and rewrites
+none. The index's fragment mtime therefore legitimately stays behind the staged
+artifact's.
+
+That shape has already misled a reader once. sorge#1 C-3 compared `12:04` (index)
+with `12:13` (staging) on 2026-09-04 and concluded 449 rows were unfolded; a
+`--dry-run` on 2026-09-06 showed **0 written, 449 already held with the same
+stamp**. Same-shaped mtime inversions on other tracks (md's 18:43 index vs 19:17
+export) are *not* automatically the same thing.
+
+Invariant: **the import states its own outcome; nobody infers it from mtime.**
+`data/openclaw-staging/last-import.json` records `{at, stagingMtimeMs, seen,
+imported, unchanged, host}` keyed to the artifact it read, and `./run.sh status`
+reports `folded` / `PENDING` from that key — not from a timestamp comparison.
+
 ## 8. Test invariants
 
 At minimum, unit tests must prove:
@@ -399,6 +467,7 @@ Before merging chunking/indexing changes, verify:
 - [ ] Does a zero-chunk stale file clear old DB rows?
 - [ ] Does manifest update only after success?
 - [ ] Does the change respect the 8K serving limit?
+- [ ] Does any read path open a store without `{readOnly: true}`? (§7.4)
 - [ ] If scope policy changed, did we require full org rebuild?
 - [ ] Did `npm test -- unit` pass?
 - [ ] Did `npm run build` pass?
@@ -408,6 +477,7 @@ Before merging chunking/indexing changes, verify:
 ```bash
 npm test -- unit
 npm run build
+./run.sh test:absent      # §7.4 — a read never creates an axis (API 0)
 ```
 
 For policy / chunking changes, also run a local scan or doctor-style check before force rebuild.

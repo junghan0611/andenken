@@ -56,7 +56,8 @@ Usage: ./run.sh <command> [args]
                               touched — the export opens it read-only
   cleanup [sessions|md|org]   Dedup + orphan removal + manifest repair + compact (CPU-pinned)
   cleanup [target] --dry-run  Dry-run (report only)
-  verify [sessions|md|org|all] Post-indexing integrity check
+  verify [sessions|md|org|openclaw|all]
+                              Post-indexing integrity check (all = sessions+md+org)
   status                      Show index statistics (text)
   status:json                 Show index statistics (machine-readable JSON)
   estimate [sessions|md|org|all] Dry-run cost estimate (Gemini-priced, legacy)
@@ -117,6 +118,7 @@ Usage: ./run.sh <command> [args]
   test:corpus                 Fixture tests for corpus-backed device discovery (API 0)
   test:split                  Fixture tests for long-turn embedding split (API 0)
   test:openclaw               Fixture tests for the OpenClaw harvest policy (API 0)
+  test:absent                 Fixture tests for the absent-axis invariant — a read never creates (API 0)
   test:parity                 Credential regex parity: python ↔ typescript (API 0)
 
 === Session corpus (~/repos/gh/session) ===
@@ -247,6 +249,8 @@ case "${1:-help}" in
     cd "$SCRIPT_DIR" && pnpm exec tsx session-split.test.ts ;;
   test:openclaw)
     load_env; cd "$SCRIPT_DIR" && pnpm exec tsx openclaw-import.test.ts ;;
+  test:absent)
+    cd "$SCRIPT_DIR" && pnpm exec tsx axis-absent.test.ts ;;
   test:parity)
     cd "$SCRIPT_DIR" && pnpm exec tsx credential-parity.test.ts ;;
 

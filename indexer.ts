@@ -24,6 +24,7 @@ import {
   type EmbeddingProvider,
 } from "./embedding-provider.js";
 import { VectorStore, getSessionsDbPath, getOrgDbPath, getMdDbPath, getOpenclawDbPath, getDataDir } from "./store.js";
+import { stagingState } from "./openclaw-importer.js";
 import { findSessionFiles, extractSessionChunks } from "./session-indexer.js";
 import { findOrgFiles, chunkOrgFile, shouldIndexOrgFile } from "./org-chunker.js";
 import { findMdFiles, chunkMdFile, mdChunkToStoreRow } from "./md-chunker.js";
@@ -1333,6 +1334,16 @@ async function collectOrgStatus(): Promise<StatusTrack> {
   };
 }
 
+/**
+ * `sv-SE` is the shortest locale that formats as `YYYY-MM-DD HH:MM:SS`; the
+ * timeZone is what makes it a KST reading rather than the machine's.
+ */
+function kstStamp(ms: number): string {
+	return new Date(ms)
+		.toLocaleString("sv-SE", { timeZone: "Asia/Seoul" })
+		.slice(0, 16);
+}
+
 async function status() {
   const json = process.argv.includes("--json");
 
@@ -1470,7 +1481,7 @@ async function status() {
   // watermark, so freshness is stated as "how recent is the newest chunk we
   // hold, per bot" rather than as an indexed/total file ratio.
   if (fs.existsSync(getOpenclawDbPath())) {
-    const ocStore = new VectorStore(getOpenclawDbPath(), 4096);
+    const ocStore = new VectorStore(getOpenclawDbPath(), 4096, { readOnly: true });
     await ocStore.init();
     const ocCount = await ocStore.getCount();
     const ocDim = await ocStore.getActualVectorDim();
@@ -1493,15 +1504,38 @@ async function status() {
         const parts = Object.entries(wm)
           .filter((e): e is [string, number] => e[0] !== "_host" && typeof e[1] === "number")
           .sort((a, b) => b[1] - a[1])
-          .map(([agent, ms]) => `${agent}=${new Date(ms).toISOString().slice(0, 16).replace("T", " ")}`);
+          // KST, and SAID to be KST. This line used to print `toISOString()` —
+          // UTC with no label — on a status page whose every other reading is on
+          // GLG's single KST axis. An operator comparing a watermark against an
+          // export time was reading a nine-hour lie: glg's 1788478791776 renders
+          // "09-03 23:39" in UTC and "09-04 08:39" in KST, and the freshness
+          // question sorge#1 §4 asks is exactly that comparison.
+          .map(([agent, ms]) => `${agent}=${kstStamp(ms)}`);
         console.log(
-          `   ↳ watermark (newest chunk held, per agent${host ? `, host ${host}` : ""}): ${parts.join(" · ")}`,
+          `   ↳ watermark KST (newest chunk held, per agent${host ? `, host ${host}` : ""}): ${parts.join(" · ")}`,
         );
       } catch {
         console.log("   ↳ watermark: unreadable");
       }
     } else {
       console.log("   ↳ watermark: none yet — next sync:openclaw harvests from zero");
+    }
+
+    // Staging state, stated rather than inferred. A staged file whose mtime is
+    // NEWER than the index proves nothing here: this importer's correct answer
+    // to a boundary re-fetch is to write nothing at all, so the index's mtime
+    // legitimately stays behind. sorge#1 C-3 read those two timestamps and
+    // concluded 449 rows were unfolded; a --dry-run showed all 449 already held.
+    const staging = stagingState();
+    if (staging.state === "folded" && staging.receipt) {
+      const r = staging.receipt;
+      console.log(
+        `   ↳ staging: folded — ${r.seen} rows exported, ${r.imported} written, ${r.unchanged} already held (imported ${kstStamp(Date.parse(r.at))} KST)`,
+      );
+    } else if (staging.state === "pending") {
+      console.log("   ↳ staging: PENDING — a staged export has not been imported. Run: ./run.sh sync:openclaw");
+    } else if (staging.state === "unknown") {
+      console.log("   ↳ staging: an export is staged with no import receipt — run ./run.sh sync:openclaw (a re-import of held rows writes nothing)");
     }
   } else {
     console.log("🤖 OpenClaw: not harvested yet — ./run.sh sync:openclaw");
@@ -1680,13 +1714,29 @@ async function verify(target: string) {
     try {
       if (t === "sessions") return createSessionProviderFromEnv()?.dimensions;
       if (t === "md") return createMdProviderFromEnv()?.dimensions;
+      // The openclaw axis is not embedded here, so "configured" means the
+      // provider a QUERY would use — sessions, by design (store.ts).
+      if (t === "openclaw") return createSessionProviderFromEnv()?.dimensions;
       return createOrgProviderFromEnv()?.dimensions;
     } catch {
       return undefined;
     }
   };
 
+  // `all` deliberately stays sessions/md/org: it is what scripts call after an
+  // indexing run, and openclaw is never written by one. Ask for it by name.
+  const KNOWN_TARGETS = ["sessions", "md", "org", "openclaw"];
   const targets = target === "all" ? ["sessions", "md", "org"] : [target];
+  for (const t of targets) {
+    if (!KNOWN_TARGETS.includes(t)) {
+      // It used to fall through to org. `verify openclaw` printed org's 44,916
+      // rows and its 373 orphans under the openclaw name — a read command
+      // answering confidently about the wrong axis, which is the same failure
+      // shape as sorge#1 C-b. Refuse instead (measured 2026-09-06).
+      console.error(`verify: unknown target "${t}" — one of ${KNOWN_TARGETS.join(", ")}, or all`);
+      process.exit(1);
+    }
+  }
 
   for (const t of targets) {
     const dbPath =
@@ -1694,7 +1744,9 @@ async function verify(target: string) {
         ? getSessionsDbPath()
         : t === "md"
           ? getMdDbPath()
-          : getOrgDbPath();
+          : t === "openclaw"
+            ? getOpenclawDbPath()
+            : getOrgDbPath();
     if (!fs.existsSync(dbPath)) { console.log(`${t}: not found`); continue; }
 
     console.log(`\n=== ${t} Verification ===`);
@@ -1748,9 +1800,17 @@ async function verify(target: string) {
     // 2. Orphan check
     const fileSet = new Set<string>();
     for (const r of allRows) fileSet.add(r.sessionFile as string);
-    const orphans = [...fileSet].filter(f => !fs.existsSync(f));
-    if (orphans.length === 0) pass(`No orphan files (${fileSet.size} files all exist)`);
-    else fail(`${orphans.length} orphan files in DB`);
+    if (t === "openclaw") {
+      // `sessionFile` here is an OpenClaw-side path on the harvest host, plus
+      // paths whose transcripts OpenClaw has already deleted — this track is
+      // append-only precisely so those survive. Testing them against the local
+      // filesystem would report the design as damage.
+      pass(`${fileSet.size} source paths (not checked: they name the harvest host, not this one)`);
+    } else {
+      const orphans = [...fileSet].filter(f => !fs.existsSync(f));
+      if (orphans.length === 0) pass(`No orphan files (${fileSet.size} files all exist)`);
+      else fail(`${orphans.length} orphan files in DB`);
+    }
 
     // 3. Row count sanity
     if (allRows.length === count) pass(`Row count consistent: ${count.toLocaleString()}`);

@@ -280,6 +280,69 @@ export function writeWatermark(mark: Record<string, number>, host?: string | nul
 	fs.writeFileSync(getWatermarkPath(), JSON.stringify(body, null, 2) + "\n");
 }
 
+/**
+ * The receipt that says what the staged artifact ALREADY BECAME.
+ *
+ * Without it, the only evidence on disk is mtime, and mtime lies in the exact
+ * case this track produces most often. Measured 2026-09-06 (thinkpad): the
+ * staged file was 9 minutes NEWER than the index's last fragment — 12:13 vs
+ * 12:04 — and a reader comparing those two timestamps concluded 449 rows were
+ * still unfolded (sorge#1 C-3). They were not. All 449 were the boundary
+ * re-fetch, already held with the same stamp, and `partitionByChange` wrote
+ * nothing precisely as designed, which is WHY the fragment mtime never moved.
+ * A track whose correct behaviour is "write nothing" cannot be audited by the
+ * mtime of what it writes.
+ *
+ * So the import states its own outcome, keyed to the artifact it read: same
+ * staging mtime as the receipt → this export is folded; different → pending.
+ */
+export function getImportReceiptPath(): string {
+	return path.join(getDataDir(), "openclaw-staging", "last-import.json");
+}
+
+export interface ImportReceipt {
+	at: string;
+	stagingMtimeMs: number;
+	seen: number;
+	imported: number;
+	unchanged: number;
+	host: string | null;
+}
+
+export function readImportReceipt(): ImportReceipt | null {
+	const p = getImportReceiptPath();
+	if (!fs.existsSync(p)) return null;
+	try {
+		const parsed = JSON.parse(fs.readFileSync(p, "utf-8"));
+		return parsed && typeof parsed === "object" ? (parsed as ImportReceipt) : null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Has the staged export been folded into the index?
+ *
+ * `no-staging` is not "nothing to do" and not a problem — the exporter deletes
+ * nothing, so a missing artifact simply means no export has been staged here.
+ */
+export function stagingState(): {
+	state: "folded" | "pending" | "no-staging" | "unknown";
+	staged: number | null;
+	receipt: ImportReceipt | null;
+} {
+	const stagingPath = getStagingPath();
+	if (!fs.existsSync(stagingPath)) return { state: "no-staging", staged: null, receipt: null };
+	const receipt = readImportReceipt();
+	if (!receipt) return { state: "unknown", staged: null, receipt: null };
+	const mtimeMs = Math.floor(fs.statSync(stagingPath).mtimeMs);
+	return {
+		state: mtimeMs === receipt.stagingMtimeMs ? "folded" : "pending",
+		staged: receipt.seen,
+		receipt,
+	};
+}
+
 export async function importOpenclaw(
 	stagingPath: string = getStagingPath(),
 	opts: { dryRun?: boolean; host?: string | null } = {},
@@ -322,7 +385,11 @@ export async function importOpenclaw(
 		crlfDelay: Infinity,
 	});
 
-	let batch: Parameters<VectorStore["addChunksRaw"]>[0] = [];
+	// PreparedChunk, not the store's parameter type: `addChunksRaw` takes `source`
+	// as optional and `partitionByChange` requires it, so borrowing the store's
+	// shape here made the two disagree. Nobody saw it because this file was not in
+	// tsconfig's include list until indexer.ts imported it (2026-09-06).
+	let batch: PreparedChunk[] = [];
 	const flush = async () => {
 		if (batch.length === 0) return;
 		// Ask the store what it already holds, then write only what differs. The
@@ -362,7 +429,20 @@ export async function importOpenclaw(
 	}
 	await flush();
 
-	if (!opts.dryRun) writeWatermark(stats.watermark, host);
+	if (!opts.dryRun) {
+		writeWatermark(stats.watermark, host);
+		// Keyed to the artifact's mtime, not to "now": that is what lets a later
+		// reader tell a folded export from a newly staged one.
+		const receipt: ImportReceipt = {
+			at: new Date().toISOString(),
+			stagingMtimeMs: Math.floor(fs.statSync(stagingPath).mtimeMs),
+			seen: stats.seen,
+			imported: stats.imported,
+			unchanged: stats.unchanged,
+			host: host ?? null,
+		};
+		fs.writeFileSync(getImportReceiptPath(), JSON.stringify(receipt, null, 2) + "\n");
+	}
 	await store.close();
 	return stats;
 }

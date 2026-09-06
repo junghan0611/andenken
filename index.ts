@@ -23,7 +23,7 @@ import {
   CachingProvider,
   type EmbeddingProvider,
 } from "./embedding-provider.js";
-import { VectorStore, getMdDbPath, getDataDir, type SearchFilters } from "./store.js";
+import { VectorStore, getMdDbPath, getSessionsDbPath, getDataDir, describeAxisAbsence, type SearchFilters } from "./store.js";
 import {
   findSessionFiles,
   extractSessionChunks,
@@ -293,7 +293,13 @@ export default function (pi: ExtensionAPI) {
     // ---- Sessions track ----
     try {
       sessionsProvider = getSessionsProviderForExtension();
-      if (sessionsProvider) {
+      // Absence is checked BEFORE init(), because init() connects and connect()
+      // creates. A hover that reports on an axis must not be what brings the axis
+      // into existence (sorge#1 C-b; store.ts "Absent axis").
+      const sessionAbsence = describeAxisAbsence(getSessionsDbPath());
+      if (sessionAbsence) {
+        sessionsInitErr = `absent on ${sessionAbsence.host} (authority: ${sessionAbsence.authority})`;
+      } else if (sessionsProvider) {
         await getSessionStore().init();
         sessionReady = true;
         sCount = await getSessionStore().getCount();
@@ -306,7 +312,7 @@ export default function (pi: ExtensionAPI) {
 
     // ---- MD track (independent) ----
     try {
-      if (fs.existsSync(mdDbPath)) {
+      if (!describeAxisAbsence(mdDbPath)) {
         mdProvider = getMdProviderForExtension();
         if (mdProvider) {
           await getMdStore().init();
@@ -448,7 +454,16 @@ export default function (pi: ExtensionAPI) {
     async execute(_toolCallId, params) {
       const sessP = ensureSessionsProvider();
 
-      // Lazy init
+      // Lazy init. The absence check is first and separate: "this host has no
+      // sessions axis" is a state to report, not an init failure to retry, and
+      // it must be answered before init() can create an empty store to search.
+      const sessionAbsence = describeAxisAbsence(getSessionsDbPath());
+      if (sessionAbsence) {
+        throw new Error(
+          `session_search: ${sessionAbsence.reason}. ${sessionAbsence.next} ` +
+          `(${JSON.stringify(sessionAbsence)})`,
+        );
+      }
       if (!sessionReady) {
         try {
           await getSessionStore().init();
@@ -714,8 +729,12 @@ export default function (pi: ExtensionAPI) {
 
       // Lazy init — md DB may exist but session_start lost the race with env-loader
       if (!mdReady) {
-        if (!fs.existsSync(mdDbPath)) {
-          throw new Error("MD knowledge base not indexed. Run: ./run.sh index:md");
+        const mdAbsence = describeAxisAbsence(mdDbPath);
+        if (mdAbsence) {
+          throw new Error(
+            `knowledge_search: ${mdAbsence.reason}. ${mdAbsence.next} ` +
+            `(${JSON.stringify(mdAbsence)})`,
+          );
         }
         try {
           await getMdStore().init();

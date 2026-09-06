@@ -20,7 +20,7 @@ import {
   createMdProviderFromEnv,
   type EmbeddingProvider,
 } from "./embedding-provider.js";
-import { VectorStore, getSessionsDbPath, getOrgDbPath, getMdDbPath, getOpenclawDbPath, getDataDir, type SearchResult, type SearchFilters } from "./store.js";
+import { VectorStore, getSessionsDbPath, getOrgDbPath, getMdDbPath, getOpenclawDbPath, getDataDir, isAxisAbsentError, EXIT_AXIS_ABSENT, type SearchResult, type SearchFilters } from "./store.js";
 import { findSessionFiles, extractSessionChunks, normalizeSourceFilter } from "./session-indexer.js";
 import { retrieve, expandQueryForBM25, getShortCJKTokens, sortByTimestampDesc, type MergeStrategy } from "./retriever.js";
 import { readSessionExcerpt, type SessionExcerpt } from "./session-excerpt.js";
@@ -116,6 +116,34 @@ const mdDbPath = getMdDbPath();
 
 // --- Commands ---
 
+/**
+ * Open an axis for reading, or answer that this host does not have it.
+ *
+ * Every search command goes through here so that "absent" is one sentence in one
+ * place: the same JSON the agent-config `semantic-memory` wrapper prints and the
+ * same exit 4 (sorge#1 C-a/C-b). Exit 4 and not 0, because an absent axis that
+ * exits 0 with `count: 0` is read as "asked and found nothing"; and not 1,
+ * because nothing failed — this host was never meant to hold this axis.
+ *
+ * The store is constructed read-only, so even the connect() cannot create.
+ */
+async function openAxisForRead(
+  dbPath: string,
+  dim: number,
+): Promise<VectorStore> {
+  const store = new VectorStore(dbPath, dim, { readOnly: true });
+  try {
+    await store.init();
+  } catch (err) {
+    if (isAxisAbsentError(err)) {
+      console.log(JSON.stringify(err.absence));
+      process.exit(EXIT_AXIS_ABSENT);
+    }
+    throw err;
+  }
+  return store;
+}
+
 interface SessionSearchOpts {
   source?: string;
   withExcerpt?: boolean;
@@ -154,8 +182,7 @@ async function searchSessions(
   const hasUserFilters =
     !!(opts.dateFrom || opts.dateTo || opts.project || (opts.role && opts.role.length > 0) || opts.sessionFile || opts.sessionFileContains);
 
-  const store = new VectorStore(sessionDbPath, dim);
-  await store.init();
+  const store = await openAxisForRead(sessionDbPath, dim);
 
   // PR-D: dim safety MUST run before any embedQuery() call.
   //
@@ -310,7 +337,7 @@ async function searchSessions(
       fallbackDiagnostic = fallbackDiagnostic ?? "knowledge fallback skipped: no md provider";
     } else {
       const mdDim = mdProvider.dimensions || 4096;
-      const mdStore = new VectorStore(mdDbPath, mdDim);
+      const mdStore = new VectorStore(mdDbPath, mdDim, { readOnly: true });
       await mdStore.init();
       const dimCheck = await mdStore.checkCompatibleDim();
       if (!dimCheck.ok) {
@@ -385,8 +412,7 @@ async function searchKnowledge(query: string, limit: number): Promise<void> {
   const provider = getOrgProvider();
   const dim = provider.dimensions || 2560;
 
-  const store = new VectorStore(orgDbPath, dim);
-  await store.init();
+  const store = await openAxisForRead(orgDbPath, dim);
 
   // Dim safety: a misconfigured org provider should fail loudly before we
   // issue a search whose ranking would be silently corrupted.
@@ -444,20 +470,13 @@ async function searchKnowledge(query: string, limit: number): Promise<void> {
  * the long-form notes, not the freshest mtime.
  */
 async function searchMd(query: string, limit: number, full: boolean = false): Promise<void> {
-  if (!fs.existsSync(mdDbPath)) {
-    console.error(
-      JSON.stringify({
-        error: "md track not indexed. Run: ./run.sh index:md",
-      }),
-    );
-    process.exit(1);
-  }
-
+  // The md-specific "not indexed" exit 1 that used to sit here is gone: absence
+  // is one contract for every axis now (openAxisForRead → state:"absent", exit 4),
+  // and md was the only axis that had ever been given a gate at all.
   const provider = getMdProvider();
   const dim = provider.dimensions || 4096;
 
-  const store = new VectorStore(mdDbPath, dim);
-  await store.init();
+  const store = await openAxisForRead(mdDbPath, dim);
 
   const dimCheck = await store.checkCompatibleDim();
   if (!dimCheck.ok) {
@@ -496,7 +515,9 @@ async function searchMd(query: string, limit: number, full: boolean = false): Pr
 }
 
 async function status(): Promise<void> {
-  const sessionStore = new VectorStore(sessionDbPath);
+  // status READS. Before the read-only flag it created sessions.lance on any
+  // host that ran it — the report brought the thing it reported into being.
+  const sessionStore = new VectorStore(sessionDbPath, undefined, { readOnly: true });
   let sessionCount = 0;
   let sessionFiles = 0;
   try {
@@ -515,7 +536,7 @@ async function status(): Promise<void> {
   let mdFiles = 0;
   const mdExists = fs.existsSync(mdDbPath);
   if (mdExists) {
-    const mdStore = new VectorStore(mdDbPath, 4096);
+    const mdStore = new VectorStore(mdDbPath, 4096, { readOnly: true });
     try {
       await mdStore.init();
       mdCount = await mdStore.getCount();
@@ -529,7 +550,7 @@ async function status(): Promise<void> {
   let orgCount = 0;
   const orgExists = fs.existsSync(orgDbPath);
   if (orgExists) {
-    const orgStore = new VectorStore(orgDbPath, 2560);
+    const orgStore = new VectorStore(orgDbPath, 2560, { readOnly: true });
     try {
       await orgStore.init();
       orgCount = await orgStore.getCount();
@@ -690,8 +711,7 @@ function parseArgs() {
  */
 async function searchOpenclaw(query: string, limit: number, full: boolean): Promise<void> {
   const provider = getSessionsProvider();
-  const store = new VectorStore(getOpenclawDbPath(), 4096);
-  await store.init();
+  const store = await openAxisForRead(getOpenclawDbPath(), 4096);
 
   const dimCheck = await store.checkCompatibleDim();
   if (!dimCheck.ok) {
