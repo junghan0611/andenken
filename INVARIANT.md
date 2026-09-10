@@ -315,23 +315,20 @@ corrected separately (`f048a0a`) after production changed.
 
 Every other track is built here and pushed to the replica. This one is not built
 here at all: the vectors already exist on the OpenClaw host, so the flow is **pull
-to the authority and import**. There it stops — **there is no publish step today**,
-and `openclaw.lance` exists on this machine only.
+to the authority and import**. The completed local store is then published only by
+an explicit `./run.sh sync:openclaw:oracle` call, in the same direction as every
+other track (authority → replica). The inverted fetch never makes Oracle an
+indexer.
 
-That is a current fact, not a rule. If the replica ever needs this axis, the push
-must be added deliberately and in the same direction as every other track
-(authority → replica); the fetch being inverted does not invert the publish. Until
-then, do not describe this track as replicated.
-
-**Because there is no publish, the authority gate matters MORE here than in 7.1,
-and it is enforced in code** (`scripts/export-openclaw.sh`, the `INDEX_AUTHORITY`
-test — grep the name, not a line number). A replica that indexes its own sessions
-forks a corpus that a later canonical push can at least overwrite; a replica that
-harvests OpenClaw on its own forks a store that **no rsync exists to reconcile**.
-The gate runs before anything else, unlike the sessions one, because a refused
-harvest has no local half to preserve — every row would have come over ssh. This
-is not theoretical: `ANDENKEN_OPENCLAW_HOST` defaults to `oracle`, so running the
-harvest on oracle would succeed by connecting to itself.
+**The authority gate matters MORE here than in 7.1, and it is enforced in code**
+(`scripts/export-openclaw.sh` and `scripts/sync-openclaw-to-oracle.sh`, both test
+`INDEX_AUTHORITY` — grep the name, not a line number). A replica that indexes its
+own sessions forks a corpus that a later canonical push can at least overwrite; a
+replica that harvests OpenClaw on its own forks a store that no canonical import
+can reconcile. The harvest gate runs before anything else, unlike the sessions
+one, because a refused harvest has no local half to preserve — every row would
+have come over ssh. This is not theoretical: `ANDENKEN_OPENCLAW_HOST` defaults to
+`oracle`, so running the harvest on oracle would succeed by connecting to itself.
 
 Three rules hold this track:
 
@@ -340,8 +337,8 @@ Three rules hold this track:
    deleted, and its retention rule is unmeasured. Mirroring its deletions would
    turn their cleanup into our loss. A row with the same id replaces itself;
    nothing else moves.
-2. **`openclaw.lance` is local only** (and, if a publish is ever added, replica). It must never reach the md
-   track by any path. The line here is **local versus public**, and it is the only
+2. **`openclaw.lance` is private-only** (authority plus its query replica). It must never reach the md
+   track by any path. The line here is **private versus public**, and it is the only
    line: md is the axis that gets exported to the public garden, and this track
    holds conversations that were never written for that. Family, health and money
    sit next to engineering in these chunks — measured 2026-09-03 in the

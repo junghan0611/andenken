@@ -14,13 +14,13 @@ scanClaudeDir). Keep the two in step; if the indexer's rule moves, this moves:
     wrapping hyphens are stripped)
   - claude `subagents/` dirs skipped
   - pi admits only the current native filename suffix `_<UUIDv7>.jsonl`
-  - size > 300KB on both runtimes
+  - size > 200KB on both runtimes
 """
 import os
 import re
 import sys
 
-MIN_SESSION_SIZE_BYTES = 300 * 1024
+MIN_SESSION_SIZE_BYTES = 200 * 1024
 
 # RFC 9562 UUIDv7: version nibble 7, variant [89ab]. Suffix only — the
 # created-at prefix is deliberately not validated (see session-indexer.ts).

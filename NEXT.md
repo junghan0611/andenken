@@ -400,7 +400,7 @@ replicate 0). 임베딩 입력과의 교집합은 6 chunks / 4파일, 전부 `ro
 - **다음 drift를 잡을 라이브 불변식이 없다.** `session-filename.test.ts`는 우리가
   방금 쓴 규격을 고정할 뿐, 업스트림이 문법을 바꾸는 이번 실패모드는 못 잡는다
   (`test.ts`의 `piFiles.length > 0`도 당시 garden-id가 남아 있어 통과했을 것이다).
-  후보: "non-tmp pi 디렉토리의 최신 `.jsonl`(>300KB)은 반드시 admit" 같은 recency
+  후보: "non-tmp pi 디렉토리의 최신 `.jsonl`(>200KB)은 반드시 admit" 같은 recency
   불변식, 또는 `.jsonl`이 있는데 admit 0인 프로젝트 디렉토리를 doctor가 WARN.
   이번 스코프에서는 구현하지 않았다.
 

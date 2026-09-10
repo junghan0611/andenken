@@ -16,7 +16,7 @@
  *
  * Indexing exclusions (both runtimes):
  * - tmp/test/probe project dirs (pi `--tmp…--`, claude `-tmp…`) — never indexed.
- * - sessions at or below MIN_SESSION_SIZE_BYTES (300KB floor, `size > MIN`).
+ * - sessions at or below MIN_SESSION_SIZE_BYTES (200KB floor, `size > MIN`).
  * - pi only: admission is the current native id suffix `_<UUIDv7>.jsonl`. Retired
  *   species (garden-id `_YYYYMMDDTHHMMSS-<6hex>`, UUIDv4, `_entwurf-…`,
  *   `_delegate-…`) are not OR'd back in — no backward compatibility.
@@ -83,11 +83,11 @@ export interface SessionChunk {
 }
 
 // --- Quality Filters ---
-// Session file size floor. Real working sessions run tens to hundreds of KB
-// (pi non-tmp median ≈ 300KB); test/probe sessions are a few KB. Keep only
-// strictly-larger sessions ("아주 핵심만"): GLG policy is "300KB 이하 제외", so
-// the filter is `size > MIN` (300KB exactly is excluded) on both runtimes.
-const MIN_SESSION_SIZE_BYTES = 300 * 1024;
+// Session file size floor. Real working sessions run tens to hundreds of KB;
+// test/probe sessions are a few KB. Keep only strictly-larger sessions
+// ("아주 핵심만"): GLG policy is "200KB 이하 제외", so the filter is `size > MIN`
+// (200KB exactly is excluded) on both runtimes.
+const MIN_SESSION_SIZE_BYTES = 200 * 1024;
 
 // Patterns that indicate noise (tool errors, delegate failures, smoke tests).
 // Exported for sanitize-dryrun and any other parity-checking caller; if you

@@ -91,7 +91,7 @@ covers all three.
 |-------|------------|-------|
 | **sessions** | Recover decisions and continuity inside canonical time windows | Core. pi + Claude Code JSONL, indexed from the device-merged corpus (`~/repos/gh/session`) with stored timestamp/project/role/source/file signals. OpenClaw parity is a technical baseline. |
 | **md (public garden)** | Recover durable interpretation attached to dated notes and events | Current production knowledge axis. Direct Markdown embedding over exported `~/repos/gh/notes/content` (~2,200 md / ~27MB). OpenClaw builtin md memory logic + LanceDB backend. |
-| **openclaw (harvest)** | Recover what the bots said and kept, as its own nameable axis | Landed 2026-09-03. OpenClaw already embeds its agents' sessions and memory with `qwen/qwen3-embedding-8b` at 4096d — the same model we use, chosen independently — so the rows arrive carrying both text and vector and the import costs **zero embedding API calls**. Append-only, local only, and never a search fallback. |
+| **openclaw (harvest)** | Recover what the bots said and kept, as its own nameable axis | Landed 2026-09-03. OpenClaw already embeds its agents' sessions and memory with `qwen/qwen3-embedding-8b` at 4096d — the same model we use, chosen independently — so the rows arrive carrying both text and vector and the import costs **zero embedding API calls**. Append-only, authority-harvested then explicitly published to the private Oracle replica, and never a search fallback. |
 | **org** | Currently disabled | 3,000+ Denote notes. Source track. Doctor/chunker/incremental work is upstream R&D, **not** what agents consume right now. |
 
 **Split of effort.** The agent-in-charge separates *what we ship to agents now*
@@ -384,6 +384,7 @@ cd ~/repos/gh/andenken
 ./run.sh index:md                     # md incremental / full (with gate when needed)
 ./run.sh search:md "<query>"          # md search
 ./run.sh sync:openclaw [--full]       # harvest OpenClaw's own index (API 0)
+./run.sh sync:openclaw:oracle         # publish its private store to the Oracle query replica
 ./run.sh search:openclaw "<query>"    # the harvest axis — by name, never a fallback
 ./run.sh compact openclaw             # defrag our harvest DB (not part of `all`)
 ./run.sh doctor --md                  # md production triage / gap explainability

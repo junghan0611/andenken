@@ -73,6 +73,8 @@ Usage: ./run.sh <command> [args]
   sync:openclaw [--full]      Harvest OpenClaw's own index (export + import).
                               Zero embedding cost — the vectors come already
                               computed. Append-only; never mirrors their deletes
+  sync:openclaw:oracle [flags] Publish completed data/openclaw.lance to Oracle.
+                              Authority-only; flags: --dry-run --no-verify --smoke --host <ssh-host>
   sync:md:oracle [flags]      Rsync completed data/md.lance + md-manifest.json to Oracle
                               flags: --dry-run --no-verify --smoke --host <ssh-host>
 
@@ -356,6 +358,8 @@ case "${1:-help}" in
     shift; load_env; cd "$SCRIPT_DIR" \
       && bash scripts/export-openclaw.sh "$@" \
       && pnpm exec tsx openclaw-importer.ts ;;
+  sync:openclaw:oracle)
+    shift; load_env; cd "$SCRIPT_DIR" && bash scripts/sync-openclaw-to-oracle.sh "$@" ;;
   search:openclaw)
     shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx cli.ts search-openclaw "$@" ;;
   rebuild:full)

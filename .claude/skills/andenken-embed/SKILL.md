@@ -26,15 +26,16 @@ not compose your own sequence.
 | "세션 임베딩", "기억 최신화" | 1 | `./run.sh sync:sessions` | 0 | nothing |
 | "글로벌", "오라클까지", "양쪽 맞춰줘" | 2 | `./run.sh sync:sessions --global` | yes | index + manifest + corpus |
 | "가든 임베딩", "노트도" | 3 | `./run.sh sync:md` → `./run.sh verify md` → `./run.sh sync:md:oracle` | yes | md.lance + md-manifest |
-| "openclaw 가져와", "회수" | 4 | `./run.sh sync:openclaw` | yes | — (로컬 전용) |
+| "openclaw 가져와", "회수" | 4 | `./run.sh sync:openclaw` → `./run.sh sync:openclaw:oracle` | yes | private openclaw.lance |
 
 Reading the rows:
 
 - **1 and 2 are the same script, different mode.** `memory-sync` (agent-config skill)
   is the same two tiers with a thinner surface; either entry point is correct.
   1 does not touch oracle *on purpose* — the bot's memory is as of the last tier 2.
-- **"세션·가든 임베딩하고 오라클에 동기화해줘" = 2 + 3**, in that order. That combined
-  ask is common enough to have its own block below.
+- **"세션·가든 임베딩하고 오라클에 동기화해줘" = 2 + 3 + 4**, in that order. The
+  OpenClaw harvest is imported on the authority and then published to Oracle; that
+  combined all-live-axis ask has its own block below.
 - **Tier 4 is a harvest, not a sync** (GLG ruling): OpenClaw embeds its own sessions
   and owns that quality; we only fetch and make it searchable. Do not offer to tune
   its chunking or model. It costs **zero embedding API calls** — the vectors arrive
@@ -45,8 +46,8 @@ Reading the rows:
   for it because sessions came back empty — that erases which axis answered. Every
   hit states its `agent` and whether it came from what the bot SAID (`sessions`) or
   KEPT (`memory`); those are different kinds of evidence. `openclaw.lance` is
-  **local only — there is no push step** — and must never reach the md track,
-  which is exported.
+  **private-only: authority plus its Oracle query replica** — and must never
+  reach the exported md track.
   That export line is the only line — do not filter this axis by subject.
 - **Two databases, two owners, and the names invite confusing them.** OpenClaw's
   `openclaw-agent.sqlite` (on the openclaw host, one per bot) is theirs: their
@@ -56,13 +57,14 @@ Reading the rows:
   computed. So `./run.sh compact openclaw` IS our maintenance, and it is not in
   `compact all`: ask for it by name. Measured 2026-09-04: one 481-row import took
   it 1 → 4 fragments, and a compact returned 7 → 1 (96M → 82M). Nothing else
-  maintains that file — it lives on the authority only, with no push step.
-- **Tier 4 runs on the index authority only, and the script enforces it.** Same
-  `INDEX_AUTHORITY` rule as sessions, but stricter in consequence: with no push
-  step, a replica-side harvest forks a store no rsync can reconcile. The gate is
-  first in `export-openclaw.sh`, so a refused run makes no ssh at all. If oracle
-  needs this axis, the authority harvests and someone adds a publish deliberately
-  — do not run the harvest there to "catch it up".
+  maintains that file — the authority harvests it and explicitly publishes the
+  completed private store to Oracle.
+- **Tier 4 harvest runs on the index authority only, and the scripts enforce it.**
+  Same `INDEX_AUTHORITY` rule as sessions, but stricter in consequence: a
+  replica-side harvest forks a store. The gate is first in `export-openclaw.sh`,
+  so a refused run makes no ssh at all. Oracle receives only the authority's
+  completed store through `sync:openclaw:oracle` — do not harvest there to
+  "catch it up".
 - **Tier 3's oracle half is not automatic.** md's source is the garden checkout, so
   after `sync:md:oracle` the replica may still need `git -C ~/repos/gh/notes pull`
   **on oracle**. Sessions carries its corpus itself inside `--global`; md does not.
@@ -78,6 +80,8 @@ cd ~/repos/gh/andenken
 ./run.sh sync:md                  # garden markdown
 ./run.sh verify md
 ./run.sh sync:md:oracle           # → oracle: md.lance + md-manifest.json
+./run.sh sync:openclaw            # harvest OpenClaw's precomputed vectors (API 0)
+./run.sh sync:openclaw:oracle     # → oracle: private openclaw.lance (API 0)
 ```
 
 That used to be six lines. The sessions half collapsed into one on 2026-09-03
@@ -333,11 +337,12 @@ Local only (tier 1 + 3, no oracle):
   && ./run.sh verify sessions && ./run.sh verify md
 ```
 
-Including oracle (tier 2 + 3) — this is "세션·가든 임베딩하고 오라클에 동기화해줘":
+Including oracle (tiers 2 + 3 + 4) — this is "세션·가든 임베딩하고 오라클에 동기화해줘":
 
 ```bash
 ./run.sh sync:sessions --global \
-  && ./run.sh sync:md && ./run.sh verify md && ./run.sh sync:md:oracle
+  && ./run.sh sync:md && ./run.sh verify md && ./run.sh sync:md:oracle \
+  && ./run.sh sync:openclaw && ./run.sh sync:openclaw:oracle
 ```
 
 `--global` already gathered, embedded, verified and shipped the sessions side, so
@@ -449,13 +454,14 @@ and prints `✅ preflight dim=4096`. Copy what the probe said.
 | Current state | `./run.sh status` — `status:json` is machine-readable but does **full corpus discovery (10+ min)**; do not reach for it casually |
 | Sessions incremental | `./run.sh sync:sessions` |
 | Garden incremental | `./run.sh sync:md` |
-| Verify | `./run.sh verify sessions\|md\|all` |
+| Verify | `./run.sh verify sessions\|md\|openclaw\|all` |
 | Defrag (4 cores) | `./run.sh compact sessions\|md\|openclaw` |
 | dedup+orphan+manifest repair | `./run.sh cleanup sessions\|md` (includes compact, pinned) |
 | Operator triage | `./run.sh doctor --sessions\|--md [--json]` |
 | Sessions, this device only | `./run.sh sync:sessions` (= `--local`, ssh 0, replica untouched) |
 | Sessions, all devices + publish | `./run.sh sync:sessions --global` (gather strict → embed → verify → index+manifest+corpus) |
 | Oracle replicate (md) | `./run.sh sync:md:oracle` |
+| Oracle replicate (OpenClaw) | `./run.sh sync:openclaw:oracle` |
 | Cost estimate (API-0) | `./run.sh estimate:sessions\|md [--full]` |
 | Gather all devices' sessions | `./run.sh corpus:gather [--dry-run] [--strict]` |
 | Corpus inventory / integrity | `./run.sh corpus:manifest update\|verify\|status` |

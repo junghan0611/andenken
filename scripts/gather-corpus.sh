@@ -27,7 +27,7 @@
 #       └── .pi/agent/sessions/...
 #
 # Admission is decided by scripts/corpus-admit.py (mirrors session-indexer.ts).
-# It is re-evaluated on every run, so a session that was below the 300KB floor
+# It is re-evaluated on every run, so a session that was below the 200KB floor
 # last time is picked up once it grows past it.
 #
 # WHICH devices is not decided here — `<corpus>/DEVICES.json` is the roster, so
