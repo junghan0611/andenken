@@ -6,7 +6,7 @@
 
 - [x] **1. 세션 코퍼스 통합** — 평생 폴더 + device roster (`v2026.9.3`, #10·#11 닫힘)
 - [x] **2. 2면 SSOT 동기화** — thinkpad↔oracle, 인덱스·매니페스트·코퍼스 한 묶음
-- [x] **3. OpenClaw 면 회수** ([#13](https://github.com/junghan0611/andenken/issues/13)) — 4,737 chunks / API 0 / 교차검수 + 방향 재점검 통과, `0fbc92a`…`3143d07` push 완료
+- [x] **3. OpenClaw 면 회수·사설 복제** ([#13](https://github.com/junghan0611/andenken/issues/13)) — authority harvest → Oracle private replica, 5,935 chunks / 1 fragment / API 0 검증 (`ec4fe9e`, `a080807`)
 - [ ] **4. 근본 정리** ← CURRENT: 위 §근본 1·2·3 — 오늘 정정 16건이 가리킨 자리
 - [ ] **5. 회수 품질** ([#12](https://github.com/junghan0611/andenken/issues/12)) ← PAUSED: 골든 세션 분기 추출이 선행(백로그 4번)
 
@@ -14,7 +14,7 @@
 
 # NOW — 근본 정리 (오늘 정정 16건이 가리킨 자리)
 
-- **Current**: tier 4는 섰고 **전부 push 됐다**(09-04 harvest 넷 + 09-06 `1e61698`).
+- **Current**: tier 4는 authority harvest + Oracle private publish로 섰고 **전부 push 됐다**(09-10 5,935 chunks / 1 fragment, `ec4fe9e`·`a080807`).
   남은 것은 기능이 아니라 **09-03의 16건이 드러낸 세 자리**다 — 아래 §근본 1·2·3.
   그리고 sorge#1이 남긴 **MD 축 freshness** 한 자리(아래 §sorge#1 반환).
 - **Next**: (1) §근본 1의 한 줄을 `AGENTS.md`에 넣을지 GLG 판정 → (2) §근본 2의
@@ -195,6 +195,8 @@ glg 가 85.4초, 봇 도구의 15초 게이트를 통과하는 건 mini 하나�
 
 09-02~09-03에 닫힌 것(코퍼스·sync 두 모드·스킬 문서·#10/#11)은 `v2026.9.3`과
 `v2026.9.4`의 [CHANGELOG.md](./CHANGELOG.md)로 옮겼다. 여기는 다음 한 걸음만 둔다.
+
+- **[2026-09-10] 세 라이브 축을 200KB 세션 admission 기준으로 함께 최신화했다.** 세션은 1,998 files / 86,675 chunks를 verify한 뒤 DB·manifest·3.45GB corpus를 Oracle에 함께 publish했다. md는 10,870 chunks를 검증·복제했다. OpenClaw는 3,872 rows를 API 0 import해 5,935 chunks가 되었고, local pre-publish + remote post-transfer verify 뒤 `compact openclaw`로 21 → 1 fragments (148M → 102M)로 정리했다. OpenClaw 수확은 여전히 authority-only이며 Oracle은 private query replica다.
 
 - **[2026-09-04] 문서면 다섯 장을 같은 날 다 옮겼다** (`v2026.9.4`, `v2026.9.4-docs.1`).
   09-03의 교훈이 "정본이 움직일 때 사본이 조용히 뒤에 남는다"였으므로, 사본을
