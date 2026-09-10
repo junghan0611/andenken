@@ -324,7 +324,7 @@ Specific operations worth knowing by name:
 - `./run.sh index:md` / `./run.sh sync:md` / `./run.sh search:md` — md track
   operating surface. Direct embedding of `~/repos/gh/notes/content` via
   OpenRouter 8B/4096d into `data/md.lance`.
-- `./run.sh sync:openclaw:oracle` — OpenClaw private-axis replication surface. It rsyncs the completed authority `data/openclaw.lance/` to Oracle, then runs remote `./run.sh verify openclaw` (API 0). It never harvests on Oracle and never reaches the public md track.
+- `./run.sh sync:openclaw:oracle` — OpenClaw private-axis replication surface. It verifies the authority `data/openclaw.lance/`, rsyncs it to Oracle, then verifies the replica (API 0). It never harvests on Oracle and never reaches the public md track.
 - `./run.sh sync:md:oracle` — md Oracle replication surface. It rsyncs the
   completed local `data/md.lance/` and `data/md-manifest.json` to
   `oracle:/home/junghan/repos/gh/andenken/data/`, then runs remote

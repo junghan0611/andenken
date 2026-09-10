@@ -12,7 +12,7 @@
 #   ./scripts/sync-openclaw-to-oracle.sh --host oracle --smoke
 #
 # Safety:
-#   - API 0 by default: rsync + remote verify only.
+#   - API 0 by default: local pre-publish + remote post-transfer verify.
 #   - --smoke runs one remote search:openclaw query (one paid query embedding).
 #   - Refuses on a non-authority device and before a completed local store exists.
 set -euo pipefail
@@ -51,6 +51,11 @@ REMOTE_ROOT="/home/junghan/repos/gh/andenken"
 RSYNC_FLAGS=(-az --delete)
 if [ "$DRY_RUN" = "1" ]; then
   RSYNC_FLAGS+=(--dry-run)
+fi
+
+if [ "$VERIFY" = "1" ]; then
+  echo "== local verify openclaw before publish (API 0) =="
+  ./run.sh verify openclaw
 fi
 
 echo "== sync openclaw.lance → ${HOST}:${REMOTE_ROOT}/data/openclaw.lance =="
