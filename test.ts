@@ -1316,10 +1316,30 @@ async function testVectorStore() {
   assert(indexed.size === 2, `Indexed files: ${indexed.size}`);
   assert(indexed.has("/test/session1.jsonl"), "Has session1");
 
-  // FTS (create index first)
+  // FTS (create once; repeated incremental index calls must not replace it)
   await store.createFtsIndex();
+  await store.createFtsIndex();
+  const indexDir = path.join(tmpDir, "session_chunks.lance", "_indices");
+  assert(fs.readdirSync(indexDir).length === 1, "Repeated FTS setup keeps one index generation");
   const ftsResults = await store.fullTextSearch("NixOS", 5);
   assert(ftsResults.length >= 1, `FTS "NixOS": ${ftsResults.length} results`);
+
+  // Fresh fragments remain searchable before the next explicit optimize/compact.
+  await store.addChunks([
+    {
+      id: "test-3",
+      text: "freshfragment retrieval proof",
+      vector: [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+      sessionFile: "/test/session3.jsonl",
+      project: "andenken",
+      lineNumber: 30,
+      timestamp: new Date().toISOString(),
+      role: "assistant",
+      metadata: { type: "test" },
+    },
+  ]);
+  const freshFtsResults = await store.fullTextSearch("freshfragment", 5);
+  assert(freshFtsResults.some((r) => r.id === "test-3"), "FTS includes fresh unindexed fragments");
 
   // Reset
   await store.reset();

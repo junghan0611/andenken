@@ -376,11 +376,49 @@ ANDENKEN_COMPACT_CPUS=0-7 ./run.sh compact md    # override to 8 cores
 ```
 
 - Default `0-3`. Override with `ANDENKEN_COMPACT_CPUS` in taskset `-c` syntax (`0-3`, `0,2,4,6`).
-- compact **only when fragments grew a lot** — not every increment. md was once
-  compacted 162 → 1 fragment. `verify` reports the fragment count; for openclaw,
-  `./run.sh status` does (it has no manifest).
+- compact **only when fragments grew a lot** — not every increment. The operational
+  threshold is **20 or more fragments** on a track's verification receipt: finish
+  every writer first, compact that track, verify it again, then publish that compacted
+  DB to Oracle with the track's normal replication command. `sync:sessions --global`
+  publishes a compacted sessions DB; `sync:md:oracle` and `sync:openclaw:oracle`
+  publish their respective compacted DBs. md was once compacted 162 → 1 fragment.
+  `verify` reports the fragment count; for openclaw, `./run.sh status` does (it has
+  no manifest).
 - `compact all` is sessions+md+org. **openclaw is asked for by name** — the
   harvest runs on explicit call, so its defrag does too.
+
+## Fragment cleanup — a required follow-through when the receipt crosses 20
+
+An incremental embedding run can accumulate LanceDB data fragments and historical
+index generations. They are not extra conversation rows, but they consume disk until
+`compact` rewrites the live state and removes old versions. **Do not compact by
+calendar or after every increment.** Read the completed verification receipt; when a
+track reaches **20 fragments or more**, clean it before calling the maintenance done.
+
+Run one track at a time, after all writers for that track are finished. `compact` uses
+four cores by default; raise `ANDENKEN_COMPACT_CPUS` only when GLG explicitly says the
+machine is idle. The compacted database is local until its replication command runs.
+
+```bash
+# sessions — this also gathers/verifies and publishes DB + manifest + corpus
+./run.sh compact sessions
+./run.sh verify sessions
+./run.sh sync:sessions --global
+
+# md
+./run.sh compact md
+./run.sh verify md
+./run.sh sync:md:oracle
+
+# OpenClaw — explicit because `compact all` excludes this private harvest track
+./run.sh compact openclaw
+./run.sh verify openclaw
+./run.sh sync:openclaw:oracle
+```
+
+A compacted sessions DB that is not re-published leaves Oracle querying the old large
+copy. The post-compact verification receipt must show the same row count, no duplicate
+ids/orphans, and the reduced fragment count before reporting success.
 
 ## Oracle replication — DB and manifest travel together
 

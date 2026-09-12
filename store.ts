@@ -793,19 +793,30 @@ export class VectorStore {
   }
 
   /**
-   * Create FTS index on text column
+   * Ensure the one FTS index on `text` exists without replacing it on every
+   * incremental write. LanceDB's default `replace: true` creates a new on-disk
+   * index generation each time; unindexed fresh fragments remain searchable and
+   * `table.optimize()` folds them into this index during explicit compaction.
    */
   async createFtsIndex(): Promise<void> {
     await this.ensureInitialized();
     if (!this.table) return;
-    const lancedb = await loadLanceDB();
-    try {
-      await this.table.createIndex("text", {
-        config: lancedb.Index.fts(),
-      });
-    } catch {
-      // Index might already exist
+
+    const existing = await this.table.listIndices();
+    if (existing.some((index) =>
+      index.name === "text_idx"
+      && index.indexType === "FTS"
+      && index.columns.length === 1
+      && index.columns[0] === "text",
+    )) {
+      return;
     }
+
+    const lancedb = await loadLanceDB();
+    await this.table.createIndex("text", {
+      config: lancedb.Index.fts(),
+      replace: false,
+    });
   }
 
   /**
