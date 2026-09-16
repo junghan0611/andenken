@@ -5,6 +5,77 @@ andenken CalVer 스냅샷. 형식 `vYYYY.M.D[-suffix]`. 과거에 *닫힌* 작�
 
 ## Unreleased
 
+## v2026.9.16 — 네 번째 축이 서고, 읽기가 축을 만들지 않게 되었다
+
+`v2026.9.4-docs.1` 이후 12일. 이 스냅샷의 주인공은 **OpenClaw 회수(tier 4)**다 —
+축이 서고, 오라클 사설 복제까지 갔고, 그 과정에서 나온 경계 네 자리가 코드로 잠겼다.
+그리고 `sorge#1`이 되돌린 한 자리가 더 크다: **읽기 명령이 축을 만들고 있었다.**
+
+### OpenClaw — 네 번째 축 (`#13`)
+
+- **봇들의 인덱스를 재임베딩 없이 회수한다** (`0fbc92a`). OpenClaw가 이미
+  `qwen/qwen3-embedding-8b` 4096d로 구워둔 벡터를 그대로 가져오므로 **임베딩 API 0 calls**.
+  첫 회수 4,651 chunks / 80MB. `sync:openclaw`(export+import) · `search:openclaw` ·
+  `compact openclaw` · `status`에 축을 추가했다. append-only이며(그쪽 삭제를 따라가지 않는다)
+  검색 폴백이 아니다 — INVARIANT §7.3.
+- **harvest는 index authority 전용** (`3143d07`). `ANDENKEN_OPENCLAW_HOST` 기본값이
+  `oracle`이라 오라클에서 `sync:openclaw`를 치면 **자기 자신에게 ssh해서 성사된다.**
+  §7.1보다 나쁜 자리다 — `openclaw.lance`는 publish 단계가 없어 되돌릴 rsync가 없다.
+  게이트를 `export-openclaw.sh` 맨 앞에 뒀다(거절이 **연결조차 안 한다**).
+  실측: 타 호스트 exit 1 / ssh 0, thinkpad 정상 통과.
+- **경계 재반입을 저장 층에서 끊었다** (`ab7d07e`). `>=` 경계는 없앨 수 없다(같은 ms에
+  스냅샷 이후 커밋된 행이 있을 수 있다). 질의는 그대로 두고 `partitionByChange`가
+  (id, updated_at)로 "이미 같은 걸 들고 있나"를 묻는다. 실측: 가져오는 행 449 → 449 **그대로**,
+  **쓰는 행 449 → 0**, 실행당 파편 증가 +3 → **0**.
+- **오라클 사설 복제** (`ec4fe9e`, `a080807`). 완성된 authority 스토어를
+  `sync:openclaw:oracle`로 publish하고, publish 전에 authority를 verify한다 —
+  검증 안 한 인덱스를 `rsync --delete`로 밀면 멀쩡한 레플리카가 나쁜 것으로 바뀐다.
+  09-10 실측: 3,872 rows import → 5,935 chunks, local pre-publish + remote post-transfer
+  verify, `compact openclaw` 21 → 1 fragments (148M → 102M), API 0.
+- 경계 네 자리 수리(09-04): `search-openclaw`의 `minScore`가 **머지 스케일**에서 읽히는
+  수인데 md 트랙의 0.05를 베껴 와 1위 말고 전부 잘렸다 → 0.001(실측 1건 → 10건).
+  `>=` 경계 비용을 "한 행"이라 적은 주석을 사실로 정정(실측 312행 전부가 워터마크 ms에
+  얹혀 있었고 그 위는 0). 워터마크를 **host별로** 만들고 양쪽 끝에서 거절(`_host`,
+  옛 파일은 거절이 아니라 승계). 그쪽 sqlite를 read-write로 열던 것을 `sqlite3 -readonly`로
+  — `VACUUM INTO`는 기본 read-write라 살아있는 WAL DB를 체크포인트할 권한을 갖는다.
+- `verify openclaw` 추가(09-06). 그 과정에서 더 나쁜 자리가 나왔다: **모르는 대상은
+  조용히 org로 떨어져** org의 44,916행과 orphan 373건을 openclaw 이름으로 찍고 있었다.
+  이제 거절한다(exit 1). 실측: 4,737 unique · 261 source paths · 1 frag/82M · all passed.
+
+### 읽기 경로가 축을 만들지 않는다 (`sorge#1`)
+
+- **보고하는 행위가 대상을 존재하게 했다** (`1e61698`). 빈 `ANDENKEN_DATA` 실측:
+  `search-openclaw`도 `search`도 lance를 **만들고** `count:0 exit 0`을 냈다.
+  게이트는 md에만 있었고(`cli.ts:447`), pi 확장은 `session_start` hover에서도 만들고 있었다.
+  → `VectorStore`에 opt-in `readOnly`: mkdir·connect **앞에서** 거절하고 `AxisAbsentError`.
+  `agent-config` wrapper와 같은 JSON·같은 **exit 4**라, wrapper는 빠른 길이지 유일한 문이 아니다.
+  INVARIANT §7.4 / §7.5.
+- 부수: `status` 워터마크가 **UTC를 라벨 없이** 찍고 있었다(KST와 9시간) → KST 표기.
+  `openclaw-importer.ts`는 tsconfig `include`에 없어 **한 번도 타입체크된 적이 없었고**,
+  넣자마자 실제 타입 오류가 하나 나왔다. `md-search.ts`도 같이 넣었다.
+- 새 테스트 `./run.sh test:absent` (API 0, 25건). 이 고장은 **조용해서** 라이브 런으로는
+  구분이 안 된다 — fixture만이 잡는다(INVARIANT §8).
+
+### 인덱싱
+
+- **FTS 인덱스를 증분마다 다시 굽지 않는다** (`b8c2484`). LanceDB `createIndex`의 기본
+  `replace: true`는 호출마다 새 on-disk 인덱스 세대를 만든다. 이미 있으면 그냥 둔다 —
+  갓 들어온 파편은 여전히 검색되고, `table.optimize()`가 명시적 compaction 때 접는다.
+
+### 문서
+
+- `CLAUDE.md`로 `AGENTS.md`를 Claude Code 세션에 배선했다 (`67188c2`).
+- 세 라이브 축(sessions / md / openclaw)의 09-10 최신화 receipt를 `NEXT.md`에 남겼다.
+
+### 리뷰로 닫은 것 — agent-config `v2026.9.16` 세션 warm-on-demand
+
+andenken 코드는 한 줄도 바뀌지 않았다. 담당자 몫은 **검토 세 번**이었다:
+설계·비용·지연 판정 → Pi seam이 실제로 존재하는지 → 구현 교차검토.
+BLOCKER 2건(CLI `set -e`가 warm 실패를 검색 실패로 승격 / `tool_call` 핸들러의 throw가
+`emitToolCall`의 무-try-catch를 타고 `session_search`를 차단)을 짚었고 둘 다 닫혔다.
+근거 수치와 Stage 1(tail-delta) 설계·이동 규칙은 `NEXT.md` §세션 tail-delta에 남겼다.
+
+
 ## v2026.9.4-docs.1 — 담당자 문서를 대문에 걸고, 사본 다섯 장을 같은 날 옮긴다
 
 `v2026.9.4`가 README와 AGENTS.md만 옮겼다. 그러고 나서 NEXT에

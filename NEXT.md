@@ -6,17 +6,19 @@
 
 - [x] **1. 세션 코퍼스 통합** — 평생 폴더 + device roster (`v2026.9.3`, #10·#11 닫힘)
 - [x] **2. 2면 SSOT 동기화** — thinkpad↔oracle, 인덱스·매니페스트·코퍼스 한 묶음
-- [x] **3. OpenClaw 면 회수·사설 복제** ([#13](https://github.com/junghan0611/andenken/issues/13)) — authority harvest → Oracle private replica, 5,935 chunks / 1 fragment / API 0 검증 (`ec4fe9e`, `a080807`)
+- [x] **3. OpenClaw 면 회수·사설 복제** ([#13](https://github.com/junghan0611/andenken/issues/13)) — authority harvest → Oracle private replica, 5,935 chunks / 1 fragment / API 0 검증 (`v2026.9.16`)
 - [ ] **4. 근본 정리** ← CURRENT: 위 §근본 1·2·3 — 오늘 정정 16건이 가리킨 자리
 - [ ] **5. 회수 품질** ([#12](https://github.com/junghan0611/andenken/issues/12)) ← PAUSED: 골든 세션 분기 추출이 선행(백로그 4번)
 
-현재 좌표: 3 완료 → 4 진행(§sorge#1 반환분 닫힘, MD 축 freshness 남음) → 5 보류
+현재 좌표: 3 완료(`v2026.9.16`으로 끊음) → 4 진행(§sorge#1 반환분 닫힘, MD 축 freshness 남음) → 5 보류
 
 # NOW — 근본 정리 (오늘 정정 16건이 가리킨 자리)
 
-- **Current**: tier 4는 authority harvest + Oracle private publish로 섰고 **전부 push 됐다**(09-10 5,935 chunks / 1 fragment, `ec4fe9e`·`a080807`).
+- **Current**: tier 4는 authority harvest + Oracle private publish로 서서 `v2026.9.16`으로
+  끊었다(09-10 5,935 chunks / 1 fragment). 닫힌 서술은 CHANGELOG에 있다.
   남은 것은 기능이 아니라 **09-03의 16건이 드러낸 세 자리**다 — 아래 §근본 1·2·3.
-  그리고 sorge#1이 남긴 **MD 축 freshness** 한 자리(아래 §sorge#1 반환).
+  그리고 sorge#1이 남긴 **MD 축 freshness** 한 자리(아래 §sorge#1 잔여).
+  세션 tail-delta(Stage 1)는 GLG 판정 대기 — 아래 §세션 tail-delta.
 - **Next**: (1) §근본 1의 한 줄을 `AGENTS.md`에 넣을지 GLG 판정 → (2) §근본 2의
   문서↔`--help` 대조 테스트 → (3) §근본 3으로 `doctor`의 0 신호 훑기 →
   (4) MD 축 `export → 재색인` 순서와 `state:"stale"`.
@@ -27,174 +29,49 @@
 - **Do not touch**: tier 4의 append-only(§7.3 규칙 1). path 단위 대체로 옛 판 누적을
   흉내내면 `.deleted.` 행까지 지우는 길이 열린다 — 그건 GLG 정책 항목이지 최적화가 아니다.
 
-## ✅ 커밋 전에 고칠 것 — 넷 다 수리됨 (2026-09-04)
-
-어제 형제가 잡은 둘에 더해, 오늘 방향 재점검에서 **동작 버그 하나**, GLG의 경계
-질문에서 **권한 한 자리**가 더 나왔다. 넷 다 고쳤고 각각 실측 영수증이 있다.
-
-1. **[버그] `search-openclaw`가 `--limit 10`에 1건만 돌려줬다.** `minScore`는
-   **머지 스케일 위에서 읽히는 수**인데, rrf 점수는 `weight/(60+rank+1)`+상위보너스라
-   천장이 약 0.066이고 2위가 ~0.031이다. 거기에 md 트랙의 **weighted 스케일 0.05**를
-   붙여놨으니 1위 말고는 전부 바닥에 걸려 잘렸다. sessions 축(같은 rrf)은 0.001을 쓴다.
-   → `minScore: 0.001`. **실측: `"가족 건강" --limit 10` 1건 → 10건**, agent도
-   main 하나에서 main·glg·bbot·gpt로, source도 memory/sessions 양쪽으로 벌어졌다.
-   *두 트랙에서 파라미터를 반씩 베껴 오면 각각은 정본인데 합이 틀린다 — C형의 변종.*
-
-2. **[①] `>=` 경계 비용을 "한 행"이라 적은 주석.** 경계는 그 밀리초 버킷 전체다.
-   **실측(2026-09-04, 스테이징 덤프): 312행 전부가 자기 agent의 워터마크 ms에 정확히
-   얹혀 있었고 그 위에 있는 행은 0이었다** — gpt 228 · main 78 · glg 3 · bbot/gemini/mini 각 1.
-   → 주석을 사실로 고쳤다(`export-openclaw.sh`, `openclaw-import.test.ts`).
-   **덤으로 09-03에 열어둔 해석이 닫혔다**: 델타 312는 "gpt/main이 재인덱스를 돌았다"가
-   아니라 경계 그 자체였다. 새 행은 한 톨도 없었다.
-
-3. **[②] 워터마크가 host별이 아니었다.** 주석은 per host+agent를 약속하는데 키는 agent뿐.
-   → 제3안 채택: 워터마크 파일에 `_host`를 기록하고 **양쪽 끝에서 거절**한다 — export는
-   ssh 왕복 전에(`exit 2`, 실측 확인), importer는 커서를 쓰는 쪽이라 직접 호출도 막힌다.
-   포맷을 안 깼고 커서 리셋도 없다. `--full`이 새 host로 가는 정식 통로.
-   `_host` 없는 옛 파일은 **거절이 아니라 승계**된다(모순만 거절, 침묵은 아니다).
-   테스트 9건 추가(`test:openclaw` 25 → 34).
-
-4. **[경계] 그쪽 DB를 read-write로 열고 있었다.** GLG가 "compact은 우리 일이 아니지
-   않나"를 물어 경계를 다시 그으면서 나왔다. `compact openclaw`는 **우리 것이 맞다** —
-   `openclaw.lance`는 우리 스키마·우리 id·우리 FTS이고, 파편은 importer의 200행 배치
-   쓰기가 낸다(**실측: 481행 import에 frags 1 → 4**, compact 후 7 → 1 / 96M → 82M).
-   그쪽 sqlite는 그동안 읽히기만 했다.
-   그런데 그 "읽기만"이 **주장이었지 강제가 아니었다**: `sqlite3 "$db" "VACUUM INTO"`는
-   기본이 read-write라 살아있는 WAL DB를 체크포인트할 권한을 갖는다.
-   → `sqlite3 -readonly`. **실측: oracle에서 mini DB에 동일한 49M 스냅샷 생성**,
-   넓은 권한으로 사는 게 없다. 경계를 주석이 아니라 커널이 잡게 했다.
-   `indexer.ts`에서 우리 파편화를 "OpenClaw rebake" 탓으로 돌린 주석도 함께 정정.
-
-부수 수리: `run.sh` 도움말에 `search:openclaw`와 `compact ... openclaw`가 빠져 있었다
-(케이스는 있는데 메뉴에 없으면 오퍼레이터에겐 없는 것 — AGENTS.md). `status`의 워터마크
-출력이 `_host`를 일곱 번째 봇으로 오해하지 않도록 필터. `cli.ts`의 중복 import 정리.
-
-검증: `sync:openclaw` 두 번 실행(두 번째는 `-readonly`로) — 481 / 449행 import,
-API 0, 4,651 → 4,737 chunks(두 번째 449행은 전부 자기 자리 교체, 총계 불변),
-`_host: oracle` 기록됨. `export --host not-oracle` → `exit 2`, ssh 안 함.
-`compact openclaw` → 7 frags/96M → 1 frag/82M.
-테스트 197·132·77·76·34·25·19·14·13·all — 0 failed.
-
 ## tier 4 잔여 (기능, #13 열린 항목)
 
 - [ ] pi extension `openclaw_search` — 없으면 pi 형제는 이 축을 영영 못 본다.
       CLI만 나누면 GLG의 "축을 나눠라"가 절반만 지켜진다
-- [x] ~~`verify openclaw`~~ — **09-06 닫힘.** 대상으로 추가했고, 더 나쁜 자리를 하나
-      찾았다: 모르는 대상은 **조용히 org로 떨어졌다.** `verify openclaw`가 org의
-      44,916행과 orphan 373건을 openclaw 이름으로 찍고 있었다 — C-b와 같은 모양의
-      "읽기 명령이 딴 축을 자신 있게 답하는" 고장. 이제 거절한다(exit 1).
-      openclaw의 orphan 검사는 건너뛴다 — `sessionFile`이 harvest 호스트의 경로이고
-      OpenClaw가 이미 지운 전사의 경로도 섞여 있다(append-only의 의도). 실측:
-      4,737 unique · 261 source paths · 1 frag/82M · all passed
 - [ ] 재군음 사건당 전량 재전송 — 정확도는 지금이 최선(`updated_at` ⊃ id-diff ⊃ hash).
       2단계(원격 id manifest 후 로컬 diff)는 키가 id여야 하고 **provider 변경 실명을
       GLG가 승인**해야 한다
 - [ ] 편집된 파일의 옛 판 누적 — append-only의 의도된 귀결. **오늘 누적 0이라 아직
       관측된 적 없는 비용이다.** 다음 편집 사건 뒤에 재고 정한다
-- [x] ~~경계 재반입이 매 런 파편을 늘린다~~ — **09-04 오후 닫힘.** 아래 §경계 참조
 - [ ] **드롭된 행은 워터마크를 못 밀어준다** (09-04 관측, 아직 무해). `mergeWatermark`는
       import된 행에만 걸리므로, 어느 agent의 최신 행이 boilerplate 드롭이면 그 agent는
       매 런 그 아래부터 다시 끌어온다. **09-04 덤프에서는 드롭 0이라 실제로 발생한 적이
       없다.** 커서 의미를 "받아들인 행"에서 "처리한 행"으로 바꾸는 문제라, 관측되기
       전에 고치면 관측에서 규칙을 발명하는 B형이 된다 — 발생하면 그때 잰다
 
-## 경계 재반입 — 묻는 건 그대로, 쓰기만 끊었다 (2026-09-04 오후)
+## sorge#1 잔여 — MD 축 freshness (2026-09-06 반환분 중 안 닫힌 둘)
 
-`>=` 경계는 **없앨 수 없다**. 워터마크와 같은 ms에, 우리 스냅샷 **이후** 커밋된 행이
-있을 수 있고 `>`면 그건 영영 안 보인다. (단 그런 행을 실제로 관측한 적은 없다 —
-설계 근거이지 측정된 사건이 아니다.)
-
-그래서 질의는 그대로 두고 **저장 층에서** 끊었다. `partitionByChange`가 (id, updated_at)로
-"이미 같은 걸 들고 있나"를 묻고, 같으면 안 쓴다. id에 source·path·행 범위·chunk hash·
-model이 이미 들어 있으므로 같은 id·같은 stamp면 같은 행이다. stamp가 움직인 경우
-— 같은 model 문자열에 provider/embedding 버전만 바뀐, **시간 커서만 볼 수 있는 그 경우** —
-는 그대로 쓴다. 판단은 순수 함수라 DB 없이 시험한다(4건 추가, 34 → 38).
-
-측정 (2026-09-04):
-
-| | 전 | 후 |
-|---|---|---|
-| export가 가져오는 행 | 449 (9.0MB) | 449 (9.0MB) — **그대로** |
-| DB에 쓰는 행 | 449 | **0** |
-| 실행당 파편 증가 | +3 | **0** |
-
-경계 크기가 어제 312 → 오늘 449로 하루 만에 늘었고(gpt 버킷 266), 나와 소넷이 14분
-간격으로 독립 실행해 **같은 449를 두 번** 받았다 — 워터마크는 한 바이트도 안 움직였다.
-전송 비용은 남아 있다(9MB/런). 그건 openclaw가 주는 대로 받는다는 정책의 값이고,
-우리가 관리하는 건 우리 저장소 쪽이다.
-
-## harvest는 authority 전용 — 이제 코드가 막는다 (2026-09-04, 오라클 pull 직후 발견)
-
-오라클에 코드를 올린 순간 생긴 자리다. `INDEX_AUTHORITY` 검사는 `sync-sessions.sh`에만
-있었고(`:186` 인덱싱 진입, `:242` push) **harvest에는 없었다.** `ANDENKEN_OPENCLAW_HOST`
-기본값이 `oracle`이라, 오라클에서 `sync:openclaw`를 치면 **자기 자신에게 ssh해서 성사된다.**
-
-§7.1보다 더 나쁜 자리다: 세션은 갈라져도 다음 canonical push가 덮지만, `openclaw.lance`는
-publish 단계가 없어서 **되돌릴 rsync가 아예 없다.**
-
-게이트를 `export-openclaw.sh` 맨 앞에 뒀다 — sessions는 gather라는 자기 몫이 있어서
-게이트가 Step 0 뒤지만, harvest는 모든 행이 ssh로 오므로 거절이 **연결조차 안 하는** 게
-맞다. 실측: `ANDENKEN_INDEX_AUTHORITY=somewhere-else`로 거절 확인(exit 1, ssh 0),
-thinkpad에서는 정상 통과(449 exported / 0 written).
-
-전략(GLG, 09-04): 노트북이 오라클 것까지 가져와서 인덱싱하고 넣어준다. openclaw 세션도
-같은 방식. 오라클은 질의 레플리카.
-
-## sorge#1 반환 — read 경로가 write 한다 (2026-09-06, C-b + B층 판정)
-
-`sorge`가 세 집에 나눠 돌린 이슈의 andenken 몫. **두 가지를 receipt로 되돌리고**
-근본 불변식을 닫았다. 상세는 [INVARIANT §7.4 / §7.5](./INVARIANT.md).
-
-- **되돌림 1 — B층은 pending이 아니라 접혀 있었다.** 이슈 C-3은 색인 mtime 12:04 <
-  staging mtime 12:13만 보고 449행이 미반영이라 읽었다. `--dry-run` 실측:
-  **0 written / 449 already held with the same stamp.** 449는 경계 재fetch이고,
-  아무것도 안 쓰는 게 이 importer의 정답이라 파편 mtime이 뒤에 남는 게 정상이다.
-  → **mtime을 증거로 쓰지 않게 만들었다**: `openclaw-staging/last-import.json`이
-  자기 결과를 읽은 아티팩트의 mtime에 묶어 기록하고, `status`가 folded/PENDING을
-  그 키로 답한다. 449는 09-06에 실제로 접어 receipt를 남겼다(파편 mtime 12:04 불변).
-- **되돌림 2 — C-b는 openclaw 전용이 아니었다. sessions가 더 크다.** 빈
-  `ANDENKEN_DATA` 실측: `search-openclaw`도 `search`도 lance를 **만들고** `count:0`
-  exit 0. md만 게이트가 있었다(`cli.ts:447`). pi 확장은 `session_start` hover에서도
-  만들고 있었다 — 보고하는 행위가 대상을 존재하게 했다.
-  → `VectorStore`에 opt-in `readOnly`. mkdir·connect 앞에서 거절하고
-  `AxisAbsentError`를 던진다. 4축 공유라 `doInitialize()`를 통째로 막지 않았고,
-  인덱서는 그대로 쓴다(테스트가 그 자리를 지킨다).
-- **계약**: `agent-config` wrapper(`ad347ef`)와 같은 JSON·같은 **exit 4**.
-  wrapper는 이제 빠른 길이지 유일한 문이 아니다. `state`는 축을 불문하고 한 값이다 —
-  `absent`/`not-indexed` 분리를 잠깐 넣었다가 `agent-config` 논거로 뺐다: 그 차이는
-  축의 성질이 아니라 **(축, 호스트) 쌍의 성질**이고(thinkpad에 md 없음=빌드해라,
-  oracle에 md 없음=복제가 안 왔다), 축에 박으면 레플리카에 authority의 답을 줘서
-  이 이슈가 시작된 자리로 돌아간다. 판별자는 이미 payload의 `host === authority`이고,
-  `state` 자리는 완료조건 4번의 `"stale"`이 쓴다. 갈래는 `reason`/`next` 산문이 든다.
-- 부수: `status`의 워터마크가 **UTC를 라벨 없이** 찍고 있었다(KST와 9시간). KST 표기로
-  고쳤다 — `SKILL.md`의 "this machine"이 공간에서 낸 것과 같은 고장이 시간에서 난 것.
-  `openclaw-importer.ts`는 tsconfig `include`에 없어 **한 번도 타입체크된 적이 없었고**,
-  넣자마자 실제 타입 오류가 하나 나왔다(`batch`가 store 파라미터 타입을 빌려 써서
-  `partitionByChange`와 어긋남). `md-search.ts`도 같이 넣었다.
-- 새 테스트: `./run.sh test:absent` (API 0, 25건). 이 고장은 **조용해서** 라이브 런으로는
-  구분이 안 된다 — fixture만이 잡는다(INVARIANT §8).
-- **커밋 `1e61698` · push 완료** (2026-09-06 15:40 KST, 어젠다 도장). 10파일 +673/−44.
-
-**이슈 쪽 귀결 (sorge 인계, 2026-09-06):** 이 커밋이 완료조건 **1·2b**를 닫았고, 그것이
-9번(`agent-config` wrapper 은퇴)의 조건①이었다. oracle receipt(`55ef65d`)로 조건②까지 서서
-**7번도 닫혔다** — 오라클에서 wrapper·raw CLI·컨테이너 세 경로 전부 exit 4, **§1의
-`os error 30` 소멸**, 그리고 **세 경로로 읽었는데도 잔여물이 안 생겼다**(게이트가 실제
-호스트에서 섰다는 receipt). 6번은 「캐시 정리」에서 **「기억축 복구」로 승급**해 oracle /
-`nixos-config` 로 갔다 — semantic search latency 가 embedding 바이트에 선형(≈0.5초/MB)이라
-glg 가 85.4초, 봇 도구의 15초 게이트를 통과하는 건 mini 하나뿐이다. **우리 축 아니다.**
-
-**남은 내 몫 둘:**
+닫힌 부분은 `v2026.9.16` CHANGELOG로 옮겼다(읽기 경로가 축을 만들지 않는다, `1e61698`).
+남은 내 몫은 둘이다.
 
 - [ ] **4번 MD 축 freshness** — `export → 재색인` 순서(§2, 18:43 index vs 19:17 export).
-      openclaw 축은 import receipt 로 닫혔지만 **MD 는 다른 수선**이다. `state` 에 `"stale"`
+      openclaw 축은 import receipt로 닫혔지만 **MD는 다른 수선이다.** `state`에 `"stale"`
       자리를 비워 뒀다(INVARIANT §7.4 규칙 2).
 - [ ] **`verify openclaw` 계열을 문서에 남기기** — 축이 없을 때 **다른 축의 답을 내는**
-      모양은 오늘 없앤 `count:0 exit 0` 과 같은 계열이다. ROADMAP 의 유지보수 절에 한 줄.
+      모양은 09-06에 없앤 `count:0 exit 0`과 같은 계열이다. ROADMAP 유지보수 절에 한 줄.
 
 # RECENT
 
 09-02~09-03에 닫힌 것(코퍼스·sync 두 모드·스킬 문서·#10/#11)은 `v2026.9.3`과
 `v2026.9.4`의 [CHANGELOG.md](./CHANGELOG.md)로 옮겼다. 여기는 다음 한 걸음만 둔다.
+
+- **[2026-09-16] agent-config가 세션 warm-on-demand(Stage 0)를 릴리즈했다 — andenken은 한 줄도 바뀌지 않았다.**
+  thinkpad(=index authority) Pi에서 `session_start`와 native `session_search`가
+  `sync-sessions.sh --local`을 **detach로 요청**하고 검색은 기다리지 않는다. timer·cron·
+  Oracle publish 없음. agent-config `v2026.9.16` / `5645fd2`. Claude Code는 방아쇠를
+  당기지 않지만 같은 `data/sessions.lance`를 읽으므로 갱신 결과는 받는다 — gather가
+  `~/.pi/agent/sessions`와 `~/.claude/projects` 두 루트를 함께 admit하기 때문이다
+  (thinkpad 매니페스트 구성 claude 565 / pi 236).
+  andenken 몫은 **검토 세 번**이었다: (1) 설계·비용·지연 판정, (2) Pi seam이 실제로
+  있는가, (3) 구현 교차검토. BLOCKER 2건(CLI `set -e`가 warm 실패를 검색 실패로 승격 /
+  `tool_call` 핸들러 throw가 `emitToolCall`의 무-try-catch를 타고 `session_search`를 차단)
+  을 짚었고 둘 다 닫힌 것을 현재 소스에서 확인했다. 이 결정의 근거 수치는 아래
+  §세션 tail-delta에 있다.
 
 - **[2026-09-10] 세 라이브 축을 200KB 세션 admission 기준으로 함께 최신화했다.** 세션은 1,998 files / 86,675 chunks를 verify한 뒤 DB·manifest·3.45GB corpus를 Oracle에 함께 publish했다. md는 10,870 chunks를 검증·복제했다. OpenClaw는 3,872 rows를 API 0 import해 5,935 chunks가 되었고, local pre-publish + remote post-transfer verify 뒤 `compact openclaw`로 21 → 1 fragments (148M → 102M)로 정리했다. OpenClaw 수확은 여전히 authority-only이며 Oracle은 private query replica다.
 
@@ -307,6 +184,60 @@ sessions/md 쪽 `to_index=0`, `orphan=0`, `dup=0`이 각각 어느 쪽인지 훑
 9. **winner path churn doctor.** chunk id가 `sessionFile:lineNumber`이고 삭제/재삽입이
    물리 경로 기준이라, dedup 승자가 바뀌면 옛 경로 row가 남는다.
 
+## 세션 tail-delta — Stage 1 설계와 이동 규칙 (2026-09-16 측정)
+
+Stage 0(agent-config, 위 RECENT)은 **호출 빈도**를 바꿨을 뿐 andenken의 색인 방식은
+그대로다. 여기서 정리하는 것은 그 다음 한 걸음의 근거와, Stage 0이 그 걸음에 붙인
+새 조건이다. **아직 착수 승인 없음.**
+
+**현 동작(사실).** `indexer.ts:188` `getStaleFiles`가 mtime/size 변화를 stale로 잡고
+`:541-544`가 new+stale 파일 **전체**를 `toIndex`로 만든다. `wb.add()`는 `store.ts:497`
+`deleteByFile`로 그 파일의 기존 row를 전부 지운 뒤 다시 넣는다. 즉 활성 세션은 sync
+때마다 **처음부터 다시 임베딩된다.**
+
+**측정 (2026-09-16, thinkpad, API 0).** 그날 코퍼스에 아직 안 들어온 live 22 files /
+40.7MB → `extractSessionChunks` 기준 **532 chunks / 409,911자**. JSONL 바이트의 약 1%만
+임베딩 대상이다(tool 출력·noise 필터 + 200KB floor). 그 chunk들의 실제 타임스탬프로
+cadence를 시뮬레이션한 결과:
+
+| cadence | syncs | 재임베딩 문자 | tail-only | 낭비 | 현재 $ | tail $ |
+|---|---|---|---|---|---|---|
+| 5분 | 54 | 4,280,402 | 409,911 | 10.4× | 0.0107 | 0.0010 |
+| 15분 | 20 | 2,101,466 | 409,911 | 5.1× | 0.0053 | 0.0010 |
+| 1시간 | 6 | 983,214 | 409,911 | 2.4× | 0.0025 | 0.0010 |
+| 출퇴근 2회 | 2 | 653,247 | 409,911 | 1.6× | 0.0016 | 0.0010 |
+
+($0.01/M tokens, 4자/token. 한국어는 2~3자/token이라 실제는 1.5~2배, 자릿수는 동일.
+10.4×는 **하한**이다 — stale 판정은 chunk가 안 생기는 write에도 걸린다.)
+
+**지연**(과거 세션 로그에서 회수한 실제 sync 82건): `<100 chunk` 6~16s, 그 이상 중앙값
+**0.09 s/chunk**, 나쁜 날 0.5 s/chunk(631 chunk에 332s, 941 chunk에 467s 사례).
+고정비는 gather 0.31s(dry-run 실측) + `status --json` 1.10s + preflight 1 call.
+
+**따라서 판정은 이렇다.** 돈은 결정 근거가 못 된다(가장 공격적인 cadence에서도 하루 ₩15).
+병목은 **프로세스 기동·DB open·90,394행 `getIndexedFiles`·API 왕복이 만드는 5~10초
+고정비**이고, 그건 tail-delta로 안 사라진다 — 그래서 backgrounding(Stage 0)이 먼저였다.
+tail-delta의 값어치는 비용이 아니라 **sync당 p95 지연**(5분 cadence 기준 ~103 chunk →
+~10 chunk)이다.
+
+**tail-delta가 여기서 구조적으로 안전한 이유.** chunk id가 `${file}:${line}[#i]`이고
+chunking이 라인-로컬이다(`session-indexer.ts:419-452`, `:471`, `:560`). append는 앞부분
+chunk를 비트 단위로 그대로 둔다. md 트랙은 문서 전체 chunker라 같은 논리가 성립하지 않는다.
+
+**이동 규칙 — Stage 0이 이걸 상시 조건으로 만들었다.** manifest의 `size`를 그대로
+checkpoint로 쓰면 안 된다. 색인 시점에 말미가 미완성 라인이면 `JSON.parse` 실패로
+스킵되는데, 지금은 다음 sync가 파일 전체를 다시 읽어 회수한다. tail 모드에서는 그게
+**영구 유실**이 된다. checkpoint는 **`size` 이하의 마지막 개행 위치**여야 하고,
+`indexedLines`는 그 구간의 개행 수로 복원한다(순수 바이트 스캔, parse 0, API 0).
+Stage 0은 쓰기 중인 JSONL을 rsync로 복사하는 일을 예외가 아니라 **상시**로 만들었으므로,
+이 규칙은 이제 가설이 아니다.
+
+구현 범위: manifest에 `indexedBytes`/`indexedLines`/`tailHash`(checkpoint 직전 4KB) 추가,
+stale 분기에서 hash 일치 시에만 tail parse, 불일치·truncate·rewrite는 현재 full 경로로
+fallback, `WriteBuffer`에 파일 선삭제를 건너뛰는 `addAppend`(경계 라인은 `store.ts:490`의
+id 단위 delete로 재시도 안전). 잃는 것은 "파일 통째 재삭제"가 주던 자가 치유이므로
+주기적 `cleanup`이 그 몫을 받아야 한다.
+
 ## GLG 결정 대기
 
 - **형제 브로드캐스트** — GLG가 직접 부를 자리다. 문서면은 이미 원격에 있어
@@ -316,6 +247,9 @@ sessions/md 쪽 `to_index=0`, `orphan=0`, `dup=0`이 각각 어느 쪽인지 훑
   케이스다. 지금 top-5는 전부 GLG가 실제로 그렇게 말한 발화인데 기대 키워드를 못
   맞춘다 — **query-echo**(질문의 메아리가 답보다 위). assertion을 결과에 맞추는 건
   게이트를 죽이는 짓이라 안 건드렸다.
+- **세션 tail-delta(Stage 1) 착수 여부** — 위 §세션 tail-delta. 비용이 아니라 지연
+  안정성을 사는 변경이고(sync당 p95), 이동 규칙은 이미 정해졌다(`size` 이하 마지막 개행).
+  Stage 0이 배포됐으므로 급하지 않다 — 검색 대기가 실제로 아픈지 며칠 보고 결정해도 된다.
 - **garden-id 333건** — 이미 인덱싱된 이 세션들은 discovery에서 빠지지만 청크는
   남아 검색이 당분간 찾는다(의도된 상태). 매니페스트↔디스커버리 drift가 생기고 증분
   sync는 스스로 제거하지 않는다. 유지 vs `./run.sh cleanup sessions`.
