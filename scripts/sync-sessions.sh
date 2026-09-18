@@ -96,15 +96,20 @@ echo "mode: $MODE (device=$LOCAL_DEVICE)"
 # --- Single-writer lock (flock) ---
 # The sessions index is a single-writer LanceDB store. The hourly cron and a
 # manual memory-sync (or ./run.sh sync:sessions) can otherwise run at once and
-# race the writer. Take a non-blocking exclusive lock; if another sync already
-# holds it, exit cleanly — that run indexes the same pending files, so no work
-# is lost. The lock auto-releases when this process exits (fd 9 closes). The
-# lockfile lives under data/ (gitignored), so it never enters version control.
+# race the writer. Local warm requests coalesce: an already-running writer owns
+# the same local work, so local exits cleanly. A global call has a stronger
+# contract — gather, verify, and publish must happen as one act — so it waits
+# for the local writer and then performs its own global pass. The lock
+# auto-releases when this process exits (fd 9 closes). The lockfile lives under
+# data/ (gitignored), so it never enters version control.
 LOCKFILE="data/.sync-sessions.lock"
 if command -v flock >/dev/null 2>&1; then
   exec 9>"$LOCKFILE"
-  if ! flock -n 9; then
-    echo "⚠ another sync-sessions is already running (lock: $LOCKFILE) — exiting"
+  if [ "$MODE" = "global" ]; then
+    echo "== waiting for sessions writer lock (global must publish its own pass) =="
+    flock 9
+  elif ! flock -n 9; then
+    echo "⚠ another sync-sessions is already running (lock: $LOCKFILE) — local request coalesced"
     exit 0
   fi
 fi
