@@ -26,7 +26,7 @@ not compose your own sequence.
 | "세션 임베딩", "기억 최신화" | 1 | `./run.sh sync:sessions` | 0 | nothing |
 | "글로벌", "오라클까지", "양쪽 맞춰줘" | 2 | `./run.sh sync:sessions --global` | yes | index + manifest + corpus |
 | "가든 임베딩", "노트도" | 3 | `./run.sh sync:md` → `./run.sh verify md` → `./run.sh sync:md:oracle` | yes | md.lance + md-manifest |
-| "openclaw 가져와", "회수" | 4 | `./run.sh sync:openclaw` → `./run.sh sync:openclaw:oracle` | yes | private openclaw.lance |
+| "openclaw 가져와", "회수" | 4 | `./run.sh sync:openclaw` → read board → `prune:openclaw [--apply]` → `compact openclaw` → `verify openclaw` → `sync:openclaw:oracle` | yes | private openclaw.lance |
 
 Reading the rows:
 
@@ -40,8 +40,9 @@ Reading the rows:
   and owns that quality; we only fetch and make it searchable. Do not offer to tune
   its chunking or model. It costs **zero embedding API calls** — the vectors arrive
   already computed, because OpenClaw independently picked the same
-  `qwen/qwen3-embedding-8b` at 4096d. Append-only: it never mirrors their deletes,
-  because their index still holds chunks for transcripts they already removed.
+  `qwen/qwen3-embedding-8b` at 4096d. The import is append-only — it never mirrors
+  their deletes; the only removal is `prune:openclaw`, limited to dreaming and
+  proven-superseded rows (session archives are always kept).
 - **Tier 4's axis is `search:openclaw`, and it is never a fallback.** Do not reach
   for it because sessions came back empty — that erases which axis answered. Every
   hit states its `agent` and whether it came from what the bot SAID (`sessions`) or
@@ -136,9 +137,61 @@ cd ~/repos/gh/andenken
 ./run.sh sync:md                  # garden markdown
 ./run.sh verify md
 ./run.sh sync:md:oracle           # → oracle: md.lance + md-manifest.json
-./run.sh sync:openclaw            # harvest OpenClaw's precomputed vectors (API 0)
+./run.sh sync:openclaw            # harvest (API 0) + freshness board + reconcile dry-run
+#   read the board, then — only if it asks for it — see "Tier 4 in the usual ask" below
+./run.sh prune:openclaw           # dry-run: what dream + sup✓ would go, live re-check
+./run.sh prune:openclaw --apply   # delete only those, backup + receipt (no mass flag)
+./run.sh compact openclaw
+./run.sh verify openclaw
 ./run.sh sync:openclaw:oracle     # → oracle: private openclaw.lance (API 0)
 ```
+
+### Tier 4 in the usual ask — read the board before the prune
+
+GLG ruling 2026-09-29: we own the quality of the OpenClaw axis too — its
+embeddings must not become the hole in our one integrated search. OpenClaw's own
+search is off for the bots; it is used only to embed. So the full-embedding ask
+now carries OpenClaw's freshness and cleanup, in this order:
+
+1. **`sync:openclaw` and read the freshness board.** Every agent should be `✅`.
+   `claude` shows `·` / `status-missing` (a database, not a configured agent) —
+   that is normal.
+2. **`🔄 incremental` / `🔄 source-ahead`** (valid identity, dirty or memory
+   files newer than the index): run the incremental index for that agent on
+   oracle, then **re-harvest** (`sync:openclaw` again) and re-read the board:
+   ```bash
+   ssh oracle 'docker exec openclaw-gateway openclaw memory index --agent <id>'
+   ```
+   Never `--force`, never `memory reset`. A bot in a live conversation can come
+   back dirty once or twice more — measured 2026-09-29: bbot needed an
+   incremental (14 s) and was clean only on the third harvest. That is the hold
+   working; wait and re-harvest rather than forcing it.
+3. **`⛔ paid-rebuild`** (index identity mismatched, e.g. `chunking_version`):
+   the same `memory index --agent <id>` performs a FULL re-embed with provider
+   cost even without `--force`. This is a **GLG gate** each time — it is a
+   one-off per upstream chunking change, not a routine step. Measured
+   2026-09-29 (v3 → v5, GLG-approved): mini 157 s, glg 638 s, bbot 519 s, run
+   one after another, never in parallel (4 vCPU host).
+4. **`prune:openclaw` (dry-run) → `prune:openclaw --apply`.** Deletes only
+   `dreaming` + `superseded-confirmed` rows of agents that clear every hold, after
+   a live read-only re-check. **`--allow-mass-decrease` is a first-time /
+   post-rebuild flag** (a rebuild re-mints every chunk id, so the old rows all
+   become sup✓): on a routine day a >20% drop is a signal to stop and look, not to
+   pass. Do not apply on a board that still shows a hold you have not understood.
+5. **`compact openclaw` → `verify openclaw` → `sync:openclaw:oracle`.** (Or
+   `prune:openclaw --apply --publish` for verify + publish in the same lock,
+   then compact and publish again.)
+
+**Session archives are kept** — `reset` / `deleted` / `renamed` / `gone` rows
+(853 on 2026-09-29) are never pruned (GLG). Some have no transcript left
+upstream (e.g. gpt `841e5bbf…reset`: 0 transcript events, no archive), so ours
+may be the only copy.
+
+First run, 2026-09-29: prune applied 4,462/4,462 (10,281 → 5,819 rows; bbot
+sup✓ 1,473 · glg 439 + 1,272 · gpt 308 + 565 · main 14 + 203 · gemini 39 + 71 ·
+mini 61 + 17), live re-check 6/6 unchanged, compact 21 → 1 fragment
+(183M → 99M), verify + oracle publish + `search:openclaw` smoke OK. Undo for that
+run: `./run.sh prune:openclaw --restore data/openclaw-prune/2026-09-29T04-28-03-312Z-20260929T042704Z-427976-c036ea`.
 
 That used to be six lines. The sessions half collapsed into one on 2026-09-03
 because the three steps that used to be separate — verify, push the index, ship
