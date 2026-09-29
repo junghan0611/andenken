@@ -135,6 +135,7 @@ export interface RecheckAgent {
 	existingDreamPaths?: string[];
 	/** True when the workspace could not be located, so no dreaming move is proven. */
 	workspaceUnknown?: boolean;
+	workspaceWhy?: string;
 }
 
 export interface RecheckRequest {
@@ -165,9 +166,10 @@ export function applyRecheck(plan: PrunePlan, live: Map<string, RecheckAgent>): 
 
 		const dream = a.byClass.get("dreaming");
 		if (dream) {
-			if (r.workspaceUnknown) {
+			// A malformed answer (no list at all) proves nothing either.
+			if (r.workspaceUnknown || !Array.isArray(r.existingDreamPaths)) {
 				a.byClass.delete("dreaming");
-				heldBack.push(`${a.agent}: ${dream.length} dreaming rows held — workspace unknown, the move is not proven`);
+				heldBack.push(`${a.agent}: ${dream.length} dreaming rows held — workspace unknown (${r.workspaceWhy ?? "?"}), the move is not proven`);
 			} else {
 				const still = new Set(r.existingDreamPaths ?? []);
 				const keep = dream.filter((row) => !still.has(row.sessionFile));
@@ -205,34 +207,77 @@ for a in req["agents"]:
                  digest=hashlib.sha256("\n".join(ids).encode()).hexdigest())
     except Exception as e:
         r.update(ok=False, error=str(e)[:200])
+    # "The file is gone" is only a claim if we are provably looking at the
+    # workspace: the mapped directory and its memory/ must exist and be listable.
+    # A wrong mapping or a missing directory would otherwise make every dreaming
+    # path look moved (sol P0, 2026-09-29) — so anything short of that is unknown.
     ws = a.get("workspaceDir") or ""
-    if ws.startswith(container_home):
-        host_ws = host_root + ws[len(container_home):]
-        r["existingDreamPaths"] = [p for p in a["dreamPaths"] if os.path.exists(os.path.join(host_ws, p))]
+    why = None
+    if not ws.startswith(container_home + "/"):
+        why = "workspaceDir is not under the container home"
     else:
+        host_ws = host_root + ws[len(container_home):]
+        mem = os.path.join(host_ws, "memory")
+        if not os.path.isdir(host_ws):
+            why = "mapped workspace is not a directory: " + host_ws
+        elif not os.path.isdir(mem):
+            why = "mapped workspace has no memory/: " + host_ws
+        else:
+            try:
+                os.listdir(host_ws)
+                os.listdir(mem)
+            except OSError as e:
+                why = "mapped workspace is not readable: " + str(e)[:120]
+    existing = []
+    if not why:
+        # Only ENOENT means "moved". lstat, not stat: a symlink — broken or not —
+        # is something still standing at that path. Any other error (EACCES,
+        # ENOTDIR, ELOOP, …) proves nothing, and holds the agent's dreaming rows.
+        for p in a["dreamPaths"]:
+            try:
+                os.lstat(os.path.join(host_ws, p))
+                existing.append(p)
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                why = "cannot tell whether %s is gone: %s" % (p, e.__class__.__name__)
+                break
+    if why:
         r["workspaceUnknown"] = True
+        r["workspaceWhy"] = why
+    else:
+        r["existingDreamPaths"] = existing
     out[name] = r
 print(json.dumps(out))
 `;
 
-/** The real re-check: one read-only ssh round trip, no write on the host. */
-export function sshRecheck(host: string, agentsDir: string, containerHome: string): Recheck {
+function runRecheck(cmd: string, argv: string[], agentsDir: string, containerHome: string): Recheck {
 	return (req) => {
 		const arg = Buffer.from(JSON.stringify({ ...req, agentsDir, containerHome })).toString("base64");
-		const res = spawnSync("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=15", host, `python3 - ${arg}`], {
-			input: RECHECK_PY,
-			encoding: "utf-8",
-			maxBuffer: 16 * 1024 * 1024,
-		});
+		const res = spawnSync(cmd, [...argv, arg], { input: RECHECK_PY, encoding: "utf-8", maxBuffer: 16 * 1024 * 1024 });
 		const out = new Map<string, RecheckAgent>();
 		if (res.status !== 0) {
-			for (const a of req.agents) out.set(a.agent, { agent: a.agent, ok: false, error: `ssh exit ${res.status}: ${(res.stderr ?? "").trim().split("\n").pop()}` });
+			for (const a of req.agents) {
+				out.set(a.agent, { agent: a.agent, ok: false, error: `exit ${res.status}: ${(res.stderr ?? "").trim().split("\n").pop()}` });
+			}
 			return out;
 		}
 		const parsed = JSON.parse(res.stdout) as Record<string, RecheckAgent>;
 		for (const [k, v] of Object.entries(parsed)) out.set(k, v);
 		return out;
 	};
+}
+
+/** The real re-check: one read-only ssh round trip, no write on the host. */
+export function sshRecheck(host: string, agentsDir: string, containerHome: string): Recheck {
+	// The remote shell joins these words into one command line; the last word
+	// (the base64 request) is appended by runRecheck.
+	return runRecheck("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=15", host, "python3", "-"], agentsDir, containerHome);
+}
+
+/** The same script run locally — for fixtures, never for a real prune. */
+export function localRecheck(agentsDir: string, containerHome: string): Recheck {
+	return runRecheck("python3", ["-"], agentsDir, containerHome);
 }
 
 export function recheckRequest(plan: PrunePlan): RecheckRequest {

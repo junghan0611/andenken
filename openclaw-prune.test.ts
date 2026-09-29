@@ -18,10 +18,12 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import * as zlib from "zlib";
+import { spawnSync } from "child_process";
 import { VectorStore } from "./store.ts";
 import {
 	applyRecheck,
 	executePrune,
+	localRecheck,
 	planIds,
 	planPrune,
 	recheckRequest,
@@ -174,6 +176,85 @@ console.log("\n=== live re-check — the last look before deleting ===");
 	const req = recheckRequest(fresh());
 	ok("the re-check request asks only about agents that would be pruned, dream paths deduped",
 		req.agents.length === 1 && req.agents[0].dreamPaths.length === 1);
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+console.log("\n=== the re-check script itself, run locally against a fake host ===");
+{
+	// The same RECHECK_PY that ssh ships, pointed at a temp "host": an agents dir
+	// with a real sqlite db, and a workspace beside it the way the gateway mounts it.
+	const host = fs.mkdtempSync(path.join(os.tmpdir(), "andenken-recheck-"));
+	try {
+		const agentsDir = path.join(host, "agents");
+		const db = path.join(agentsDir, "a", "agent", "openclaw-agent.sqlite");
+		fs.mkdirSync(path.dirname(db), { recursive: true });
+		const mk = spawnSync("python3", ["-c", `
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+c.execute("create table memory_index_chunks (id text primary key)")
+c.execute("create table memory_index_state (id integer primary key, revision integer)")
+c.executemany("insert into memory_index_chunks values (?)", [("n%d" % i,) for i in range(10)])
+c.execute("insert into memory_index_state values (1, 7)")
+c.commit()`, db]);
+		ok("fixture db created", mk.status === 0);
+		const ws = path.join(host, "workspace-a");
+		fs.mkdirSync(path.join(ws, "memory", "dreaming", "light"), { recursive: true });
+		const DREAM = "memory/dreaming/light/2026-04-21.md";
+		const req = (workspaceDir: string | null) => ({ agents: [{ agent: "a", workspaceDir, dreamPaths: [DREAM] }] });
+		const run1 = (workspaceDir: string | null, home = "/home/node/.openclaw") => localRecheck(agentsDir, home)(req(workspaceDir)).get("a")!;
+
+		const moved = run1("/home/node/.openclaw/workspace-a");
+		ok("live db read: revision, rows and the same digest the manifest uses",
+			moved.ok && moved.revision === 7 && moved.rows === 10 && moved.digest === digestIds(Array.from({ length: 10 }, (_, i) => `n${i}`)));
+		ok("mapped workspace present, file absent → provably moved", moved.workspaceUnknown !== true && moved.existingDreamPaths?.length === 0);
+
+		fs.writeFileSync(path.join(ws, DREAM), "still here");
+		ok("file present → reported as still there", run1("/home/node/.openclaw/workspace-a").existingDreamPaths?.[0] === DREAM);
+		fs.rmSync(path.join(ws, DREAM));
+
+		// A broken symlink at the path is still something standing there.
+		fs.symlinkSync(path.join(ws, "nowhere.md"), path.join(ws, DREAM));
+		ok("broken symlink at the path → still there (lstat, not stat)", run1("/home/node/.openclaw/workspace-a").existingDreamPaths?.[0] === DREAM);
+		fs.rmSync(path.join(ws, DREAM));
+
+		// A path component that is a FILE gives ENOTDIR, not ENOENT: unknown.
+		fs.rmSync(path.join(ws, "memory", "dreaming"), { recursive: true });
+		fs.writeFileSync(path.join(ws, "memory", "dreaming"), "a file where a dir should be");
+		const notDir = run1("/home/node/.openclaw/workspace-a");
+		ok("ENOTDIR (not ENOENT) → the agent's dreaming is unknown", notDir.workspaceUnknown === true && /NotADirectoryError/.test(notDir.workspaceWhy ?? ""));
+		fs.rmSync(path.join(ws, "memory", "dreaming"));
+
+		// Unreadable directory: EACCES on lstat of an entry below it. Skipped when
+		// running as root, where permission bits do not bind.
+		if (process.getuid && process.getuid() !== 0) {
+			fs.mkdirSync(path.join(ws, "memory", "dreaming", "light"), { recursive: true });
+			fs.chmodSync(path.join(ws, "memory", "dreaming"), 0o000);
+			const denied = run1("/home/node/.openclaw/workspace-a");
+			fs.chmodSync(path.join(ws, "memory", "dreaming"), 0o755);
+			ok("EACCES → the agent's dreaming is unknown, not 'moved'", denied.workspaceUnknown === true && /PermissionError/.test(denied.workspaceWhy ?? ""));
+		}
+
+		const wrongMap = run1("/home/node/.openclaw/workspace-a", "/wrong/home");
+		ok("WRONG MAPPING (prefix mismatch) → unknown, not 'moved'", wrongMap.workspaceUnknown === true && wrongMap.existingDreamPaths === undefined);
+		const noDir = run1("/home/node/.openclaw/workspace-missing");
+		ok("MAPPED DIR MISSING → unknown, not 'moved'", noDir.workspaceUnknown === true && /not a directory/.test(noDir.workspaceWhy ?? ""));
+		fs.mkdirSync(path.join(host, "workspace-bare"));
+		const noMem = run1("/home/node/.openclaw/workspace-bare");
+		ok("workspace without memory/ → unknown", noMem.workspaceUnknown === true && /no memory\//.test(noMem.workspaceWhy ?? ""));
+		ok("prefix look-alike (/home/node/.openclawX/…) → unknown", run1("/home/node/.openclawX/workspace-a").workspaceUnknown === true);
+
+		// End to end through applyRecheck: the 861-row failure sol described.
+		const w = world();
+		const plan = planPrune(report(w), w.m, w.st, { allowMassDecrease: false });
+		const live = localRecheck(agentsDir, "/home/node/.openclaw")({ agents: [{ agent: "a", workspaceDir: "/home/node/.openclaw/workspace-missing", dreamPaths: [DREAM] }] });
+		const folded = applyRecheck(plan, live);
+		ok("…and a missing workspace keeps every dreaming row out of the plan", !planIds(folded.plan).includes("a:dr") && planIds(folded.plan).includes("a:old"));
+		ok("an answer with no dream list at all is treated as unknown",
+			!planIds(applyRecheck(planPrune(report(w), w.m, w.st, { allowMassDecrease: false }), liveOk({ existingDreamPaths: undefined })).plan).includes("a:dr"));
+	} finally {
+		fs.rmSync(host, { recursive: true, force: true });
+	}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
