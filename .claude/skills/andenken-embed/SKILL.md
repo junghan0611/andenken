@@ -80,7 +80,12 @@ Reading the rows:
   **reconcile dry-run**; `./run.sh report:openclaw [--samples N]` re-prints both
   from the staged run with no ssh. Read them, relay them, do not act on them:
   - *Freshness board* — per agent: snapshot rows, newest `updated_at` (KST),
-    chunking version, `memory status` identity/dirty/files. `⛔ paid-rebuild` means
+    chunking version, `memory status` identity/dirty/files, and `mem-lag` (newest
+    workspace MEMORY.md / memory/**/*.md mtime − newest indexed memory source;
+    sessions are covered by the files ratio only). Status is taken **before and
+    after** the snapshots; an agent whose identity / dirty / chunk count moved
+    between them, or whose snapshot rows ≠ status chunks, is `❓ unbound`.
+    `🔄 source-ahead` = clean by status but a memory file is >1h newer than the index. `⛔ paid-rebuild` means
     the index identity is mismatched: plain `openclaw memory index --agent X`
     (no `--force`) still rebuilds the whole index and calls the provider — that
     is a GLG approval, never a routine step. `🔄 incremental` is dirty with a valid
@@ -93,13 +98,19 @@ Reading the rows:
     `reset`, `del`, `renamed` (live transcript archived under a new name), and
     `gone-m`/`gone-s`. It refuses outright unless run.json, manifest, host and
     (when chunks were staged) the import receipt all name one run. Failed,
-    digest-mismatched or absent agents are never classified; mismatched identity,
-    unknown status and an empty upstream are **upstream holds**; a per-agent drop
+    digest-mismatched (ids **and** id/source/path/updated_at rows) or absent agents
+    are never classified; unknown or missing status, an unbound generation,
+    mismatched identity, a dirty index and an empty upstream are **upstream
+    holds**; `sup✓` requires every replacement at the same (source, path) to be held
+    with this snapshot's stamp; a per-agent drop
     above 20% (`ANDENKEN_OPENCLAW_RECONCILE_MAX_RATIO`) is a **mass-decrease hold**.
     Nothing is deleted — stage C (a real prune of `dream` + `sup✓`) and the
     retention policy for session archives wait for GLG.
-  - One harvest at a time: `data/.openclaw-harvest.lock`, and the remote work
-    directory is `/tmp/andenken-openclaw.<run id>`, removed after the fetch.
+  - One harvest at a time: `data/.openclaw-harvest.lock` (also taken by
+    `report:openclaw`), and the remote work directory is
+    `/tmp/andenken-openclaw.<run id>`, removed after the fetch. Each agent's delta
+    joins the artifact only if its whole read succeeded, so a failed agent cannot
+    advance its watermark past rows that never arrived.
 - **Tier 3's oracle half is not automatic.** md's source is the garden checkout, so
   after `sync:md:oracle` the replica may still need `git -C ~/repos/gh/notes pull`
   **on oracle**. Sessions carries its corpus itself inside `--global`; md does not.

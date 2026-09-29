@@ -22,6 +22,8 @@ import {
 	checkBinding,
 	classifyGone,
 	digestIds,
+	digestRows,
+	generationUnbound,
 	freshnessRows,
 	holdKind,
 	parseManifestLines,
@@ -68,18 +70,20 @@ function manifestLines(
 			max_updated_at: chunks.length ? Math.max(...chunks.map((c) => c.updated_at ?? 1)) : null,
 			revision: 7, meta: { memory_index_meta_v1: { chunkingVersion: a.chunkingVersion ?? 5 } },
 			digest: a.digest ?? digestIds(chunks.map((c) => c.id)),
+			row_digest: digestRows(chunks.map((c) => ({ agent, updated_at: 1, ...c }))),
 		}));
 		for (const c of chunks) out.push(JSON.stringify({ kind: "chunk", agent, updated_at: 1, ...c }));
 	}
 	return out;
 }
 
-function status(agents: Record<string, { identity?: string; code?: string; dirty?: boolean }>): StatusParse {
+function status(agents: Record<string, { identity?: string; code?: string; dirty?: boolean; chunks?: number }>): StatusParse {
 	return parseStatus(JSON.stringify(Object.entries(agents).map(([agentId, s]) => ({
 		agentId,
 		status: {
 			dirty: s.dirty ?? false,
 			files: 1,
+			chunks: s.chunks,
 			sourceCounts: [{ source: "memory", files: 1, eligible: 1 }],
 			custom: { indexIdentity: { status: s.identity ?? "valid", code: s.code } },
 		},
@@ -87,8 +91,10 @@ function status(agents: Record<string, { identity?: string; code?: string; dirty
 	}))));
 }
 
-const held = (agent: string, rows: Array<[string, string, string]>): HeldRow[] =>
-	rows.map(([id, source, p]) => ({ id: `${agent}:${id}`, source, sessionFile: p }));
+/** Held rows carry the stamp the importer would have written for updated_at=1 unless told otherwise. */
+const STAMP1 = new Date(1).toISOString();
+const held = (agent: string, rows: Array<[string, string, string] | [string, string, string, string]>): HeldRow[] =>
+	rows.map(([id, source, p, ts]) => ({ id: `${agent}:${id}`, source, sessionFile: p, timestamp: ts ?? STAMP1 }));
 
 const ok7 = { a: {}, b: {}, c: {}, d: {}, e: {}, f: {}, g: {} } as Record<string, object>;
 
@@ -121,8 +127,8 @@ console.log("\n=== classification — each class, and the order between them ===
 		["gs", "sessions", "sessions/x/s4.jsonl"],
 		["gm", "memory", "memory/2026-01-01.md"],
 	]);
-	const heldIds = new Set(["x:new1", "x:dnew", ...gone.map((g) => g.id)]);
-	const c = classifyGone("x", gone, up, heldIds);
+	const heldStamps = new Map([["x:new1", new Date(2).toISOString()], ["x:dnew", new Date(2).toISOString()], ...gone.map((g) => [g.id, g.timestamp] as [string, string])]);
+	const c = classifyGone("x", gone, up, heldStamps);
 	const ids = (k: string) => (c.get(k as never) ?? []).map((r) => r.id.slice(2)).sort().join(",");
 	ok("same path + every replacement held → superseded-confirmed", ids("superseded-confirmed") === "dold,old1");
 	ok("same path + replacement not arrived → superseded-unconfirmed", ids("superseded-unconfirmed") === "old2");
@@ -153,17 +159,26 @@ console.log("\n=== binding — one run or nothing ===");
 	ok("WRONG HOST: export host ≠ watermark host is refused",
 		!r2.ok && /watermark belongs/.test((r2 as { reason: string }).reason));
 
-	const receipt = { at: "", stagingMtimeMs: 0, seen: 1, imported: 0, unchanged: 1, host: "oracle" };
+	const receipt = { at: "", stagingMtimeMs: 0, seen: run.rows, imported: 0, unchanged: 0, host: "oracle" };
 	ok("chunks staged, no receipt → refused (replacements not landed)",
 		!checkBinding({ ...base, chunksStaged: true }).ok);
 	ok("chunks staged, receipt of an EARLIER run → refused",
 		!checkBinding({ ...base, chunksStaged: true, receipt: { ...receipt, runId: "older" } }).ok);
 	ok("chunks staged, receipt of this run → bound",
 		checkBinding({ ...base, chunksStaged: true, receipt: { ...receipt, runId: RUN } }).ok);
+	ok("receipt of this run but a different row count → refused",
+		!checkBinding({ ...base, chunksStaged: true, receipt: { ...receipt, runId: RUN, seen: run.rows + 5 } }).ok);
+	ok("receipt of this run but another host → refused",
+		!checkBinding({ ...base, chunksStaged: true, receipt: { ...receipt, runId: RUN, host: "elsewhere" } }).ok);
+	const staleSource = parseManifestLines([
+		...manifestLines({ a: {} }),
+		JSON.stringify({ kind: "source", agent: "a", run_id: "older", source: "memory", files: 1, newest_mtime: 1, newest_path: "MEMORY.md" }),
+	]);
+	ok("a source line from another run is refused like an agent line", !checkBinding({ ...base, manifest: staleSource }).ok);
 
 	const report = reconcile({
 		held: held("a", [["1", "memory", "MEMORY.md"]]), manifest: stale, status: status({ a: {} }),
-		binding: r1, run,
+		statusPost: status({ a: {} }), binding: r1, run,
 	});
 	ok("a refused binding classifies nothing", report.agents.length === 0);
 	ok("…and says so in the rendered report", /❌ refused/.test(renderReconcile(report)));
@@ -179,7 +194,7 @@ console.log("\n=== read failure on 1 of 7 agents ===");
 	const m = parseManifestLines(lines);
 	const hs = Object.keys(ok7).flatMap((a) => held(a, [["u", "memory", "MEMORY.md"], ["gone", "memory", "memory/dreaming/x.md"]]));
 	const st = status(Object.fromEntries(Object.keys(ok7).map((k) => [k, {}])));
-	const rep = reconcile({ held: hs, manifest: m, status: st, binding: { ok: true }, run, maxRatio: 0.9 });
+	const rep = reconcile({ held: hs, manifest: m, status: st, statusPost: st, binding: { ok: true }, run, maxRatio: 0.9 });
 	const c = rep.agents.find((a) => a.agent === "c")!;
 	ok("the failed agent is not classified", c.guard === "not-classified:vacuum-failed" && c.gone.size === 0);
 	ok("the six readable agents are", rep.agents.filter((a) => a.guard === "ok").length === 6);
@@ -188,11 +203,11 @@ console.log("\n=== read failure on 1 of 7 agents ===");
 	ok("…and lists it as not fresh-checked", /not fresh-checked: c/.test(renderFreshness(fr, run, st)));
 
 	const dm = parseManifestLines(manifestLines({ a: { chunks: [{ id: "u", source: "memory", path: "M" }], digest: "0".repeat(64) } }));
-	const dr = reconcile({ held: held("a", [["z", "memory", "M"]]), manifest: dm, status: st, binding: { ok: true }, run });
+	const dr = reconcile({ held: held("a", [["z", "memory", "M"]]), manifest: dm, status: st, statusPost: st, binding: { ok: true }, run });
 	ok("a manifest whose digest does not verify is not classified", dr.agents[0].guard === "not-classified:digest-mismatch");
 
 	const df = parseManifestLines(manifestLines({ a: { state: "delta-failed", chunks: [{ id: "u", source: "memory", path: "M" }] } }));
-	const dfr = reconcile({ held: held("a", [["z", "memory", "M"]]), manifest: df, status: st, binding: { ok: true }, run });
+	const dfr = reconcile({ held: held("a", [["z", "memory", "M"]]), manifest: df, status: st, statusPost: st, binding: { ok: true }, run });
 	ok("delta-failed (manifest fine, import missed its delta) is not classified", dfr.agents[0].guard === "not-classified:delta-failed");
 }
 
@@ -201,7 +216,7 @@ console.log("\n=== zero rows, no index, agents that vanish ===");
 {
 	const m = parseManifestLines(manifestLines({ a: {}, b: { state: "no-index" } }));
 	const hs = [...held("a", [["1", "memory", "MEMORY.md"], ["2", "memory", "MEMORY.md"]]), ...held("b", [["1", "memory", "M"]]), ...held("z", [["1", "memory", "M"]])];
-	const rep = reconcile({ held: hs, manifest: m, status: status({ a: {}, b: {} }), binding: { ok: true }, run });
+	const rep = reconcile({ held: hs, manifest: m, status: status({ a: {}, b: {} }), statusPost: status({ a: {}, b: {} }), binding: { ok: true }, run });
 	const a = rep.agents.find((x) => x.agent === "a")!;
 	ok("a 0-row upstream with held rows is flagged upstream-empty", a.flags.some((f) => f.startsWith("upstream-empty")));
 	ok("…which holds it as an upstream hold, not a prune", holdKind(a) === "upstream");
@@ -229,7 +244,7 @@ console.log("\n=== paused identity and a failed status call ===");
 
 	const rep = reconcile({
 		held: held("p", [["n", "memory", "MEMORY.md"], ["o", "memory", "MEMORY.md"]]),
-		manifest: m, status: st, binding: { ok: true }, run, maxRatio: 0.9,
+		manifest: m, status: st, statusPost: st, binding: { ok: true }, run, maxRatio: 0.9,
 	});
 	const pr = rep.agents.find((a) => a.agent === "p")!;
 	ok("reconcile still classifies a paused agent (the numbers are useful)…", pr.gone.get("superseded-confirmed")?.length === 1);
@@ -239,7 +254,7 @@ console.log("\n=== paused identity and a failed status call ===");
 	ok("non-JSON status parses as a failure with the stderr hint", !down.ok && /container not found/.test((down as { reason: string }).reason));
 	const fd = freshnessRows(m, down);
 	ok("a failed status call leaves NO agent reported fresh", fd.every((r) => r.verdict === "status-unknown"));
-	const rd = reconcile({ held: held("f", [["n", "memory", "MEMORY.md"], ["o", "memory", "MEMORY.md"]]), manifest: m, status: down, binding: { ok: true }, run, maxRatio: 0.9 });
+	const rd = reconcile({ held: held("f", [["n", "memory", "MEMORY.md"], ["o", "memory", "MEMORY.md"]]), manifest: m, status: down, statusPost: down, binding: { ok: true }, run, maxRatio: 0.9 });
 	ok("…and reconcile holds every agent while identity is unknown", holdKind(rd.agents.find((a) => a.agent === "f")!) === "upstream");
 
 	const nc = freshnessRows(parseManifestLines(manifestLines({ claude: {}, ghost: { chunks: [{ id: "1", source: "memory", path: "M" }] } })), status({}));
@@ -254,15 +269,15 @@ console.log("\n=== the 38% decrease ===");
 	const upChunks = Array.from({ length: 62 }, (_, i) => ({ id: `k${i}`, source: "memory", path: "MEMORY.md" }));
 	const m = parseManifestLines(manifestLines({ a: { chunks: upChunks } }));
 	const hs = held("a", Array.from({ length: 100 }, (_, i) => [`k${i}`, "memory", i < 62 ? "MEMORY.md" : "memory/dreaming/x.md"] as [string, string, string]));
-	const rep = reconcile({ held: hs, manifest: m, status: status({ a: {} }), binding: { ok: true }, run });
+	const rep = reconcile({ held: hs, manifest: m, status: status({ a: {} }), statusPost: status({ a: {} }), binding: { ok: true }, run });
 	const a = rep.agents[0];
 	ok("38% gone trips the default 20% threshold", a.flags.some((f) => f.startsWith("mass-decrease 38%")));
 	ok("…as a mass-decrease hold, distinct from an upstream hold", holdKind(a) === "mass-decrease");
 	ok("…and the summary counts it apart", /behind mass-decrease only 38/.test(renderReconcile(rep, 0)));
-	const loose = reconcile({ held: hs, manifest: m, status: status({ a: {} }), binding: { ok: true }, run, maxRatio: 0.5 });
+	const loose = reconcile({ held: hs, manifest: m, status: status({ a: {} }), statusPost: status({ a: {} }), binding: { ok: true }, run, maxRatio: 0.5 });
 	ok("under the threshold the same rows are clear of every guard", holdKind(loose.agents[0]) === "none" && /clear of every guard 38/.test(renderReconcile(loose, 0)));
 	ok("retry: the dry-run is pure — same input, same report",
-		renderReconcile(reconcile({ held: hs, manifest: m, status: status({ a: {} }), binding: { ok: true }, run }), 3) === renderReconcile(rep, 3));
+		renderReconcile(reconcile({ held: hs, manifest: m, status: status({ a: {} }), statusPost: status({ a: {} }), binding: { ok: true }, run }), 3) === renderReconcile(rep, 3));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -272,10 +287,86 @@ console.log("\n=== same id, new updated_at ===");
 	// upstream, so it is NOT a reconcile candidate — and the importer still
 	// rewrites it, because the stamp moved.
 	const m = parseManifestLines(manifestLines({ a: { chunks: [{ id: "same", source: "memory", path: "M", updated_at: 99 }] } }));
-	const rep = reconcile({ held: held("a", [["same", "memory", "M"]]), manifest: m, status: status({ a: {} }), binding: { ok: true }, run });
+	const rep = reconcile({ held: held("a", [["same", "memory", "M"]]), manifest: m, status: status({ a: {} }), statusPost: status({ a: {} }), binding: { ok: true }, run });
 	ok("a same-id row with a new stamp is held ∩ upstream, not gone", rep.agents[0].both === 1 && rep.agents[0].gone.size === 0);
 	const chunk = { id: "a:same", timestamp: new Date(99).toISOString() } as PreparedChunk;
 	ok("…and the unchanged-skip does not skip it", partitionByChange([chunk], new Map([["a:same", new Date(1).toISOString()]])).write.length === 1);
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+console.log("\n=== re-review holes (sol 2026-09-29) ===");
+{
+	const up = [{ id: "n", source: "memory", path: "MEMORY.md" }];
+	const m = parseManifestLines(manifestLines({ a: { chunks: up }, b: { chunks: up } }));
+	const hs = [...held("a", [["n", "memory", "MEMORY.md"], ["o", "memory", "MEMORY.md"]]), ...held("b", [["n", "memory", "MEMORY.md"], ["o", "memory", "MEMORY.md"]])];
+	const clear = (st: StatusParse, post: StatusParse = st) =>
+		reconcile({ held: hs, manifest: m, status: st, statusPost: post, binding: { ok: true }, run, maxRatio: 0.9 });
+
+	// 1. status answered, but not for this agent
+	const r1 = clear(status({ b: {} }));
+	const a1 = r1.agents.find((x) => x.agent === "a")!;
+	ok("status parsed but the agent is missing → status-missing hold", a1.flags.includes("status-missing: hold") && holdKind(a1) === "upstream");
+	ok("…so its sup✓ is NOT counted clear of every guard", /clear of every guard 1,/.test(renderReconcile(r1, 0)));
+	ok("the agent that status did answer for stays clear", holdKind(r1.agents.find((x) => x.agent === "b")!) === "none");
+
+	// 1b. dirty is a hold, not a flag
+	const a2 = clear(status({ a: { dirty: true }, b: {} })).agents.find((x) => x.agent === "a")!;
+	ok("valid + dirty → hold (upstream catch-up pending)", holdKind(a2) === "upstream" && a2.flags.some((f) => f.startsWith("dirty")));
+
+	// 3. generation bracket
+	const r3 = clear(status({ a: {}, b: {} }), status({ a: { identity: "mismatched", code: "chunking_version" }, b: {} }));
+	ok("identity moved between the two status calls → generation-unbound hold",
+		r3.agents.find((x) => x.agent === "a")!.flags.some((f) => f.startsWith("generation-unbound (identity moved")));
+	const r4 = clear(status({ a: { chunks: 1 }, b: { chunks: 1 } }), status({ a: { chunks: 9 }, b: { chunks: 1 } }));
+	ok("chunk count moved between the calls → hold", holdKind(r4.agents.find((x) => x.agent === "a")!) === "upstream");
+	ok("…while the agent that held still is bound", holdKind(r4.agents.find((x) => x.agent === "b")!) === "none");
+	const r5 = clear(status({ a: { chunks: 7 }, b: { chunks: 1 } }));
+	ok("snapshot rows ≠ status chunks (both calls agree) → hold",
+		r5.agents.find((x) => x.agent === "a")!.flags.some((f) => /snapshot rows 1 ≠ status chunks 7/.test(f)));
+	ok("generationUnbound: post failed → status-unknown",
+		generationUnbound("a", m.agents.get("a"), status({ a: {} }), parseStatus(null)) === "status-unknown");
+	ok("board: an unbound agent is not reported fresh",
+		freshnessRows(m, status({ a: {}, b: {} }), status({ a: { dirty: true }, b: {} })).find((r) => r.agent === "a")!.verdict === "unbound");
+
+	// status structure
+	ok("a status entry without agentId fails the whole parse", !parseStatus(JSON.stringify([{ status: {} }])).ok);
+	ok("the same agentId twice fails the whole parse", !parseStatus(JSON.stringify([{ agentId: "a" }, { agentId: "a" }])).ok);
+
+	// row digest covers source/path/stamp
+	const garbled = manifestLines({ a: { chunks: up } }).map((l) => l.replace('"path": "MEMORY.md"', '"path": "OTHER.md"').replace('"path":"MEMORY.md"', '"path":"OTHER.md"'));
+	const rg = reconcile({ held: held("a", [["n", "memory", "MEMORY.md"]]), manifest: parseManifestLines(garbled), status: status({ a: {} }), statusPost: status({ a: {} }), binding: { ok: true }, run });
+	ok("a garbled path with the id set intact fails the row digest", rg.agents[0].guard === "not-classified:digest-mismatch");
+
+	// superseded needs the same source AND this generation's stamp
+	const upc = [{ agent: "x", id: "new", source: "memory", path: "P.md", updated_at: 5 }];
+	const other = classifyGone("x", held("x", [["old", "sessions", "P.md"]]), upc, new Map([["x:new", new Date(5).toISOString()]]));
+	ok("same path under another source is not re-chunking", !other.has("superseded-confirmed") && !other.has("superseded-unconfirmed"));
+	const stale = classifyGone("x", held("x", [["old", "memory", "P.md"]]), upc, new Map([["x:new", new Date(4).toISOString()]]));
+	ok("replacement held with an OLDER stamp → unconfirmed", stale.get("superseded-unconfirmed")?.length === 1);
+	const fresh = classifyGone("x", held("x", [["old", "memory", "P.md"]]), upc, new Map([["x:new", new Date(5).toISOString()]]));
+	ok("replacement held with this snapshot's stamp → confirmed", fresh.get("superseded-confirmed")?.length === 1);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+console.log("\n=== source vs index (memory) ===");
+{
+	const H = 3_600_000;
+	const lines = manifestLines({ a: {}, b: {}, c: {} }).map((l) => {
+		const r = JSON.parse(l);
+		if (r.kind === "agent") r.indexed_mtime = { memory: 100 * H };
+		return JSON.stringify(r);
+	});
+	const src = (agent: string, t: number | null) =>
+		JSON.stringify({ kind: "source", agent, run_id: RUN, source: "memory", files: 3, newest_mtime: t, newest_path: "memory/new.md" });
+	const m = parseManifestLines([...lines, src("a", 150 * H), src("b", 100 * H + 60_000), src("c", null)]);
+	const fr = freshnessRows(m, status({ a: {}, b: {}, c: {} }));
+	const a = fr.find((r) => r.agent === "a")!;
+	ok("clean by status but a memory file 50h newer than the index → source-ahead", a.verdict === "source-ahead" && /2d newer/.test(a.prescription));
+	ok("within the 1h tolerance → fresh", fr.find((r) => r.agent === "b")!.verdict === "fresh");
+	ok("unknown source side → no lag claimed", fr.find((r) => r.agent === "c")!.memoryLagMs === null);
+	const pr = freshnessRows(m, status({ a: { identity: "mismatched", code: "chunking_version" }, b: {}, c: {} })).find((r) => r.agent === "a")!;
+	ok("a paid-rebuild agent keeps its verdict and carries the lag as a note", pr.verdict === "paid-rebuild" && /memory source ahead of index by 2d/.test(pr.prescription));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -290,6 +381,11 @@ console.log("\n=== export-openclaw.sh — static guards ===");
 	ok("every sqlite3 CLI open is -readonly", (code.match(/\bsqlite3 +(?!-readonly)["'$-]/g) ?? []).length === 0
 		&& (code.match(/\bsqlite3 -readonly/g) ?? []).length >= 2);
 	ok("the manifest's python open is mode=ro", /mode=ro/.test(code));
+	ok("each agent's delta lands in its own file and joins the artifact only on success",
+		/> "\$delta"; then\n\s+cat "\$delta" >> "\$out"/.test(code) && !/>> "\$out"; then/.test(code));
+	ok("status is taken before the loop AND after it",
+		code.indexOf('run_status status)') < code.indexOf('for dir in') && code.indexOf('run_status status-post)') > code.indexOf("MANIFEST\n  rm -f"));
+	ok("the manifest carries a row digest over id/source/path/updated_at", /row_digest=hashlib/.test(code));
 	ok("staging from the previous run is cleared before the new one starts", /rm -f "\$STAGE\/openclaw-chunks\.jsonl\.gz" "\$STAGE\/host" "\$STAGE\/run\.json"/.test(code));
 }
 

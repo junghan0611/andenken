@@ -74,6 +74,9 @@ FULL=0
 # board then reports every agent's identity as unknown, never as fresh.
 STATUS_CMD="${ANDENKEN_OPENCLAW_STATUS_CMD:-docker exec openclaw-gateway openclaw memory status --json}"
 [ "$STATUS_CMD" = "off" ] && STATUS_CMD=""
+# Where the gateway container sees the host's `$REMOTE_AGENTS/..`, to map the
+# workspaceDir that status reports back onto the host for the source scan.
+CONTAINER_HOME="${ANDENKEN_OPENCLAW_CONTAINER_HOME:-/home/node/.openclaw}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -134,7 +137,8 @@ fi
 # unimported chunks of an earlier failed run lose nothing: the watermark did not
 # advance, so this export asks for them again.
 rm -f "$STAGE/openclaw-chunks.jsonl.gz" "$STAGE/host" "$STAGE/run.json" \
-  "$STAGE/manifest.jsonl.gz" "$STAGE/status.json" "$STAGE/status.err"
+  "$STAGE/manifest.jsonl.gz" "$STAGE/status.json" "$STAGE/status.err" \
+  "$STAGE/status-post.json" "$STAGE/status-post.err"
 
 # One id per run, carried to the remote side and back inside the manifest. The
 # remote work directory is named by it, so two runs can never overwrite each
@@ -196,7 +200,7 @@ echo "== export openclaw index: $HOST (mode: $([ "$FULL" = 1 ] && echo full || e
 # not depend on the openclaw host having an andenken checkout, the same reason
 # gather-corpus.sh pipes corpus-admit.py instead of calling a remote copy.
 REMOTE_OUT="$(ssh -o BatchMode=yes -o ConnectTimeout=15 "$HOST" \
-  "AGENTS_DIR=$REMOTE_AGENTS SINCE_JSON='$SINCE_JSON' RUN_ID=$RUN_ID STATUS_CMD=$(printf '%q' "$STATUS_CMD") bash -s" <<'REMOTE'
+  "AGENTS_DIR=$REMOTE_AGENTS SINCE_JSON='$SINCE_JSON' RUN_ID=$RUN_ID STATUS_CMD=$(printf '%q' "$STATUS_CMD") CONTAINER_HOME=$(printf '%q' "$CONTAINER_HOME") bash -s" <<'REMOTE'
 set -euo pipefail
 agents_dir="$(eval echo "$AGENTS_DIR")"
 run_dir="/tmp/andenken-openclaw.$RUN_ID"
@@ -208,18 +212,60 @@ man="$tmp/openclaw-manifest.jsonl"
 : > "$out"
 : > "$man"
 
-# Status first, once, for every configured agent. Best-effort: a failure is kept
-# as a receipt (exit code + last stderr lines) for the board to name, and it does
-# not stop the harvest. An agent directory OpenClaw does not configure is simply
-# absent from it (measured 2026-09-29: `claude` → `Unknown agent id "claude"`).
-STATUS_RC=skipped
-if [ -n "$STATUS_CMD" ]; then
-  if eval "$STATUS_CMD" > "$run_dir/status.json" 2> "$tmp/status.err"; then
-    STATUS_RC=0
-  else
-    STATUS_RC=$?
+# Status BRACKETS the snapshots: once before the agent loop, once after. A single
+# pre-loop call is not the same generation as a snapshot taken seconds later —
+# a rebuild can land in between (sol re-review 2026-09-29). The reconcile holds
+# any agent whose identity, dirty flag or chunk count moved between the two
+# calls, or whose snapshot row count disagrees with them. Best-effort: a failure
+# is kept as a receipt (exit code + last stderr lines) for the board to name and
+# does not stop the harvest. An agent directory OpenClaw does not configure is
+# simply absent (measured 2026-09-29: `claude` → `Unknown agent id "claude"`).
+run_status() {  # $1 = file stem (status | status-post); prints the exit code
+  local rc=skipped
+  if [ -n "$STATUS_CMD" ]; then
+    if eval "$STATUS_CMD" > "$run_dir/$1.json" 2> "$tmp/$1.err"; then rc=0; else rc=$?; fi
+    tail -n 5 "$tmp/$1.err" > "$run_dir/$1.err" || true
   fi
-  tail -n 5 "$tmp/status.err" > "$run_dir/status.err" || true
+  echo "$rc"
+}
+STATUS_RC="$(run_status status)"
+
+# Source-side freshness for the `memory` source: the newest MEMORY.md /
+# memory/**/*.md mtime in each configured agent's workspace, read on the host
+# (the container's home is mounted from the agents dir's parent). Compared on
+# the board against the newest source mtime the snapshot says was indexed.
+# Sessions are not scanned here: their eligible/indexed file counts come from
+# status, and a session's wall-clock is not a file mtime we can trust.
+if [ "$STATUS_RC" = "0" ]; then
+  python3 - "$run_dir/status.json" "$(dirname "$agents_dir")" "$CONTAINER_HOME" "$RUN_ID" >> "$man" <<'SOURCES' || true
+import json, os, sys
+status_path, host_root, container_home, run_id = sys.argv[1:5]
+try:
+    entries = json.load(open(status_path))
+except Exception:
+    sys.exit(0)
+for e in entries if isinstance(entries, list) else []:
+    agent = e.get("agentId")
+    ws = (e.get("status") or {}).get("workspaceDir") or ""
+    if not agent or not ws.startswith(container_home):
+        continue
+    host_ws = host_root + ws[len(container_home):]
+    newest, newest_path, n = None, None, 0
+    candidates = [os.path.join(host_ws, "MEMORY.md")]
+    for root, dirs, files in os.walk(os.path.join(host_ws, "memory")):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        candidates += [os.path.join(root, f) for f in files if f.endswith(".md")]
+    for p in candidates:
+        try:
+            m = int(os.stat(p).st_mtime * 1000)
+        except OSError:
+            continue
+        n += 1
+        if newest is None or m > newest:
+            newest, newest_path = m, os.path.relpath(p, host_ws)
+    print(json.dumps({"kind": "source", "agent": agent, "run_id": run_id, "source": "memory",
+                      "files": n, "newest_mtime": newest, "newest_path": newest_path}))
+SOURCES
 fi
 
 AGENTS_OK=0
@@ -282,6 +328,13 @@ except Exception:
   # A TEXT row (pre-migration database) passes through as before. An empty blob
   # is OpenClaw's own "needs regeneration" marker and decodes to [], which the
   # importer drops as a wrong-dim vector.
+  #
+  # ISOLATED PER AGENT. The delta lands in its own file and joins the shared
+  # artifact only when the whole pipe succeeded. Appending straight to "$out"
+  # let a pipe that failed half-way leave its first rows behind: the agent was
+  # marked skipped, yet the importer read those rows and advanced that agent's
+  # watermark past the rows that never arrived (sol re-review 2026-09-29).
+  delta="$tmp/$agent.delta.jsonl"
   if sqlite3 -readonly -json "$snap" \
     "select '$agent' as agent, id, path, source, updated_at, text,
             typeof(embedding) as embedding_type,
@@ -294,13 +347,15 @@ for r in (json.loads(raw) if raw else []):
     if r.pop("embedding_type", None) == "blob":
         b = bytes.fromhex(r["embedding"] or "")
         r["embedding"] = json.dumps(list(struct.unpack("<%dd" % (len(b) // 8), b)) if len(b) % 8 == 0 else [])
-    print(json.dumps(r, ensure_ascii=False))' >> "$out"; then
+    print(json.dumps(r, ensure_ascii=False))' > "$delta"; then
+    cat "$delta" >> "$out"
     AGENTS_OK=$((AGENTS_OK + 1))
     delta_ok=1
   else
     AGENTS_SKIPPED="$AGENTS_SKIPPED $agent"
     delta_ok=0
   fi
+  rm -f "$delta"
 
   # The manifest, from the snapshot the delta was just read from. Ids, not
   # vectors. The agent line is printed only after every query succeeded, so a
@@ -330,6 +385,10 @@ try:
             if k == "memory_index_meta_v1" and isinstance(v, dict):
                 v = {x: v.get(x) for x in ("model", "provider", "sources", "chunkingVersion", "vectorDims")}
             meta[k] = v
+    indexed_mtime = {}
+    if "memory_index_sources" in tables:
+        for src, m in con.execute("select source, max(mtime) from memory_index_sources group by source"):
+            indexed_mtime[src] = int(m) if m is not None else None
     revision = None
     if "memory_index_state" in tables:
         r = con.execute("select revision from memory_index_state where id = 1").fetchone()
@@ -340,7 +399,12 @@ try:
         max_updated_at=max((r[3] for r in rows), default=None),
         revision=revision,
         meta=meta,
+        indexed_mtime=indexed_mtime,
         digest=hashlib.sha256("\n".join(r[0] for r in rows).encode()).hexdigest(),
+        # The id digest proves membership; this one also covers the fields the
+        # classifier reads (source, path) and the stamp, so a garbled path cannot
+        # pass for a re-chunked one. Rows are already sorted.
+        row_digest=hashlib.sha256("\n".join(f"{i}\t{s}\t{p}\t{u}" for i, s, p, u in rows).encode()).hexdigest(),
     )
     lines = [json.dumps(rec, ensure_ascii=False)]
     lines += [
@@ -355,6 +419,9 @@ MANIFEST
   rm -f "$snap"
 done
 
+# The closing half of the status bracket.
+STATUS_POST_RC="$(run_status status-post)"
+
 gzip -c "$man" > "$run_dir/manifest.jsonl.gz"
 ROWS_OUT="$(wc -l < "$out")"
 [ "$ROWS_OUT" = "0" ] || gzip -c "$out" > "$run_dir/openclaw-chunks.jsonl.gz"
@@ -362,6 +429,7 @@ echo "REMOTE_ROWS=$ROWS_OUT"
 echo "REMOTE_AGENTS_OK=$AGENTS_OK"
 echo "REMOTE_AGENTS_SKIPPED=$AGENTS_SKIPPED"
 echo "REMOTE_STATUS_RC=$STATUS_RC"
+echo "REMOTE_STATUS_POST_RC=$STATUS_POST_RC"
 echo "REMOTE_RUN_DIR=$run_dir"
 REMOTE
 )"
@@ -370,6 +438,7 @@ ROWS="$(echo "$REMOTE_OUT" | sed -n 's/^REMOTE_ROWS=//p')"
 AGENTS_OK="$(echo "$REMOTE_OUT" | sed -n 's/^REMOTE_AGENTS_OK=//p')"
 SKIPPED="$(echo "$REMOTE_OUT" | sed -n 's/^REMOTE_AGENTS_SKIPPED=//p' | xargs || true)"
 STATUS_RC="$(echo "$REMOTE_OUT" | sed -n 's/^REMOTE_STATUS_RC=//p')"
+STATUS_POST_RC="$(echo "$REMOTE_OUT" | sed -n 's/^REMOTE_STATUS_POST_RC=//p')"
 REMOTE_RUN_DIR="$(echo "$REMOTE_OUT" | sed -n 's/^REMOTE_RUN_DIR=//p')"
 
 echo "   agents read: ${AGENTS_OK:-0}${SKIPPED:+, skipped: $SKIPPED}"
@@ -391,9 +460,12 @@ if [ -n "$SKIPPED" ]; then
   echo "   Their watermarks did not advance, so the next run retries them."
 fi
 
-if [ "${STATUS_RC:-}" != "0" ] && [ "${STATUS_RC:-}" != "skipped" ]; then
-  echo "⚠ openclaw memory status failed on $HOST (exit ${STATUS_RC:-?}) — index identity is unknown this run"
-fi
+for rc in "${STATUS_RC:-}" "${STATUS_POST_RC:-}"; do
+  if [ "$rc" != "0" ] && [ "$rc" != "skipped" ]; then
+    echo "⚠ openclaw memory status failed on $HOST (pre exit ${STATUS_RC:-?}, post exit ${STATUS_POST_RC:-?}) — index identity is unknown this run"
+    break
+  fi
+done
 
 # Fetch the whole run directory — manifest and status always, the chunks when
 # there are any — then remove it on the host. The manifest comes back even on a
@@ -403,7 +475,7 @@ INCOMING="$STAGE/incoming.$RUN_ID"
 rm -rf "$INCOMING"
 rsync -az "$HOST:$REMOTE_RUN_DIR/" "$INCOMING/"
 ssh -o BatchMode=yes "$HOST" "rm -rf '$REMOTE_RUN_DIR'" || true
-for f in manifest.jsonl.gz status.json status.err openclaw-chunks.jsonl.gz; do
+for f in manifest.jsonl.gz status.json status.err status-post.json status-post.err openclaw-chunks.jsonl.gz; do
   if [ -f "$INCOMING/$f" ]; then mv "$INCOMING/$f" "$STAGE/$f"; fi
 done
 rm -rf "$INCOMING"
@@ -416,14 +488,14 @@ printf '%s\n' "$HOST" > "$STAGE/host"
 # The run receipt. The importer copies runId into its own receipt, and the
 # reconcile refuses to compare anything whose run ids disagree.
 python3 - "$STAGE/run.json" "$RUN_ID" "$HOST" "$([ "$FULL" = 1 ] && echo full || echo delta)" \
-  "${ROWS:-0}" "${AGENTS_OK:-0}" "$SKIPPED" "${STATUS_RC:-}" <<'RUNJSON'
+  "${ROWS:-0}" "${AGENTS_OK:-0}" "$SKIPPED" "${STATUS_RC:-}" "${STATUS_POST_RC:-}" <<'RUNJSON'
 import json, sys, time
-p, run_id, host, mode, rows, ok, skipped, status_rc = sys.argv[1:9]
+p, run_id, host, mode, rows, ok, skipped, status_rc, status_post_rc = sys.argv[1:10]
 with open(p, "w") as f:
     json.dump({
         "runId": run_id, "host": host, "mode": mode, "exportedAt": int(time.time() * 1000),
         "rows": int(rows), "agentsOk": int(ok), "agentsSkipped": skipped.split(),
-        "statusRc": status_rc,
+        "statusRc": status_rc, "statusPostRc": status_post_rc,
     }, f, indent=2)
     f.write("\n")
 RUNJSON

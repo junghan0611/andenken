@@ -52,7 +52,10 @@ export interface ManifestAgent {
 	maxUpdatedAt: number | null;
 	revision: number | null;
 	chunkingVersion: number | null;
+	/** Newest source mtime OpenClaw recorded as indexed, per source kind (memory_index_sources). */
+	indexedMtime: Record<string, number | null>;
 	digest: string | null;
+	rowDigest: string | null;
 	error?: string;
 }
 
@@ -64,20 +67,33 @@ export interface ManifestChunk {
 	updated_at: number;
 }
 
+/** The workspace side of the `memory` source, scanned on the host. */
+export interface ManifestSource {
+	agent: string;
+	runId: string | null;
+	files: number;
+	newestMtime: number | null;
+	newestPath: string | null;
+}
+
 export interface Manifest {
 	agents: Map<string, ManifestAgent>;
 	chunks: Map<string, ManifestChunk[]>;
+	sources: Map<string, ManifestSource>;
+}
+
+export function emptyManifest(): Manifest {
+	return { agents: new Map(), chunks: new Map(), sources: new Map() };
 }
 
 export function parseManifestLines(lines: Iterable<string>): Manifest {
-	const agents = new Map<string, ManifestAgent>();
-	const chunks = new Map<string, ManifestChunk[]>();
+	const m = emptyManifest();
 	for (const line of lines) {
 		if (!line.trim()) continue;
 		const r = JSON.parse(line);
 		if (r.kind === "agent") {
 			const meta = r.meta?.memory_index_meta_v1;
-			agents.set(r.agent, {
+			m.agents.set(r.agent, {
 				agent: r.agent,
 				state: r.state,
 				runId: r.run_id ?? null,
@@ -85,21 +101,43 @@ export function parseManifestLines(lines: Iterable<string>): Manifest {
 				maxUpdatedAt: r.max_updated_at ?? null,
 				revision: r.revision ?? null,
 				chunkingVersion: typeof meta?.chunkingVersion === "number" ? meta.chunkingVersion : null,
+				indexedMtime: r.indexed_mtime ?? {},
 				digest: r.digest ?? null,
+				rowDigest: r.row_digest ?? null,
 				error: r.error,
 			});
 		} else if (r.kind === "chunk") {
-			const list = chunks.get(r.agent) ?? [];
+			const list = m.chunks.get(r.agent) ?? [];
 			list.push({ agent: r.agent, id: r.id, source: r.source, path: r.path, updated_at: r.updated_at });
-			chunks.set(r.agent, list);
+			m.chunks.set(r.agent, list);
+		} else if (r.kind === "source") {
+			m.sources.set(r.agent, {
+				agent: r.agent,
+				runId: r.run_id ?? null,
+				files: r.files ?? 0,
+				newestMtime: r.newest_mtime ?? null,
+				newestPath: r.newest_path ?? null,
+			});
 		}
 	}
-	return { agents, chunks };
+	return m;
 }
 
 /** Same digest the remote side computes: sha256 over the sorted ids joined by "\n". */
 export function digestIds(ids: string[]): string {
 	return crypto.createHash("sha256").update([...ids].sort().join("\n")).digest("hex");
+}
+
+/**
+ * The row digest the remote side computes: sorted by id, `id\tsource\tpath\tupdated_at`
+ * per line. It covers the fields the classifier reads, which the id digest does not.
+ */
+export function digestRows(rows: ManifestChunk[]): string {
+	const sorted = [...rows].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+	return crypto
+		.createHash("sha256")
+		.update(sorted.map((r) => `${r.id}\t${r.source}\t${r.path}\t${r.updated_at}`).join("\n"))
+		.digest("hex");
 }
 
 // ── Status ────────────────────────────────────────────────────────────────────
@@ -109,6 +147,7 @@ export interface StatusEntry {
 	dirty: boolean;
 	identity: { status: string; code?: string; reason?: string };
 	files: number;
+	chunks: number | null;
 	totalFiles: number | null;
 	sources: Array<{ source: string; files: number; eligible: number | null }>;
 }
@@ -117,8 +156,13 @@ export type StatusParse =
 	| { ok: true; byAgent: Map<string, StatusEntry> }
 	| { ok: false; reason: string };
 
+/**
+ * Parse `memory status --json`. Structural damage is a failure, not a partial
+ * answer: an entry without a string agentId, or the same agent twice, cannot be
+ * attributed, and a status that cannot be attributed must not vouch for anyone.
+ */
 export function parseStatus(raw: string | null, errTail = ""): StatusParse {
-	if (raw === null) return { ok: false, reason: "no status.json staged (status skipped or failed)" };
+	if (raw === null) return { ok: false, reason: "no status JSON staged (status skipped or failed)" };
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(raw);
@@ -129,13 +173,18 @@ export function parseStatus(raw: string | null, errTail = ""): StatusParse {
 	if (!Array.isArray(parsed)) return { ok: false, reason: "status JSON is not an array" };
 	const byAgent = new Map<string, StatusEntry>();
 	for (const r of parsed as any[]) {
-		const s = r?.status ?? {};
+		if (typeof r?.agentId !== "string" || r.agentId.length === 0) {
+			return { ok: false, reason: "status JSON has an entry without an agentId" };
+		}
+		if (byAgent.has(r.agentId)) return { ok: false, reason: `status JSON lists '${r.agentId}' twice` };
+		const s = r.status ?? {};
 		const id = s.custom?.indexIdentity ?? {};
 		byAgent.set(r.agentId, {
 			agentId: r.agentId,
 			dirty: Boolean(s.dirty),
 			identity: { status: id.status ?? "unknown", code: id.code, reason: id.reason },
 			files: s.files ?? 0,
+			chunks: typeof s.chunks === "number" ? s.chunks : null,
 			totalFiles: r.scan?.totalFiles ?? null,
 			sources: (s.sourceCounts ?? []).map((c: any) => ({
 				source: c.source,
@@ -147,12 +196,49 @@ export function parseStatus(raw: string | null, errTail = ""): StatusParse {
 	return { ok: true, byAgent };
 }
 
+/**
+ * Status is taken before the agent loop and again after it. The snapshot in
+ * between is bound to that status only if nothing it reports moved across the
+ * bracket AND the snapshot's row count equals the chunk count both calls saw.
+ * Returns the reason an agent is unbound, or null when it is bound.
+ */
+export function generationUnbound(
+	agent: string,
+	m: ManifestAgent | undefined,
+	pre: StatusParse,
+	post: StatusParse,
+): string | null {
+	if (!pre.ok || !post.ok) return "status-unknown";
+	const a = pre.byAgent.get(agent);
+	const b = post.byAgent.get(agent);
+	if (!a || !b) return "status-missing";
+	if (a.identity.status !== b.identity.status || a.identity.code !== b.identity.code) return "identity moved during export";
+	if (a.dirty !== b.dirty) return "dirty moved during export";
+	if (a.chunks !== b.chunks) return `chunks moved during export (${a.chunks}→${b.chunks})`;
+	if (m && m.state === "ok" && a.chunks !== null && a.chunks !== m.rows) {
+		return `snapshot rows ${m.rows} ≠ status chunks ${a.chunks}`;
+	}
+	return null;
+}
+
+/** A source newer than the newest indexed source by more than this is reported as ahead. */
+export const SOURCE_AHEAD_MS = 60 * 60 * 1000;
+
+export function memorySourceLag(manifest: Manifest, agent: string): { lagMs: number; newestPath: string | null } | null {
+	const src = manifest.sources.get(agent);
+	const idx = manifest.agents.get(agent)?.indexedMtime?.memory ?? null;
+	if (!src || src.newestMtime === null || idx === null || idx === undefined) return null;
+	return { lagMs: src.newestMtime - idx, newestPath: src.newestPath };
+}
+
 // ── Freshness board (stage A) ─────────────────────────────────────────────────
 
 export type FreshnessVerdict =
 	| "fresh"
+	| "source-ahead"
 	| "incremental"
 	| "paid-rebuild"
+	| "unbound"
 	| "read-failed"
 	| "status-unknown"
 	| "not-configured"
@@ -167,17 +253,20 @@ export interface FreshnessRow {
 	identity: string;
 	dirty: boolean | null;
 	filesRatio: string;
+	/** workspace memory newest mtime − indexed memory newest mtime; null when either side is unknown. */
+	memoryLagMs: number | null;
 	verdict: FreshnessVerdict;
 	prescription: string;
 }
 
-export function freshnessRows(manifest: Manifest, status: StatusParse): FreshnessRow[] {
+export function freshnessRows(manifest: Manifest, status: StatusParse, statusPost: StatusParse = status): FreshnessRow[] {
 	const names = new Set<string>([...manifest.agents.keys()]);
 	if (status.ok) for (const k of status.byAgent.keys()) names.add(k);
 	const out: FreshnessRow[] = [];
 	for (const agent of [...names].sort()) {
 		const m = manifest.agents.get(agent);
 		const s = status.ok ? status.byAgent.get(agent) : undefined;
+		const lag = memorySourceLag(manifest, agent);
 		const row: FreshnessRow = {
 			agent,
 			rows: m?.rows ?? 0,
@@ -189,15 +278,18 @@ export function freshnessRows(manifest: Manifest, status: StatusParse): Freshnes
 			filesRatio: s
 				? s.sources.map((c) => `${c.source[0]} ${c.files}/${c.eligible ?? "?"}`).join(" · ")
 				: "",
+			memoryLagMs: lag?.lagMs ?? null,
 			verdict: "fresh",
 			prescription: "",
 		};
+		const unbound = generationUnbound(agent, m, status, statusPost);
 		if (!m || m.state === "vacuum-failed" || m.state === "manifest-failed" || m.state === "delta-failed") {
 			row.verdict = "read-failed";
 			row.prescription = `snapshot read failed (${m?.state ?? "no manifest line"}) — this agent is NOT fresh-checked this run`;
-		} else if (!status.ok) {
+		} else if (!status.ok || !statusPost.ok) {
 			row.verdict = "status-unknown";
-			row.prescription = `memory status unavailable (${status.reason}) — identity unknown, not reported as fresh`;
+			const reason = !status.ok ? status.reason : (statusPost as { reason: string }).reason;
+			row.prescription = `memory status unavailable (${reason}) — identity unknown, not reported as fresh`;
 		} else if (!s) {
 			// Measured 2026-09-29: `claude` has a directory and a database but is not
 			// a configured agent, so `memory status` answers `Unknown agent id`.
@@ -206,6 +298,9 @@ export function freshnessRows(manifest: Manifest, status: StatusParse): Freshnes
 				row.rows === 0
 					? "not a configured OpenClaw agent, 0 index rows — nothing to harvest"
 					: `not a configured OpenClaw agent but its database holds ${row.rows} index rows — ask the OpenClaw owner`;
+		} else if (unbound) {
+			row.verdict = "unbound";
+			row.prescription = `snapshot not bound to status (${unbound}) — upstream moved during the export; re-run before reading this agent`;
 		} else if (s.identity.status !== "valid") {
 			row.verdict = "paid-rebuild";
 			row.prescription =
@@ -214,13 +309,27 @@ export function freshnessRows(manifest: Manifest, status: StatusParse): Freshnes
 		} else if (s.dirty) {
 			row.verdict = "incremental";
 			row.prescription = `dirty: \`openclaw memory index --agent ${agent}\` (incremental; may still call the provider). Not run.`;
+		} else if (lag && lag.lagMs > SOURCE_AHEAD_MS) {
+			// Clean by status, but a workspace memory file is newer than anything the
+			// index recorded — the watcher may have missed it (sol re-review P1).
+			row.verdict = "source-ahead";
+			row.prescription =
+				`status says clean, but ${lag.newestPath} is ${fmtLag(lag.lagMs)} newer than the newest indexed memory source — ` +
+				`\`openclaw memory index --agent ${agent}\` (incremental; may still call the provider). Not run.`;
 		} else {
 			row.verdict = "fresh";
 			row.prescription = "clean";
 		}
+		if (lag && lag.lagMs > SOURCE_AHEAD_MS && row.verdict !== "source-ahead") {
+			row.prescription += ` [memory source ahead of index by ${fmtLag(lag.lagMs)}: ${lag.newestPath}]`;
+		}
 		out.push(row);
 	}
 	return out;
+}
+
+function fmtLag(ms: number): string {
+	return ms >= 86_400_000 ? `${Math.floor(ms / 86_400_000)}d` : `${Math.floor(ms / 3_600_000)}h`;
 }
 
 function kst(ms: number | null): string {
@@ -229,22 +338,32 @@ function kst(ms: number | null): string {
 	return d.toISOString().slice(0, 16).replace("T", " ");
 }
 
-export function renderFreshness(rows: FreshnessRow[], run: StagedRun | null, status: StatusParse, nowMs = Date.now()): string {
+export function renderFreshness(
+	rows: FreshnessRow[],
+	run: StagedRun | null,
+	status: StatusParse,
+	nowMs = Date.now(),
+	statusPost: StatusParse = status,
+): string {
 	const lines: string[] = [];
 	lines.push(`== openclaw freshness board — run ${run?.runId ?? "?"} on ${run?.host ?? "?"} (read-only; nothing was run) ==`);
-	if (!status.ok) lines.push(`❌ memory status: ${status.reason}`);
-	lines.push("agent    rows  newest(KST)       age  chunkV  identity                   dirty  files(m · s)");
+	if (!status.ok) lines.push(`❌ memory status (before snapshots): ${status.reason}`);
+	if (!statusPost.ok) lines.push(`❌ memory status (after snapshots): ${statusPost.reason}`);
+	lines.push("agent    rows  newest(KST)       age  chunkV  identity                   dirty  mem-lag  files(m · s)");
 	for (const r of rows) {
 		const age = r.maxUpdatedAt === null ? "—" : `${Math.floor((nowMs - r.maxUpdatedAt) / 86_400_000)}d`;
+		const lag = r.memoryLagMs === null ? "?" : r.memoryLagMs <= SOURCE_AHEAD_MS ? "ok" : fmtLag(r.memoryLagMs);
 		lines.push(
 			`${r.agent.padEnd(8)} ${String(r.rows).padStart(5)}  ${kst(r.maxUpdatedAt).padEnd(16)}  ${age.padStart(4)}  ` +
-				`${String(r.chunkingVersion ?? "—").padStart(6)}  ${r.identity.padEnd(25)}  ${(r.dirty === null ? "?" : r.dirty ? "yes" : "no").padEnd(5)}  ${r.filesRatio}`,
+				`${String(r.chunkingVersion ?? "—").padStart(6)}  ${r.identity.padEnd(25)}  ${(r.dirty === null ? "?" : r.dirty ? "yes" : "no").padEnd(5)}  ${lag.padStart(7)}  ${r.filesRatio}`,
 		);
 	}
 	const icon: Record<FreshnessVerdict, string> = {
 		fresh: "✅",
+		"source-ahead": "🔄",
 		incremental: "🔄",
 		"paid-rebuild": "⛔",
+		unbound: "❓",
 		"read-failed": "❌",
 		"status-unknown": "❓",
 		"not-configured": "⚠",
@@ -252,8 +371,9 @@ export function renderFreshness(rows: FreshnessRow[], run: StagedRun | null, sta
 	};
 	lines.push("prescriptions:");
 	for (const r of rows) lines.push(`  ${icon[r.verdict]} ${r.agent}: ${r.prescription}`);
-	const bad = rows.filter((r) => r.verdict === "read-failed" || r.verdict === "status-unknown");
+	const bad = rows.filter((r) => r.verdict === "read-failed" || r.verdict === "status-unknown" || r.verdict === "unbound");
 	if (bad.length > 0) lines.push(`   not fresh-checked: ${bad.map((r) => r.agent).join(", ")} — the board is NOT a clean bill for them`);
+	lines.push("   mem-lag = newest workspace MEMORY.md / memory/**/*.md mtime − newest indexed memory source mtime; sessions are covered by the files ratio only.");
 	return lines.join("\n");
 }
 
@@ -263,6 +383,8 @@ export interface HeldRow {
 	id: string;
 	sessionFile: string;
 	source: string;
+	/** ISO stamp the importer wrote — `new Date(updated_at).toISOString()`. */
+	timestamp: string;
 }
 
 /**
@@ -290,26 +412,29 @@ export const PRUNE_ELIGIBLE: ReadonlySet<ReconcileClass> = new Set(["dreaming", 
 /**
  * Classify one agent's held rows that upstream no longer carries.
  *
- * Order matters and is deliberate: a path still present upstream means
+ * Order matters and is deliberate: a (source, path) still present upstream means
  * re-chunking whatever its prefix, so that test comes first. "Confirmed" means
- * every upstream id at that path is already in our store — the replacement has
- * actually arrived, not merely been announced. A path whose replacement was
- * dropped by the importer (credential / boilerplate) therefore stays
- * unconfirmed, which is the conservative side.
+ * every upstream id at that (source, path) is already in our store WITH the
+ * stamp this snapshot carries — the replacement has actually arrived as this
+ * generation, not merely been announced or held from an older one. A path whose
+ * replacement was dropped by the importer (credential / boilerplate) therefore
+ * stays unconfirmed, which is the conservative side.
  */
 export function classifyGone(
 	agent: string,
 	gone: HeldRow[],
 	upstream: ManifestChunk[],
-	heldIds: Set<string>,
+	heldStamps: Map<string, string>,
 ): Map<ReconcileClass, HeldRow[]> {
-	const byPath = new Map<string, ManifestChunk[]>();
+	const key = (source: string, p: string) => `${source}\u0000${p}`;
+	const bySourcePath = new Map<string, ManifestChunk[]>();
 	for (const c of upstream) {
-		const list = byPath.get(c.path) ?? [];
+		const k = key(c.source, c.path);
+		const list = bySourcePath.get(k) ?? [];
 		list.push(c);
-		byPath.set(c.path, list);
+		bySourcePath.set(k, list);
 	}
-	const upstreamPaths = [...byPath.keys()];
+	const upstreamPaths = upstream.map((c) => c.path);
 	const out = new Map<ReconcileClass, HeldRow[]>();
 	const put = (k: ReconcileClass, r: HeldRow) => {
 		const list = out.get(k) ?? [];
@@ -318,9 +443,11 @@ export function classifyGone(
 	};
 	for (const r of gone) {
 		const p = r.sessionFile;
-		const same = byPath.get(p);
+		const same = bySourcePath.get(key(r.source, p));
 		if (same) {
-			const arrived = same.every((c) => heldIds.has(`${agent}:${c.id}`));
+			const arrived = same.every(
+				(c) => heldStamps.get(`${agent}:${c.id}`) === new Date(c.updated_at).toISOString(),
+			);
 			put(arrived ? "superseded-confirmed" : "superseded-unconfirmed", r);
 		} else if (DREAMING_PREFIXES.some((x) => p.startsWith(x))) {
 			put("dreaming", r);
@@ -357,7 +484,7 @@ export function checkBinding(input: {
 	if (!manifest || manifest.agents.size === 0) {
 		return { ok: false, reason: `run ${run.runId} staged no manifest — the export did not complete` };
 	}
-	for (const a of manifest.agents.values()) {
+	for (const a of [...manifest.agents.values(), ...manifest.sources.values()]) {
 		if (a.runId !== run.runId) {
 			return { ok: false, reason: `manifest line for '${a.agent}' belongs to run ${a.runId}, not ${run.runId} — stale or mixed staging` };
 		}
@@ -370,6 +497,12 @@ export function checkBinding(input: {
 			return {
 				ok: false,
 				reason: `run ${run.runId} staged chunks that are not imported yet (import receipt: ${receipt?.runId ?? "none"}) — held ids would be compared before the replacements land`,
+			};
+		}
+		if (receipt.host !== run.host || receipt.seen !== run.rows) {
+			return {
+				ok: false,
+				reason: `import receipt of run ${run.runId} does not match its export (host ${receipt.host}/${run.host}, rows ${receipt.seen}/${run.rows})`,
 			};
 		}
 	}
@@ -398,17 +531,21 @@ export interface ReconcileReport {
 export function reconcile(input: {
 	held: HeldRow[];
 	manifest: Manifest;
+	/** Status taken BEFORE the snapshots. */
 	status: StatusParse;
+	/** Status taken AFTER the snapshots — the other half of the generation bracket. */
+	statusPost: StatusParse;
 	binding: BindingResult;
 	run: StagedRun | null;
 	maxRatio?: number;
 }): ReconcileReport {
-	const { held, manifest, status, binding, run } = input;
+	const { held, manifest, status, statusPost, binding, run } = input;
 	const maxRatio = input.maxRatio ?? 0.2;
 	const report: ReconcileReport = { binding, runId: run?.runId ?? null, host: run?.host ?? null, agents: [] };
 	if (!binding.ok) return report;
 
 	const heldIds = new Set(held.map((h) => h.id));
+	const heldStamps = new Map(held.map((h) => [h.id, h.timestamp]));
 	const heldByAgent = new Map<string, HeldRow[]>();
 	for (const h of held) {
 		const agent = h.id.slice(0, h.id.indexOf(":"));
@@ -444,7 +581,7 @@ export function reconcile(input: {
 			a.guard = `not-classified:${m.state}`;
 			continue;
 		}
-		if (m.rows !== up.length || digestIds(up.map((c) => c.id)) !== m.digest) {
+		if (m.rows !== up.length || digestIds(up.map((c) => c.id)) !== m.digest || digestRows(up) !== m.rowDigest) {
 			a.guard = "not-classified:digest-mismatch";
 			continue;
 		}
@@ -453,13 +590,20 @@ export function reconcile(input: {
 		const gone = mine.filter((h) => !upIds.has(h.id));
 		a.both = mine.length - gone.length;
 		a.upstreamNotHeld = [...upIds].filter((id) => !heldIds.has(id)).length;
-		a.gone = classifyGone(agent, gone, up, heldIds);
+		a.gone = classifyGone(agent, gone, up, heldStamps);
 
-		if (!status.ok) a.flags.push("status-unknown: hold");
+		// Every hold below ends in "hold". An agent is clear only when BOTH status
+		// calls answered for it, agree with each other and with the snapshot, the
+		// identity is valid and the index is not dirty (sol re-review 2026-09-29:
+		// a missing status entry and a dirty index were previously counted clear).
+		const unbound = generationUnbound(agent, m, status, statusPost);
+		if (unbound === "status-unknown") a.flags.push("status-unknown: hold");
+		else if (unbound === "status-missing") a.flags.push("status-missing: hold");
 		else {
-			const s = status.byAgent.get(agent);
-			if (s && s.identity.status !== "valid") a.flags.push(`identity-${s.identity.status}: upstream rebuild pending — hold`);
-			if (s?.dirty) a.flags.push("dirty");
+			if (unbound) a.flags.push(`generation-unbound (${unbound}): hold`);
+			const s = (status as { byAgent: Map<string, StatusEntry> }).byAgent.get(agent)!;
+			if (s.identity.status !== "valid") a.flags.push(`identity-${s.identity.status}: upstream rebuild pending — hold`);
+			if (s.dirty) a.flags.push("dirty: upstream catch-up pending — hold");
 		}
 		if (up.length === 0 && mine.length > 0) a.flags.push("upstream-empty: hold");
 		if (mine.length > 0 && gone.length / mine.length > maxRatio) {
@@ -471,7 +615,8 @@ export function reconcile(input: {
 
 /**
  * Why an agent's rows would not be touched even after GLG approves stage C.
- * `identity` / `status` / `upstream-empty` are about upstream being mid-change;
+ * `status-*` / `generation-unbound` / `identity` / `dirty` / `upstream-empty`
+ * are about upstream being unknown or mid-change;
  * `mass-decrease` is about the size of the step. They are counted apart because
  * the first kind clears itself when upstream settles and the second needs an
  * explicit one-off decision (the first reconcile removes 38% at once).
@@ -567,13 +712,23 @@ export function readStagedManifest(): Manifest | null {
 	return parseManifestLines(zlib.gunzipSync(fs.readFileSync(p)).toString("utf-8").split("\n"));
 }
 
-export function readStagedStatus(): StatusParse {
-	const p = path.join(stagingDir(), "status.json");
-	const e = path.join(stagingDir(), "status.err");
+/** `which` = "status" (before the snapshots) or "status-post" (after). */
+export function readStagedStatus(which: "status" | "status-post" = "status"): StatusParse {
+	const p = path.join(stagingDir(), `${which}.json`);
+	const e = path.join(stagingDir(), `${which}.err`);
 	const err = fs.existsSync(e) ? fs.readFileSync(e, "utf-8") : "";
 	const run = readStagedRun();
-	if (run && run.statusRc !== "0") {
-		return { ok: false, reason: run.statusRc === "skipped" ? "status skipped (ANDENKEN_OPENCLAW_STATUS_CMD=off)" : `exit ${run.statusRc}${err.trim() ? ` — ${err.trim().split("\n").pop()}` : ""}` };
+	const rc = which === "status" ? run?.statusRc : run?.statusPostRc;
+	if (run && rc !== "0") {
+		return {
+			ok: false,
+			reason:
+				rc === "skipped"
+					? "status skipped (ANDENKEN_OPENCLAW_STATUS_CMD=off)"
+					: rc === undefined
+						? `${which} not recorded by this run`
+						: `exit ${rc}${err.trim() ? ` — ${err.trim().split("\n").pop()}` : ""}`,
+		};
 	}
 	return parseStatus(fs.existsSync(p) ? fs.readFileSync(p, "utf-8") : null, err);
 }
@@ -584,14 +739,15 @@ async function main(): Promise<void> {
 	const samples = si >= 0 ? Math.max(0, Number(rest[si + 1] ?? 2) || 0) : 2;
 	const run = readStagedRun();
 	const manifest = readStagedManifest();
-	const status = readStagedStatus();
+	const status = readStagedStatus("status");
+	const statusPost = readStagedStatus("status-post");
 
 	if (cmd === "freshness") {
 		if (!run || !manifest) {
 			console.log("❓ openclaw freshness: no staged run/manifest — run ./run.sh sync:openclaw");
 			return;
 		}
-		console.log(renderFreshness(freshnessRows(manifest, status), run, status));
+		console.log(renderFreshness(freshnessRows(manifest, status, statusPost), run, status, Date.now(), statusPost));
 		return;
 	}
 	if (cmd !== "reconcile") throw new Error(`unknown subcommand '${cmd}' (freshness | reconcile)`);
@@ -611,7 +767,7 @@ async function main(): Promise<void> {
 		await store.close();
 	}
 	const maxRatio = Number(process.env.ANDENKEN_OPENCLAW_RECONCILE_MAX_RATIO ?? "0.2");
-	const report = reconcile({ held, manifest: manifest ?? { agents: new Map(), chunks: new Map() }, status, binding, run, maxRatio });
+	const report = reconcile({ held, manifest: manifest ?? emptyManifest(), status, statusPost, binding, run, maxRatio });
 	console.log(renderReconcile(report, samples));
 	if (!binding.ok) process.exit(1);
 }

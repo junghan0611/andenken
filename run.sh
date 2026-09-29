@@ -376,8 +376,15 @@ case "${1:-help}" in
       && pnpm exec tsx openclaw-importer.ts \
       && pnpm exec tsx openclaw-reconcile.ts reconcile --samples 0 ;;
   report:openclaw)
-    shift; load_env; cd "$SCRIPT_DIR" \
-      && pnpm exec tsx openclaw-reconcile.ts freshness \
+    # Same lock as the harvest: a report read while an export is refilling the
+    # staging directory would mix two runs (the binding check would refuse, but
+    # there is no reason to race it).
+    shift; load_env; cd "$SCRIPT_DIR" || exit 1
+    if command -v flock >/dev/null 2>&1; then
+      exec 8>data/.openclaw-harvest.lock
+      flock -n 8 || { echo "❌ an openclaw harvest is running — report after it finishes" >&2; exit 1; }
+    fi
+    pnpm exec tsx openclaw-reconcile.ts freshness \
       && pnpm exec tsx openclaw-reconcile.ts reconcile "$@" ;;
   sync:openclaw:oracle)
     shift; load_env; cd "$SCRIPT_DIR" && bash scripts/sync-openclaw-to-oracle.sh "$@" ;;

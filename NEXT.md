@@ -43,7 +43,9 @@
       reconcile dry-run)는 2026-09-29 구현. 판정 대상 셋: (1) `dream` 861 + `sup✓` 861 prune
       승인과 첫 회 38% 감소의 1회성 mass-decrease 허용, (2) 세션 아카이브 853
       (reset 802 · deleted 28 · renamed 13 · gone 10) 보존/검색노출 정책, (3) bbot·glg·mini
-      chunking_version 재구축(유료) 승인. prune은 receipt·사전 백업·verify·compact·publish 순.
+      chunking_version 재구축(유료) 승인 — 같은 3봇은 workspace memory가 색인보다 18d/25d/123d
+      앞서 있다(mem-lag, 2026-09-29). prune은 receipt·사전 백업·verify·compact·publish 순이고,
+      sol 재리뷰 P0(삭제 직전 동일 id 집합 재확인, 1회성 dream allowlist, 단독 락) 선행.
       입력: `./run.sh report:openclaw --samples 3`
 - [ ] **드롭된 행은 워터마크를 못 밀어준다** (09-04 관측, 아직 무해). `mergeWatermark`는
       import된 행에만 걸리므로, 어느 agent의 최신 행이 boilerplate 드롭이면 그 agent는

@@ -218,6 +218,8 @@ export interface StagedRun {
 	agentsOk: number;
 	agentsSkipped: string[];
 	statusRc: string;
+	/** Exit code of the status call taken after the snapshots (absent before 2026-09-29 v2). */
+	statusPostRc?: string;
 }
 
 export function readStagedRun(): StagedRun | null {
