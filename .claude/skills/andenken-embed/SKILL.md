@@ -59,6 +59,16 @@ Reading the rows:
   it 1 → 4 fragments, and a compact returned 7 → 1 (96M → 82M). Nothing else
   maintains that file — the authority harvests it and explicitly publishes the
   completed private store to Oracle.
+- **Their vector column changed type in OpenClaw v2026.9.6** (upstream
+  c65911334f8, #153683): `embedding` went from TEXT (a JSON array) to
+  `BLOB NOT NULL`, IEEE-754 binary64 little-endian — 32768 B for 4096d. The
+  export reads `hex(embedding)` and decodes it back to the JSON array the importer
+  has always taken, so the lance side and the watermark did not change; their
+  migration copied `id` and `updated_at` verbatim. The symptom when this breaks is
+  `agents read: 1` with `UnicodeDecodeError` on stderr — `sqlite3 -json` emits a
+  blob as raw bytes. The zstd that arrived in the same release is transcript-only
+  (`event_zstd`); `memory_index_chunks` is not compressed (measured 2026-09-29,
+  all rows of all seven agents).
 - **Tier 4 harvest runs on the index authority only, and the scripts enforce it.**
   Same `INDEX_AUTHORITY` rule as sessions, but stricter in consequence: a
   replica-side harvest forks a store. The gate is first in `export-openclaw.sh`,

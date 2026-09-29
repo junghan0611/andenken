@@ -202,13 +202,32 @@ except Exception:
   #
   # This also settles a reading left open on 2026-09-03: the delta of 312 was
   # never evidence that gpt and main had re-indexed. It was the boundary, whole.
+  #
+  # THE VECTOR COLUMN CHANGED TYPE. Through OpenClaw 2026.9.5 `embedding` was
+  # TEXT holding a JSON array. From v2026.9.6 (upstream c65911334f8, #153683,
+  # `memory-schema-storage-migration.ts`) it is `BLOB NOT NULL` in a STRICT table:
+  # IEEE-754 binary64, little-endian, 8 bytes per coordinate — 32768 B for 4096d
+  # (`embedding-vector.ts encodeMemoryEmbedding`). `sqlite3 -json` writes a blob
+  # as raw bytes, so the old select produced invalid UTF-8 and every agent with
+  # rows failed to parse — the 2026-09-29 "agents read: 1" run. It is not zstd.
+  # The blob is shipped as hex and decoded back to the same JSON array the
+  # importer has always read, so the lance side and the watermark are untouched.
+  # The migration copies id and updated_at verbatim, so it re-sent nothing.
+  # A TEXT row (pre-migration database) passes through as before. An empty blob
+  # is OpenClaw's own "needs regeneration" marker and decodes to [], which the
+  # importer drops as a wrong-dim vector.
   if sqlite3 -readonly -json "$snap" \
-    "select '$agent' as agent, id, path, source, updated_at, text, embedding
+    "select '$agent' as agent, id, path, source, updated_at, text,
+            typeof(embedding) as embedding_type,
+            case when typeof(embedding) = 'blob' then hex(embedding) else embedding end as embedding
        from memory_index_chunks where updated_at >= $since" 2>/dev/null \
   | python3 -c '
-import json, sys
+import json, struct, sys
 raw = sys.stdin.read().strip()
 for r in (json.loads(raw) if raw else []):
+    if r.pop("embedding_type", None) == "blob":
+        b = bytes.fromhex(r["embedding"] or "")
+        r["embedding"] = json.dumps(list(struct.unpack("<%dd" % (len(b) // 8), b)) if len(b) % 8 == 0 else [])
     print(json.dumps(r, ensure_ascii=False))' >> "$out"; then
     AGENTS_OK=$((AGENTS_OK + 1))
   else
