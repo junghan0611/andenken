@@ -46,6 +46,11 @@
       chunking_version 재구축(유료) 승인 — 같은 3봇은 workspace memory가 색인보다 18d/25d/123d
       앞서 있다(mem-lag, 2026-09-29). prune은 receipt·사전 백업·verify·compact·publish 순이고,
       sol 재리뷰 P0(삭제 직전 동일 id 집합 재확인, 1회성 dream allowlist, 단독 락) 선행.
+      sol 3차 확인(2026-09-29) 잔여 — 삭제 증거 조건으로 C에서 닫는다: (a) status JSON에
+      `chunks`가 없으면 null 허용이라 snapshot rows = status chunks 검사가 건너뛰어진다
+      (`generationUnbound`) → C에서는 null이면 hold. (b) 청크 수가 같은 세대 교체는
+      revision 대조가 없어 못 잡는다 → 전/후 스냅샷 `memory_index_state.revision` 또는
+      삭제 직전 재스냅샷으로 결박.
       입력: `./run.sh report:openclaw --samples 3`
 - [ ] **드롭된 행은 워터마크를 못 밀어준다** (09-04 관측, 아직 무해). `mergeWatermark`는
       import된 행에만 걸리므로, 어느 agent의 최신 행이 boilerplate 드롭이면 그 agent는
