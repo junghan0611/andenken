@@ -70,9 +70,15 @@ Usage: ./run.sh <command> [args]
                               CJK-weighted token model, per-folder breakdown
                               price: ANDENKEN_MD_PRICE_PER_M_TOKENS
                                   > OPENROUTER_QWEN_8B_PRICE > 0.01
-  sync:openclaw [--full]      Harvest OpenClaw's own index (export + import).
-                              Zero embedding cost — the vectors come already
-                              computed. Append-only; never mirrors their deletes
+  sync:openclaw [--full]      Harvest OpenClaw's own index: export → freshness
+                              board → import → reconcile DRY-RUN. Zero embedding
+                              cost — the vectors come already computed. Append-only;
+                              never mirrors their deletes. The board and the dry-run
+                              only report (paid rebuilds / prune candidates are
+                              prescriptions, never run). One harvest at a time (flock)
+  report:openclaw [--samples N]
+                              Re-print freshness board + reconcile dry-run from the
+                              staged run (no ssh, no write, API 0)
   sync:openclaw:oracle [flags] Publish completed data/openclaw.lance to Oracle.
                               Authority-only; flags: --dry-run --no-verify --smoke --host <ssh-host>
   sync:md:oracle [flags]      Rsync completed data/md.lance + md-manifest.json to Oracle
@@ -250,7 +256,8 @@ case "${1:-help}" in
   test:split)
     cd "$SCRIPT_DIR" && pnpm exec tsx session-split.test.ts ;;
   test:openclaw)
-    load_env; cd "$SCRIPT_DIR" && pnpm exec tsx openclaw-import.test.ts ;;
+    load_env; cd "$SCRIPT_DIR" && pnpm exec tsx openclaw-import.test.ts \
+      && pnpm exec tsx openclaw-reconcile.test.ts ;;
   test:absent)
     cd "$SCRIPT_DIR" && pnpm exec tsx axis-absent.test.ts ;;
   test:parity)
@@ -355,9 +362,23 @@ case "${1:-help}" in
   sync:sessions)
     shift; load_env; cd "$SCRIPT_DIR" && bash scripts/sync-sessions.sh "$@" ;;
   sync:openclaw)
+    # One lock around the whole pipeline: export clears and refills the staging
+    # directory, and the import and reconcile that follow must read what THIS
+    # export staged. The child export sees LOCK_HELD and does not re-lock.
+    shift; load_env; cd "$SCRIPT_DIR" || exit 1
+    if command -v flock >/dev/null 2>&1; then
+      exec 8>data/.openclaw-harvest.lock
+      flock -n 8 || { echo "❌ another openclaw harvest is running (lock: data/.openclaw-harvest.lock)" >&2; exit 1; }
+      export ANDENKEN_OPENCLAW_LOCK_HELD=1
+    fi
+    bash scripts/export-openclaw.sh "$@" \
+      && pnpm exec tsx openclaw-reconcile.ts freshness \
+      && pnpm exec tsx openclaw-importer.ts \
+      && pnpm exec tsx openclaw-reconcile.ts reconcile --samples 0 ;;
+  report:openclaw)
     shift; load_env; cd "$SCRIPT_DIR" \
-      && bash scripts/export-openclaw.sh "$@" \
-      && pnpm exec tsx openclaw-importer.ts ;;
+      && pnpm exec tsx openclaw-reconcile.ts freshness \
+      && pnpm exec tsx openclaw-reconcile.ts reconcile "$@" ;;
   sync:openclaw:oracle)
     shift; load_env; cd "$SCRIPT_DIR" && bash scripts/sync-openclaw-to-oracle.sh "$@" ;;
   search:openclaw)

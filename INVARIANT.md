@@ -336,7 +336,11 @@ Three rules hold this track:
    OpenClaw's index still holds chunks for sessions whose transcripts it already
    deleted, and its retention rule is unmeasured. Mirroring its deletions would
    turn their cleanup into our loss. A row with the same id replaces itself;
-   nothing else moves.
+   nothing else moves. Since 2026-09-29 the harvest also brings a full id
+   manifest from the same `VACUUM` snapshot and prints a reconcile **dry-run**
+   (`openclaw-reconcile.ts`) — that report is read-only and does not relax this
+   rule. Any real prune is a separate, GLG-approved step, limited to rows whose
+   upstream replacement is proven to have arrived.
 2. **`openclaw.lance` is private-only** (authority plus its query replica). It must never reach the md
    track by any path. The line here is **private versus public**, and it is the only
    line: md is the axis that gets exported to the public garden, and this track

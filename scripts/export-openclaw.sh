@@ -39,6 +39,22 @@
 # (`*.jsonl.deleted.*`), and we do not know its retention rule. If we mirrored
 # deletions, its cleanup would become our loss.
 #
+# WHAT ELSE COMES BACK (2026-09-29, tier-4 stages A+B — still no deletion):
+#   - manifest.jsonl.gz — per agent, from the SAME `VACUUM INTO` snapshot the
+#     delta was read from: every chunk's id/source/path/updated_at, the row count,
+#     the index generation (`memory_index_state.revision`), the chunking identity
+#     (`memory_index_meta`) and a sha256 over the sorted ids. A delta export is not
+#     evidence of absence; only a full id list from the same snapshot can say
+#     "this id is gone upstream", and reading it in a second pass would compare
+#     two generations. Ids only, ~0.5 MB — the vectors are never re-exported.
+#   - status.json — `openclaw memory status --json`. Plain status: no --deep, no
+#     --index, so no provider probe and no reindex. It is the only place that says
+#     whether an index identity is valid or waiting for a paid rebuild.
+#   - run.json — the run id that binds all of the above to one export, so a
+#     manifest left by an earlier run can never be read against this import.
+# `./run.sh sync:openclaw` renders them as the freshness board and the reconcile
+# dry-run (openclaw-reconcile.ts). Neither writes anything anywhere.
+#
 # Usage:
 #   ./scripts/export-openclaw.sh                 # delta since the local watermark
 #   ./scripts/export-openclaw.sh --full          # every row, ignore the watermark
@@ -52,7 +68,12 @@ HOST="${ANDENKEN_OPENCLAW_HOST:-oracle}"
 REMOTE_AGENTS="${ANDENKEN_OPENCLAW_AGENTS_DIR:-\$HOME/openclaw/config/agents}"
 STAGE="data/openclaw-staging"
 WATERMARK="data/openclaw-watermark.json"
+LOCKFILE="data/.openclaw-harvest.lock"
 FULL=0
+# Plain `memory status` only. ANDENKEN_OPENCLAW_STATUS_CMD=off skips it; the
+# board then reports every agent's identity as unknown, never as fresh.
+STATUS_CMD="${ANDENKEN_OPENCLAW_STATUS_CMD:-docker exec openclaw-gateway openclaw memory status --json}"
+[ "$STATUS_CMD" = "off" ] && STATUS_CMD=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -93,6 +114,32 @@ if [ "$LOCAL_DEVICE" != "$INDEX_AUTHORITY" ] && [ "${ANDENKEN_ALLOW_REPLICA_INDE
 fi
 
 mkdir -p "$STAGE"
+
+# --- Single-harvest lock ---
+# Two harvests at once would each clear and refill the same staging directory,
+# and the second importer could fold the first one's artifact under the second
+# one's run id. `./run.sh sync:openclaw` takes this lock around export + import +
+# report and sets ANDENKEN_OPENCLAW_LOCK_HELD, because a second open of the same
+# file from this child would conflict with the parent's own lock.
+if [ "${ANDENKEN_OPENCLAW_LOCK_HELD:-0}" != "1" ] && command -v flock >/dev/null 2>&1; then
+  exec 8>"$LOCKFILE"
+  if ! flock -n 8; then
+    echo "❌ another openclaw harvest is running (lock: $LOCKFILE) — not starting a second one" >&2
+    exit 1
+  fi
+fi
+
+# Every artifact of the previous run leaves BEFORE this one starts, so a failed
+# run leaves nothing a later importer or reconcile could mistake for its own. The
+# unimported chunks of an earlier failed run lose nothing: the watermark did not
+# advance, so this export asks for them again.
+rm -f "$STAGE/openclaw-chunks.jsonl.gz" "$STAGE/host" "$STAGE/run.json" \
+  "$STAGE/manifest.jsonl.gz" "$STAGE/status.json" "$STAGE/status.err"
+
+# One id per run, carried to the remote side and back inside the manifest. The
+# remote work directory is named by it, so two runs can never overwrite each
+# other's artifact the way the old fixed /tmp/openclaw-chunks.jsonl.gz could.
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$-$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
 
 # The watermark keys AGENTS, and records the host it was built against as `_host`
 # (see HOST SCOPING below). Missing file or --full means "from zero".
@@ -143,19 +190,37 @@ except Exception:
   SINCE_JSON="$(cat "$WATERMARK")"
 fi
 
-echo "== export openclaw index: $HOST (mode: $([ "$FULL" = 1 ] && echo full || echo delta)) =="
+echo "== export openclaw index: $HOST (mode: $([ "$FULL" = 1 ] && echo full || echo delta), run $RUN_ID) =="
 
 # The remote script is piped over ssh rather than installed there: harvesting must
 # not depend on the openclaw host having an andenken checkout, the same reason
 # gather-corpus.sh pipes corpus-admit.py instead of calling a remote copy.
 REMOTE_OUT="$(ssh -o BatchMode=yes -o ConnectTimeout=15 "$HOST" \
-  "AGENTS_DIR=$REMOTE_AGENTS SINCE_JSON='$SINCE_JSON' bash -s" <<'REMOTE'
+  "AGENTS_DIR=$REMOTE_AGENTS SINCE_JSON='$SINCE_JSON' RUN_ID=$RUN_ID STATUS_CMD=$(printf '%q' "$STATUS_CMD") bash -s" <<'REMOTE'
 set -euo pipefail
 agents_dir="$(eval echo "$AGENTS_DIR")"
+run_dir="/tmp/andenken-openclaw.$RUN_ID"
+mkdir -m 700 "$run_dir"   # fails if it exists: one directory, one run
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 out="$tmp/openclaw-chunks.jsonl"
+man="$tmp/openclaw-manifest.jsonl"
 : > "$out"
+: > "$man"
+
+# Status first, once, for every configured agent. Best-effort: a failure is kept
+# as a receipt (exit code + last stderr lines) for the board to name, and it does
+# not stop the harvest. An agent directory OpenClaw does not configure is simply
+# absent from it (measured 2026-09-29: `claude` → `Unknown agent id "claude"`).
+STATUS_RC=skipped
+if [ -n "$STATUS_CMD" ]; then
+  if eval "$STATUS_CMD" > "$run_dir/status.json" 2> "$tmp/status.err"; then
+    STATUS_RC=0
+  else
+    STATUS_RC=$?
+  fi
+  tail -n 5 "$tmp/status.err" > "$run_dir/status.err" || true
+fi
 
 AGENTS_OK=0
 AGENTS_SKIPPED=""
@@ -179,6 +244,7 @@ except Exception:
   # must not print the same sentence.
   if ! sqlite3 -readonly "$db" "VACUUM INTO '$snap'" 2>/dev/null; then
     AGENTS_SKIPPED="$AGENTS_SKIPPED $agent"
+    printf '{"kind":"agent","agent":"%s","state":"vacuum-failed","run_id":"%s"}\n' "$agent" "$RUN_ID" >> "$man"
     continue
   fi
 
@@ -230,24 +296,81 @@ for r in (json.loads(raw) if raw else []):
         r["embedding"] = json.dumps(list(struct.unpack("<%dd" % (len(b) // 8), b)) if len(b) % 8 == 0 else [])
     print(json.dumps(r, ensure_ascii=False))' >> "$out"; then
     AGENTS_OK=$((AGENTS_OK + 1))
+    delta_ok=1
   else
     AGENTS_SKIPPED="$AGENTS_SKIPPED $agent"
+    delta_ok=0
   fi
+
+  # The manifest, from the snapshot the delta was just read from. Ids, not
+  # vectors. The agent line is printed only after every query succeeded, so a
+  # half-read manifest cannot pass for a complete one: any failure turns the
+  # whole agent into `manifest-failed`, and a missing table into `no-index` —
+  # which is not the same claim as "an index with zero rows".
+  python3 - "$agent" "$snap" "$delta_ok" "$RUN_ID" >> "$man" <<'MANIFEST' \
+    || printf '{"kind":"agent","agent":"%s","state":"manifest-failed","run_id":"%s"}\n' "$agent" "$RUN_ID" >> "$man"
+import hashlib, json, sqlite3, sys, time
+agent, snap, delta_ok, run_id = sys.argv[1], sys.argv[2], sys.argv[3] == "1", sys.argv[4]
+rec = {"kind": "agent", "agent": agent, "run_id": run_id, "snapshot_at": int(time.time() * 1000)}
+try:
+    con = sqlite3.connect(f"file:{snap}?mode=ro", uri=True)
+    tables = {r[0] for r in con.execute("select name from sqlite_master where type='table'")}
+    if "memory_index_chunks" not in tables:
+        rec.update(state="no-index", rows=0)
+        print(json.dumps(rec))
+        sys.exit(0)
+    rows = sorted(con.execute("select id, source, path, updated_at from memory_index_chunks").fetchall())
+    meta = {}
+    if "memory_index_meta" in tables:
+        for k, v in con.execute("select key, value from memory_index_meta"):
+            try:
+                v = json.loads(v)
+            except Exception:
+                pass
+            if k == "memory_index_meta_v1" and isinstance(v, dict):
+                v = {x: v.get(x) for x in ("model", "provider", "sources", "chunkingVersion", "vectorDims")}
+            meta[k] = v
+    revision = None
+    if "memory_index_state" in tables:
+        r = con.execute("select revision from memory_index_state where id = 1").fetchone()
+        revision = r[0] if r else None
+    rec.update(
+        state="ok" if delta_ok else "delta-failed",
+        rows=len(rows),
+        max_updated_at=max((r[3] for r in rows), default=None),
+        revision=revision,
+        meta=meta,
+        digest=hashlib.sha256("\n".join(r[0] for r in rows).encode()).hexdigest(),
+    )
+    lines = [json.dumps(rec, ensure_ascii=False)]
+    lines += [
+        json.dumps({"kind": "chunk", "agent": agent, "id": i, "source": s, "path": p, "updated_at": u}, ensure_ascii=False)
+        for i, s, p, u in rows
+    ]
+except Exception as e:
+    rec.update(state="manifest-failed", error=str(e)[:200])
+    lines = [json.dumps(rec)]
+print("\n".join(lines))
+MANIFEST
   rm -f "$snap"
 done
 
-gzip -c "$out" > "$tmp/openclaw-chunks.jsonl.gz"
-echo "REMOTE_ROWS=$(wc -l < "$out")"
+gzip -c "$man" > "$run_dir/manifest.jsonl.gz"
+ROWS_OUT="$(wc -l < "$out")"
+[ "$ROWS_OUT" = "0" ] || gzip -c "$out" > "$run_dir/openclaw-chunks.jsonl.gz"
+echo "REMOTE_ROWS=$ROWS_OUT"
 echo "REMOTE_AGENTS_OK=$AGENTS_OK"
 echo "REMOTE_AGENTS_SKIPPED=$AGENTS_SKIPPED"
-# Keep the artifact alive past the trap by moving it somewhere stable.
-mv "$tmp/openclaw-chunks.jsonl.gz" /tmp/openclaw-chunks.jsonl.gz
+echo "REMOTE_STATUS_RC=$STATUS_RC"
+echo "REMOTE_RUN_DIR=$run_dir"
 REMOTE
 )"
 
 ROWS="$(echo "$REMOTE_OUT" | sed -n 's/^REMOTE_ROWS=//p')"
 AGENTS_OK="$(echo "$REMOTE_OUT" | sed -n 's/^REMOTE_AGENTS_OK=//p')"
 SKIPPED="$(echo "$REMOTE_OUT" | sed -n 's/^REMOTE_AGENTS_SKIPPED=//p' | xargs || true)"
+STATUS_RC="$(echo "$REMOTE_OUT" | sed -n 's/^REMOTE_STATUS_RC=//p')"
+REMOTE_RUN_DIR="$(echo "$REMOTE_OUT" | sed -n 's/^REMOTE_RUN_DIR=//p')"
 
 echo "   agents read: ${AGENTS_OK:-0}${SKIPPED:+, skipped: $SKIPPED}"
 
@@ -256,6 +379,7 @@ echo "   agents read: ${AGENTS_OK:-0}${SKIPPED:+, skipped: $SKIPPED}"
 # being able to open a single database is a failure that happens to produce the
 # same row count.
 if [ "${AGENTS_OK:-0}" = "0" ]; then
+  [ -z "$REMOTE_RUN_DIR" ] || ssh -o BatchMode=yes "$HOST" "rm -rf '$REMOTE_RUN_DIR'" || true
   echo "❌ openclaw: no agent database could be read on $HOST"
   echo "   This is NOT 'nothing new' — the harvest did not happen. Check that"
   echo "   $REMOTE_AGENTS exists there and that sqlite3 can open it."
@@ -267,22 +391,50 @@ if [ -n "$SKIPPED" ]; then
   echo "   Their watermarks did not advance, so the next run retries them."
 fi
 
-if [ "${ROWS:-0}" = "0" ]; then
-  # Remove the previous run's artifact. Leaving it would let the importer that
-  # runs after this one in `sync:openclaw` re-import a snapshot the watermark has
-  # already consumed — reporting thousands of rows on a run that fetched none.
-  rm -f "$STAGE/openclaw-chunks.jsonl.gz" "$STAGE/host"
-  echo "✅ openclaw: nothing new since the watermark — no transfer"
-  exit 0
+if [ "${STATUS_RC:-}" != "0" ] && [ "${STATUS_RC:-}" != "skipped" ]; then
+  echo "⚠ openclaw memory status failed on $HOST (exit ${STATUS_RC:-?}) — index identity is unknown this run"
 fi
 
-rsync -az "$HOST:/tmp/openclaw-chunks.jsonl.gz" "$STAGE/openclaw-chunks.jsonl.gz"
-ssh -o BatchMode=yes "$HOST" 'rm -f /tmp/openclaw-chunks.jsonl.gz' || true
+# Fetch the whole run directory — manifest and status always, the chunks when
+# there are any — then remove it on the host. The manifest comes back even on a
+# run with no new rows: "nothing new" is exactly when the reconcile still has
+# something to say.
+INCOMING="$STAGE/incoming.$RUN_ID"
+rm -rf "$INCOMING"
+rsync -az "$HOST:$REMOTE_RUN_DIR/" "$INCOMING/"
+ssh -o BatchMode=yes "$HOST" "rm -rf '$REMOTE_RUN_DIR'" || true
+for f in manifest.jsonl.gz status.json status.err openclaw-chunks.jsonl.gz; do
+  if [ -f "$INCOMING/$f" ]; then mv "$INCOMING/$f" "$STAGE/$f"; fi
+done
+rm -rf "$INCOMING"
 
 # Which host these rows came from, for the importer that runs next. It is written
 # beside the artifact and not passed as an env var, because `--host` can
 # contradict ANDENKEN_OPENCLAW_HOST and the artifact is the thing that is true.
 printf '%s\n' "$HOST" > "$STAGE/host"
+
+# The run receipt. The importer copies runId into its own receipt, and the
+# reconcile refuses to compare anything whose run ids disagree.
+python3 - "$STAGE/run.json" "$RUN_ID" "$HOST" "$([ "$FULL" = 1 ] && echo full || echo delta)" \
+  "${ROWS:-0}" "${AGENTS_OK:-0}" "$SKIPPED" "${STATUS_RC:-}" <<'RUNJSON'
+import json, sys, time
+p, run_id, host, mode, rows, ok, skipped, status_rc = sys.argv[1:9]
+with open(p, "w") as f:
+    json.dump({
+        "runId": run_id, "host": host, "mode": mode, "exportedAt": int(time.time() * 1000),
+        "rows": int(rows), "agentsOk": int(ok), "agentsSkipped": skipped.split(),
+        "statusRc": status_rc,
+    }, f, indent=2)
+    f.write("\n")
+RUNJSON
+
+if [ "${ROWS:-0}" = "0" ]; then
+  # No chunks artifact exists (the previous one was cleared at start), so the
+  # importer that runs next in `sync:openclaw` cannot re-import a snapshot the
+  # watermark already consumed. Manifest and status did come back.
+  echo "✅ openclaw: nothing new since the watermark — manifest and status only"
+  exit 0
+fi
 
 echo "== staged: $STAGE/openclaw-chunks.jsonl.gz ($ROWS rows, $(du -h "$STAGE/openclaw-chunks.jsonl.gz" | cut -f1)) =="
 echo "   next: ./run.sh sync:openclaw imports it and advances the watermark"

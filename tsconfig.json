@@ -24,6 +24,7 @@
     "md-chunker.ts",
     "indexer.ts",
     "openclaw-importer.ts",
+    "openclaw-reconcile.ts",
     "md-search.ts"
   ],
   "exclude": ["test.ts", "benchmark.ts", "node_modules"]

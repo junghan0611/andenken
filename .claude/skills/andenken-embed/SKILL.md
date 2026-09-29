@@ -75,6 +75,31 @@ Reading the rows:
   so a refused run makes no ssh at all. Oracle receives only the authority's
   completed store through `sync:openclaw:oracle` — do not harvest there to
   "catch it up".
+- **Tier 4 prints two reports, and neither runs anything** (stages A + B,
+  2026-09-29). `sync:openclaw` is now export → **freshness board** → import →
+  **reconcile dry-run**; `./run.sh report:openclaw [--samples N]` re-prints both
+  from the staged run with no ssh. Read them, relay them, do not act on them:
+  - *Freshness board* — per agent: snapshot rows, newest `updated_at` (KST),
+    chunking version, `memory status` identity/dirty/files. `⛔ paid-rebuild` means
+    the index identity is mismatched: plain `openclaw memory index --agent X`
+    (no `--force`) still rebuilds the whole index and calls the provider — that
+    is a GLG approval, never a routine step. `🔄 incremental` is dirty with a valid
+    identity. `❌ read-failed` / `❓ status-unknown` are named failures, never
+    "fresh". `claude` shows `inactive`: it has a database but is not a configured
+    agent (`Unknown agent id "claude"`, measured 2026-09-29).
+  - *Reconcile dry-run* — held ids − upstream ids from the **same `VACUUM`
+    snapshot** as the delta, classified: `dream` (only `memory/dreaming/`),
+    `sup✓`/`sup?` (same path re-chunked; ✓ = every replacement already held),
+    `reset`, `del`, `renamed` (live transcript archived under a new name), and
+    `gone-m`/`gone-s`. It refuses outright unless run.json, manifest, host and
+    (when chunks were staged) the import receipt all name one run. Failed,
+    digest-mismatched or absent agents are never classified; mismatched identity,
+    unknown status and an empty upstream are **upstream holds**; a per-agent drop
+    above 20% (`ANDENKEN_OPENCLAW_RECONCILE_MAX_RATIO`) is a **mass-decrease hold**.
+    Nothing is deleted — stage C (a real prune of `dream` + `sup✓`) and the
+    retention policy for session archives wait for GLG.
+  - One harvest at a time: `data/.openclaw-harvest.lock`, and the remote work
+    directory is `/tmp/andenken-openclaw.<run id>`, removed after the fetch.
 - **Tier 3's oracle half is not automatic.** md's source is the garden checkout, so
   after `sync:md:oracle` the replica may still need `git -C ~/repos/gh/notes pull`
   **on oracle**. Sessions carries its corpus itself inside `--global`; md does not.

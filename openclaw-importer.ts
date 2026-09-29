@@ -204,6 +204,33 @@ export function getStagedHostPath(): string {
 	return path.join(getDataDir(), "openclaw-staging", "host");
 }
 
+/** `run.json`, written by export-openclaw.sh — the id that binds one export's artifacts. */
+export function getStagedRunPath(): string {
+	return path.join(getDataDir(), "openclaw-staging", "run.json");
+}
+
+export interface StagedRun {
+	runId: string;
+	host: string;
+	mode: string;
+	exportedAt: number;
+	rows: number;
+	agentsOk: number;
+	agentsSkipped: string[];
+	statusRc: string;
+}
+
+export function readStagedRun(): StagedRun | null {
+	const p = getStagedRunPath();
+	if (!fs.existsSync(p)) return null;
+	try {
+		const parsed = JSON.parse(fs.readFileSync(p, "utf-8"));
+		return parsed && typeof parsed.runId === "string" ? (parsed as StagedRun) : null;
+	} catch {
+		return null;
+	}
+}
+
 export function readStagedHost(): string | null {
 	const p = getStagedHostPath();
 	if (!fs.existsSync(p)) return null;
@@ -303,6 +330,12 @@ export function getImportReceiptPath(): string {
 export interface ImportReceipt {
 	at: string;
 	stagingMtimeMs: number;
+	/**
+	 * The export run this import folded (`run.json`). The reconcile dry-run
+	 * compares it with the manifest's run id: a manifest may only be read against
+	 * the import of the same run. Absent on receipts written before 2026-09-29.
+	 */
+	runId?: string | null;
 	seen: number;
 	imported: number;
 	unchanged: number;
@@ -440,6 +473,7 @@ export async function importOpenclaw(
 			imported: stats.imported,
 			unchanged: stats.unchanged,
 			host: host ?? null,
+			runId: readStagedRun()?.runId ?? null,
 		};
 		fs.writeFileSync(getImportReceiptPath(), JSON.stringify(receipt, null, 2) + "\n");
 	}

@@ -36,8 +36,15 @@
 - [ ] 재군음 사건당 전량 재전송 — 정확도는 지금이 최선(`updated_at` ⊃ id-diff ⊃ hash).
       2단계(원격 id manifest 후 로컬 diff)는 키가 id여야 하고 **provider 변경 실명을
       GLG가 승인**해야 한다
-- [ ] 편집된 파일의 옛 판 누적 — append-only의 의도된 귀결. **오늘 누적 0이라 아직
-      관측된 적 없는 비용이다.** 다음 편집 사건 뒤에 재고 정한다
+- [ ] 편집된 파일의 옛 판 누적 — append-only의 의도된 귀결. **2026-09-29 첫 관측:**
+      reconcile dry-run 기준 same-path superseded 861 (memory 342 + sessions 519), 전부
+      대체본 도착 확인(`sup✓`). 정리는 아래 단계 C에서
+- [ ] **단계 C (실제 prune) — GLG 판정 대기.** 단계 A+B(무삭제 신선도 판 + 같은 스냅샷
+      reconcile dry-run)는 2026-09-29 구현. 판정 대상 셋: (1) `dream` 861 + `sup✓` 861 prune
+      승인과 첫 회 38% 감소의 1회성 mass-decrease 허용, (2) 세션 아카이브 853
+      (reset 802 · deleted 28 · renamed 13 · gone 10) 보존/검색노출 정책, (3) bbot·glg·mini
+      chunking_version 재구축(유료) 승인. prune은 receipt·사전 백업·verify·compact·publish 순.
+      입력: `./run.sh report:openclaw --samples 3`
 - [ ] **드롭된 행은 워터마크를 못 밀어준다** (09-04 관측, 아직 무해). `mergeWatermark`는
       import된 행에만 걸리므로, 어느 agent의 최신 행이 boilerplate 드롭이면 그 agent는
       매 런 그 아래부터 다시 끌어온다. **09-04 덤프에서는 드롭 0이라 실제로 발생한 적이

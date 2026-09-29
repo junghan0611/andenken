@@ -470,6 +470,32 @@ export class VectorStore {
   }
 
   /**
+   * Every row's identity — id, source file, source kind — and nothing else.
+   *
+   * The openclaw reconcile dry-run needs the whole held id set to compare against
+   * an upstream manifest; `getStoredStamps` answers only for ids already in hand.
+   * Read-only, and it never selects `vector` or `text`: 6,774 rows scan in well
+   * under a second (measured 2026-09-29), which keeps the harvest's cheap path
+   * cheap.
+   */
+  async scanIdentities(): Promise<Array<{ id: string; sessionFile: string; source: string }>> {
+    await this.ensureInitialized();
+    if (!this.table) return [];
+    const count = await this.table.countRows();
+    if (count === 0) return [];
+    const rows = await this.table
+      .query()
+      .select(["id", "sessionFile", "source"])
+      .limit(count)
+      .toArray();
+    return rows.map((r) => ({
+      id: r.id as string,
+      sessionFile: (r.sessionFile as string) ?? "",
+      source: (r.source as string) ?? "",
+    }));
+  }
+
+  /**
    * Delete a batch of chunks by id.
    *
    * The openclaw harvest needs this and the file-scoped delete above will not do:
