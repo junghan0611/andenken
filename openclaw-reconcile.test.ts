@@ -77,13 +77,21 @@ function manifestLines(
 	return out;
 }
 
-function status(agents: Record<string, { identity?: string; code?: string; dirty?: boolean; chunks?: number }>): StatusParse {
+/**
+ * A status answer. `chunks` defaults to the agent's row count in `m` when a
+ * manifest is given — a status that agrees with its snapshot — and is omitted
+ * (null, which now holds) when neither is given.
+ */
+function status(
+	agents: Record<string, { identity?: string; code?: string; dirty?: boolean; chunks?: number }>,
+	m?: Manifest,
+): StatusParse {
 	return parseStatus(JSON.stringify(Object.entries(agents).map(([agentId, s]) => ({
 		agentId,
 		status: {
 			dirty: s.dirty ?? false,
 			files: 1,
-			chunks: s.chunks,
+			chunks: s.chunks ?? m?.agents.get(agentId)?.rows,
 			sourceCounts: [{ source: "memory", files: 1, eligible: 1 }],
 			custom: { indexIdentity: { status: s.identity ?? "valid", code: s.code } },
 		},
@@ -193,7 +201,7 @@ console.log("\n=== read failure on 1 of 7 agents ===");
 	});
 	const m = parseManifestLines(lines);
 	const hs = Object.keys(ok7).flatMap((a) => held(a, [["u", "memory", "MEMORY.md"], ["gone", "memory", "memory/dreaming/x.md"]]));
-	const st = status(Object.fromEntries(Object.keys(ok7).map((k) => [k, {}])));
+	const st = status(Object.fromEntries(Object.keys(ok7).map((k) => [k, {}])), m);
 	const rep = reconcile({ held: hs, manifest: m, status: st, statusPost: st, binding: { ok: true }, run, maxRatio: 0.9 });
 	const c = rep.agents.find((a) => a.agent === "c")!;
 	ok("the failed agent is not classified", c.guard === "not-classified:vacuum-failed" && c.gone.size === 0);
@@ -216,7 +224,7 @@ console.log("\n=== zero rows, no index, agents that vanish ===");
 {
 	const m = parseManifestLines(manifestLines({ a: {}, b: { state: "no-index" } }));
 	const hs = [...held("a", [["1", "memory", "MEMORY.md"], ["2", "memory", "MEMORY.md"]]), ...held("b", [["1", "memory", "M"]]), ...held("z", [["1", "memory", "M"]])];
-	const rep = reconcile({ held: hs, manifest: m, status: status({ a: {}, b: {} }), statusPost: status({ a: {}, b: {} }), binding: { ok: true }, run });
+	const rep = reconcile({ held: hs, manifest: m, status: status({ a: {}, b: {} }, m), statusPost: status({ a: {}, b: {} }, m), binding: { ok: true }, run });
 	const a = rep.agents.find((x) => x.agent === "a")!;
 	ok("a 0-row upstream with held rows is flagged upstream-empty", a.flags.some((f) => f.startsWith("upstream-empty")));
 	ok("…which holds it as an upstream hold, not a prune", holdKind(a) === "upstream");
@@ -233,7 +241,7 @@ console.log("\n=== paused identity and a failed status call ===");
 		d: { chunks: [{ id: "n", source: "memory", path: "MEMORY.md" }] },
 		f: { chunks: [{ id: "n", source: "memory", path: "MEMORY.md" }] },
 	}));
-	const st = status({ p: { identity: "mismatched", code: "chunking_version", dirty: true }, d: { dirty: true }, f: {} });
+	const st = status({ p: { identity: "mismatched", code: "chunking_version", dirty: true }, d: { dirty: true }, f: {} }, m);
 	const fr = freshnessRows(m, st);
 	const p = fr.find((r) => r.agent === "p")!;
 	ok("mismatched identity → paid-rebuild, even though it is also dirty", p.verdict === "paid-rebuild");
@@ -269,15 +277,15 @@ console.log("\n=== the 38% decrease ===");
 	const upChunks = Array.from({ length: 62 }, (_, i) => ({ id: `k${i}`, source: "memory", path: "MEMORY.md" }));
 	const m = parseManifestLines(manifestLines({ a: { chunks: upChunks } }));
 	const hs = held("a", Array.from({ length: 100 }, (_, i) => [`k${i}`, "memory", i < 62 ? "MEMORY.md" : "memory/dreaming/x.md"] as [string, string, string]));
-	const rep = reconcile({ held: hs, manifest: m, status: status({ a: {} }), statusPost: status({ a: {} }), binding: { ok: true }, run });
+	const rep = reconcile({ held: hs, manifest: m, status: status({ a: {} }, m), statusPost: status({ a: {} }, m), binding: { ok: true }, run });
 	const a = rep.agents[0];
 	ok("38% gone trips the default 20% threshold", a.flags.some((f) => f.startsWith("mass-decrease 38%")));
 	ok("…as a mass-decrease hold, distinct from an upstream hold", holdKind(a) === "mass-decrease");
 	ok("…and the summary counts it apart", /behind mass-decrease only 38/.test(renderReconcile(rep, 0)));
-	const loose = reconcile({ held: hs, manifest: m, status: status({ a: {} }), statusPost: status({ a: {} }), binding: { ok: true }, run, maxRatio: 0.5 });
+	const loose = reconcile({ held: hs, manifest: m, status: status({ a: {} }, m), statusPost: status({ a: {} }, m), binding: { ok: true }, run, maxRatio: 0.5 });
 	ok("under the threshold the same rows are clear of every guard", holdKind(loose.agents[0]) === "none" && /clear of every guard 38/.test(renderReconcile(loose, 0)));
 	ok("retry: the dry-run is pure — same input, same report",
-		renderReconcile(reconcile({ held: hs, manifest: m, status: status({ a: {} }), statusPost: status({ a: {} }), binding: { ok: true }, run }), 3) === renderReconcile(rep, 3));
+		renderReconcile(reconcile({ held: hs, manifest: m, status: status({ a: {} }, m), statusPost: status({ a: {} }, m), binding: { ok: true }, run }), 3) === renderReconcile(rep, 3));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -287,7 +295,7 @@ console.log("\n=== same id, new updated_at ===");
 	// upstream, so it is NOT a reconcile candidate — and the importer still
 	// rewrites it, because the stamp moved.
 	const m = parseManifestLines(manifestLines({ a: { chunks: [{ id: "same", source: "memory", path: "M", updated_at: 99 }] } }));
-	const rep = reconcile({ held: held("a", [["same", "memory", "M"]]), manifest: m, status: status({ a: {} }), statusPost: status({ a: {} }), binding: { ok: true }, run });
+	const rep = reconcile({ held: held("a", [["same", "memory", "M"]]), manifest: m, status: status({ a: {} }, m), statusPost: status({ a: {} }, m), binding: { ok: true }, run });
 	ok("a same-id row with a new stamp is held ∩ upstream, not gone", rep.agents[0].both === 1 && rep.agents[0].gone.size === 0);
 	const chunk = { id: "a:same", timestamp: new Date(99).toISOString() } as PreparedChunk;
 	ok("…and the unchanged-skip does not skip it", partitionByChange([chunk], new Map([["a:same", new Date(1).toISOString()]])).write.length === 1);
@@ -304,18 +312,18 @@ console.log("\n=== re-review holes (sol 2026-09-29) ===");
 		reconcile({ held: hs, manifest: m, status: st, statusPost: post, binding: { ok: true }, run, maxRatio: 0.9 });
 
 	// 1. status answered, but not for this agent
-	const r1 = clear(status({ b: {} }));
+	const r1 = clear(status({ b: {} }, m));
 	const a1 = r1.agents.find((x) => x.agent === "a")!;
 	ok("status parsed but the agent is missing → status-missing hold", a1.flags.includes("status-missing: hold") && holdKind(a1) === "upstream");
 	ok("…so its sup✓ is NOT counted clear of every guard", /clear of every guard 1,/.test(renderReconcile(r1, 0)));
 	ok("the agent that status did answer for stays clear", holdKind(r1.agents.find((x) => x.agent === "b")!) === "none");
 
 	// 1b. dirty is a hold, not a flag
-	const a2 = clear(status({ a: { dirty: true }, b: {} })).agents.find((x) => x.agent === "a")!;
+	const a2 = clear(status({ a: { dirty: true }, b: {} }, m)).agents.find((x) => x.agent === "a")!;
 	ok("valid + dirty → hold (upstream catch-up pending)", holdKind(a2) === "upstream" && a2.flags.some((f) => f.startsWith("dirty")));
 
 	// 3. generation bracket
-	const r3 = clear(status({ a: {}, b: {} }), status({ a: { identity: "mismatched", code: "chunking_version" }, b: {} }));
+	const r3 = clear(status({ a: {}, b: {} }, m), status({ a: { identity: "mismatched", code: "chunking_version" }, b: {} }, m));
 	ok("identity moved between the two status calls → generation-unbound hold",
 		r3.agents.find((x) => x.agent === "a")!.flags.some((f) => f.startsWith("generation-unbound (identity moved")));
 	const r4 = clear(status({ a: { chunks: 1 }, b: { chunks: 1 } }), status({ a: { chunks: 9 }, b: { chunks: 1 } }));
@@ -324,10 +332,12 @@ console.log("\n=== re-review holes (sol 2026-09-29) ===");
 	const r5 = clear(status({ a: { chunks: 7 }, b: { chunks: 1 } }));
 	ok("snapshot rows ≠ status chunks (both calls agree) → hold",
 		r5.agents.find((x) => x.agent === "a")!.flags.some((f) => /snapshot rows 1 ≠ status chunks 7/.test(f)));
+	ok("status without a chunk count binds nothing (sol third check)",
+		generationUnbound("a", m.agents.get("a"), status({ a: {} }), status({ a: {} })) === "status chunk count missing");
 	ok("generationUnbound: post failed → status-unknown",
-		generationUnbound("a", m.agents.get("a"), status({ a: {} }), parseStatus(null)) === "status-unknown");
+		generationUnbound("a", m.agents.get("a"), status({ a: {} }, m), parseStatus(null)) === "status-unknown");
 	ok("board: an unbound agent is not reported fresh",
-		freshnessRows(m, status({ a: {}, b: {} }), status({ a: { dirty: true }, b: {} })).find((r) => r.agent === "a")!.verdict === "unbound");
+		freshnessRows(m, status({ a: {}, b: {} }, m), status({ a: { dirty: true }, b: {} }, m)).find((r) => r.agent === "a")!.verdict === "unbound");
 
 	// status structure
 	ok("a status entry without agentId fails the whole parse", !parseStatus(JSON.stringify([{ status: {} }])).ok);
@@ -360,12 +370,12 @@ console.log("\n=== source vs index (memory) ===");
 	const src = (agent: string, t: number | null) =>
 		JSON.stringify({ kind: "source", agent, run_id: RUN, source: "memory", files: 3, newest_mtime: t, newest_path: "memory/new.md" });
 	const m = parseManifestLines([...lines, src("a", 150 * H), src("b", 100 * H + 60_000), src("c", null)]);
-	const fr = freshnessRows(m, status({ a: {}, b: {}, c: {} }));
+	const fr = freshnessRows(m, status({ a: {}, b: {}, c: {} }, m));
 	const a = fr.find((r) => r.agent === "a")!;
 	ok("clean by status but a memory file 50h newer than the index → source-ahead", a.verdict === "source-ahead" && /2d newer/.test(a.prescription));
 	ok("within the 1h tolerance → fresh", fr.find((r) => r.agent === "b")!.verdict === "fresh");
 	ok("unknown source side → no lag claimed", fr.find((r) => r.agent === "c")!.memoryLagMs === null);
-	const pr = freshnessRows(m, status({ a: { identity: "mismatched", code: "chunking_version" }, b: {}, c: {} })).find((r) => r.agent === "a")!;
+	const pr = freshnessRows(m, status({ a: { identity: "mismatched", code: "chunking_version" }, b: {}, c: {} }, m)).find((r) => r.agent === "a")!;
 	ok("a paid-rebuild agent keeps its verdict and carries the lag as a note", pr.verdict === "paid-rebuild" && /memory source ahead of index by 2d/.test(pr.prescription));
 }
 

@@ -339,8 +339,13 @@ Three rules hold this track:
    nothing else moves. Since 2026-09-29 the harvest also brings a full id
    manifest from the same `VACUUM` snapshot and prints a reconcile **dry-run**
    (`openclaw-reconcile.ts`) — that report is read-only and does not relax this
-   rule. Any real prune is a separate, GLG-approved step, limited to rows whose
-   upstream replacement is proven to have arrived.
+   rule. The one exception is `./run.sh prune:openclaw --apply`
+   (`openclaw-prune.ts`, GLG ruling 2026-09-29): it deletes ONLY `dreaming` and
+   `superseded-confirmed` rows, only for agents that clear every reconcile hold,
+   only after re-reading the live upstream (revision, rows, id digest equal to
+   the run's snapshot) and only after backing the rows up whole with a receipt.
+   Session archives (reset / deleted / renamed / path-gone) are never pruned —
+   some have no transcript left upstream, so ours may be the only copy.
 2. **`openclaw.lance` is private-only** (authority plus its query replica). It must never reach the md
    track by any path. The line here is **private versus public**, and it is the only
    line: md is the axis that gets exported to the public garden, and this track

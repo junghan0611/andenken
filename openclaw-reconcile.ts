@@ -148,6 +148,8 @@ export interface StatusEntry {
 	identity: { status: string; code?: string; reason?: string };
 	files: number;
 	chunks: number | null;
+	/** As the gateway container sees it — the prune maps it onto the host. */
+	workspaceDir: string | null;
 	totalFiles: number | null;
 	sources: Array<{ source: string; files: number; eligible: number | null }>;
 }
@@ -185,6 +187,7 @@ export function parseStatus(raw: string | null, errTail = ""): StatusParse {
 			identity: { status: id.status ?? "unknown", code: id.code, reason: id.reason },
 			files: s.files ?? 0,
 			chunks: typeof s.chunks === "number" ? s.chunks : null,
+			workspaceDir: typeof s.workspaceDir === "string" ? s.workspaceDir : null,
 			totalFiles: r.scan?.totalFiles ?? null,
 			sources: (s.sourceCounts ?? []).map((c: any) => ({
 				source: c.source,
@@ -214,8 +217,11 @@ export function generationUnbound(
 	if (!a || !b) return "status-missing";
 	if (a.identity.status !== b.identity.status || a.identity.code !== b.identity.code) return "identity moved during export";
 	if (a.dirty !== b.dirty) return "dirty moved during export";
+	// A status without a chunk count cannot vouch for the snapshot's row count, so
+	// it binds nothing (sol third check, 2026-09-29: null used to skip the test).
+	if (a.chunks === null || b.chunks === null) return "status chunk count missing";
 	if (a.chunks !== b.chunks) return `chunks moved during export (${a.chunks}→${b.chunks})`;
-	if (m && m.state === "ok" && a.chunks !== null && a.chunks !== m.rows) {
+	if (m && m.state === "ok" && a.chunks !== m.rows) {
 		return `snapshot rows ${m.rows} ≠ status chunks ${a.chunks}`;
 	}
 	return null;
@@ -733,6 +739,44 @@ export function readStagedStatus(which: "status" | "status-post" = "status"): St
 	return parseStatus(fs.existsSync(p) ? fs.readFileSync(p, "utf-8") : null, err);
 }
 
+/** The per-agent decrease above which reconcile reports a mass-decrease hold. */
+export const DEFAULT_MAX_RATIO = 0.2;
+
+/**
+ * Everything the dry-run (and the prune plan built on it) reads, from the staged
+ * run and the local store, in one place. Read-only.
+ */
+export async function loadStagedReport(maxRatio: number = DEFAULT_MAX_RATIO): Promise<{
+	run: StagedRun | null;
+	manifest: Manifest;
+	status: StatusParse;
+	statusPost: StatusParse;
+	binding: BindingResult;
+	report: ReconcileReport;
+}> {
+	const run = readStagedRun();
+	const manifest = readStagedManifest();
+	const status = readStagedStatus("status");
+	const statusPost = readStagedStatus("status-post");
+	const binding = checkBinding({
+		run,
+		manifest,
+		receipt: readImportReceipt(),
+		chunksStaged: fs.existsSync(getStagingPath()),
+		watermarkHost: readWatermarkHost(),
+	});
+	let held: HeldRow[] = [];
+	if (binding.ok) {
+		// readOnly: a missing openclaw.lance is an absent axis, not a table to create.
+		const store = new VectorStore(getOpenclawDbPath(), OPENCLAW_DIM, { readOnly: true });
+		held = await store.scanIdentities();
+		await store.close();
+	}
+	const m = manifest ?? emptyManifest();
+	const report = reconcile({ held, manifest: m, status, statusPost, binding, run, maxRatio });
+	return { run, manifest: m, status, statusPost, binding, report };
+}
+
 async function main(): Promise<void> {
 	const [cmd = "reconcile", ...rest] = process.argv.slice(2);
 	const si = rest.indexOf("--samples");
@@ -752,22 +796,8 @@ async function main(): Promise<void> {
 	}
 	if (cmd !== "reconcile") throw new Error(`unknown subcommand '${cmd}' (freshness | reconcile)`);
 
-	const binding = checkBinding({
-		run,
-		manifest,
-		receipt: readImportReceipt(),
-		chunksStaged: fs.existsSync(getStagingPath()),
-		watermarkHost: readWatermarkHost(),
-	});
-	let held: HeldRow[] = [];
-	if (binding.ok) {
-		// readOnly: a missing openclaw.lance is an absent axis, not a table to create.
-		const store = new VectorStore(getOpenclawDbPath(), OPENCLAW_DIM, { readOnly: true });
-		held = await store.scanIdentities();
-		await store.close();
-	}
-	const maxRatio = Number(process.env.ANDENKEN_OPENCLAW_RECONCILE_MAX_RATIO ?? "0.2");
-	const report = reconcile({ held, manifest: manifest ?? emptyManifest(), status, statusPost, binding, run, maxRatio });
+	const maxRatio = Number(process.env.ANDENKEN_OPENCLAW_RECONCILE_MAX_RATIO ?? String(DEFAULT_MAX_RATIO));
+	const { report, binding } = await loadStagedReport(maxRatio);
 	console.log(renderReconcile(report, samples));
 	if (!binding.ok) process.exit(1);
 }

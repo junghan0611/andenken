@@ -39,7 +39,7 @@
 - [ ] 편집된 파일의 옛 판 누적 — append-only의 의도된 귀결. **2026-09-29 첫 관측:**
       reconcile dry-run 기준 same-path superseded 861 (memory 342 + sessions 519), 전부
       대체본 도착 확인(`sup✓`). 정리는 아래 단계 C에서
-- [ ] **단계 C (실제 prune) — GLG 판정 대기.** 단계 A+B(무삭제 신선도 판 + 같은 스냅샷
+- [ ] **단계 C (실제 prune) — 구현됨(2026-09-29), `--apply`는 재구축 후 조정자가 실행.** GLG 판정: dream + sup✓만, 세션 아카이브 삭제 금지 유지, 3봇 재구축 승인. 아래는 판정 전 기록. 단계 A+B(무삭제 신선도 판 + 같은 스냅샷
       reconcile dry-run)는 2026-09-29 구현. 판정 대상 셋: (1) `dream` 861 + `sup✓` 861 prune
       승인과 첫 회 38% 감소의 1회성 mass-decrease 허용, (2) 세션 아카이브 853
       (reset 802 · deleted 28 · renamed 13 · gone 10) 보존/검색노출 정책, (3) bbot·glg·mini

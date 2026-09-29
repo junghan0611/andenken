@@ -42,6 +42,17 @@ if [ "$DEVICE" != "$AUTHORITY" ]; then
   exit 1
 fi
 
+# Same lock as the harvest and the prune: a publish must never ship a store
+# that another command is halfway through changing. `prune:openclaw --publish`
+# already holds it and says so with ANDENKEN_OPENCLAW_LOCK_HELD.
+if [ "${ANDENKEN_OPENCLAW_LOCK_HELD:-0}" != "1" ] && command -v flock >/dev/null 2>&1; then
+  exec 8>data/.openclaw-harvest.lock
+  if ! flock -n 8; then
+    echo "❌ openclaw publish refused: a harvest/prune is running (lock: data/.openclaw-harvest.lock)" >&2
+    exit 1
+  fi
+fi
+
 if [ ! -d data/openclaw.lance ]; then
   echo "❌ data/openclaw.lance not found. Run local ./run.sh sync:openclaw first." >&2
   exit 1

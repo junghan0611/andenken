@@ -104,8 +104,18 @@ Reading the rows:
     holds**; `sup✓` requires every replacement at the same (source, path) to be held
     with this snapshot's stamp; a per-agent drop
     above 20% (`ANDENKEN_OPENCLAW_RECONCILE_MAX_RATIO`) is a **mass-decrease hold**.
-    Nothing is deleted — stage C (a real prune of `dream` + `sup✓`) and the
-    retention policy for session archives wait for GLG.
+    The dry-run deletes nothing.
+  - *Prune (stage C)* — `./run.sh prune:openclaw` (dry-run) / `--apply`. GLG
+    approved `dream` + `sup✓` only (2026-09-29); session archives are never
+    pruned. An agent is pruned only if it clears every hold; a >20% drop needs
+    `--allow-mass-decrease` on that invocation (no env knob). Right before
+    deleting it re-reads the live upstream read-only — revision, rows and id
+    digest must equal the run's snapshot — and keeps any dreaming row whose file
+    is still in the workspace. Rows are backed up whole (float32 vectors) to
+    `data/openclaw-prune/<ts>-<run>/` with `plan.json` + `receipt.json`; undo is
+    `--restore <dir>`. `--publish` runs verify + `sync:openclaw:oracle` inside the
+    same lock. Order after an apply: `compact openclaw` → `verify openclaw` →
+    `sync:openclaw:oracle` (or `--publish`, then compact later).
   - One harvest at a time: `data/.openclaw-harvest.lock` (also taken by
     `report:openclaw`), and the remote work directory is
     `/tmp/andenken-openclaw.<run id>`, removed after the fetch. Each agent's delta

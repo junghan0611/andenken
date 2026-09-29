@@ -25,6 +25,7 @@
     "indexer.ts",
     "openclaw-importer.ts",
     "openclaw-reconcile.ts",
+    "openclaw-prune.ts",
     "md-search.ts"
   ],
   "exclude": ["test.ts", "benchmark.ts", "node_modules"]

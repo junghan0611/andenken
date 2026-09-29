@@ -76,6 +76,14 @@ Usage: ./run.sh <command> [args]
                               never mirrors their deletes. The board and the dry-run
                               only report (paid rebuilds / prune candidates are
                               prescriptions, never run). One harvest at a time (flock)
+  prune:openclaw [flags]      Stage C: delete ONLY dreaming + superseded-confirmed rows
+                              from openclaw.lance. Dry-run unless --apply. Every agent
+                              must clear all reconcile holds; live upstream is re-read
+                              (revision + id digest) right before deleting; rows are
+                              backed up whole with a receipt under data/openclaw-prune/.
+                              flags: --apply --allow-mass-decrease --offline (dry-run only)
+                                     --publish (after apply: verify + sync:openclaw:oracle,
+                                     same lock) --restore <prune dir>
   report:openclaw [--samples N]
                               Re-print freshness board + reconcile dry-run from the
                               staged run (no ssh, no write, API 0)
@@ -125,7 +133,7 @@ Usage: ./run.sh <command> [args]
   test:filename               Fixture tests for pi corpus admission by filename (API 0)
   test:corpus                 Fixture tests for corpus-backed device discovery (API 0)
   test:split                  Fixture tests for long-turn embedding split (API 0)
-  test:openclaw               Fixture tests for the OpenClaw harvest policy (API 0)
+  test:openclaw               Fixture tests for the OpenClaw harvest, reconcile and prune (API 0)
   test:absent                 Fixture tests for the absent-axis invariant — a read never creates (API 0)
   test:parity                 Credential regex parity: python ↔ typescript (API 0)
 
@@ -257,7 +265,8 @@ case "${1:-help}" in
     cd "$SCRIPT_DIR" && pnpm exec tsx session-split.test.ts ;;
   test:openclaw)
     load_env; cd "$SCRIPT_DIR" && pnpm exec tsx openclaw-import.test.ts \
-      && pnpm exec tsx openclaw-reconcile.test.ts ;;
+      && pnpm exec tsx openclaw-reconcile.test.ts \
+      && pnpm exec tsx openclaw-prune.test.ts ;;
   test:absent)
     cd "$SCRIPT_DIR" && pnpm exec tsx axis-absent.test.ts ;;
   test:parity)
@@ -375,6 +384,26 @@ case "${1:-help}" in
       && pnpm exec tsx openclaw-reconcile.ts freshness \
       && pnpm exec tsx openclaw-importer.ts \
       && pnpm exec tsx openclaw-reconcile.ts reconcile --samples 0 ;;
+  prune:openclaw)
+    # One lock from plan to publish: no harvest may restage, and no other prune or
+    # publish may run, between the plan, the delete and the replica push.
+    shift; load_env; cd "$SCRIPT_DIR" || exit 1
+    if command -v flock >/dev/null 2>&1; then
+      exec 8>data/.openclaw-harvest.lock
+      flock -n 8 || { echo "❌ an openclaw harvest/prune/publish is running (lock: data/.openclaw-harvest.lock)" >&2; exit 1; }
+      export ANDENKEN_OPENCLAW_LOCK_HELD=1
+    fi
+    PRUNE_ARGS=(); PUBLISH=0
+    for a in "$@"; do
+      if [ "$a" = "--publish" ]; then PUBLISH=1; else PRUNE_ARGS+=("$a"); fi
+    done
+    pnpm exec tsx openclaw-prune.ts "${PRUNE_ARGS[@]}" || exit $?
+    if [ "$PUBLISH" = "1" ]; then
+      case " ${PRUNE_ARGS[*]} " in
+        *" --apply "*) ./run.sh verify openclaw && bash scripts/sync-openclaw-to-oracle.sh ;;
+        *) echo "--publish ignored: nothing is published after a dry run" ;;
+      esac
+    fi ;;
   report:openclaw)
     # Same lock as the harvest: a report read while an export is refilling the
     # staging directory would mix two runs (the binding check would refuse, but

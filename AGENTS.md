@@ -111,6 +111,9 @@ write-buffer.ts         Single-writer serialization
 doctor.ts               Operator triage dispatch
 doctor-md.ts            MD production triage — provider / DB / manifest / gap
 doctor-org.ts           Org triage (upstream R&D only)
+openclaw-importer.ts    OpenClaw harvest import (append-only, unchanged-skip)
+openclaw-reconcile.ts   OpenClaw freshness board + reconcile dry-run (read-only)
+openclaw-prune.ts       OpenClaw stage-C prune: dream + sup✓ only, backup + receipt
 index.ts                pi extension entry
 cli.ts                  Claude Code / OpenCode CLI entry
 ```

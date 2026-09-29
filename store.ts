@@ -497,6 +497,28 @@ export class VectorStore {
   }
 
   /**
+   * Whole rows — vector included — for a set of ids. The openclaw prune backs up
+   * exactly what it is about to delete with this, so a restore re-adds the same
+   * bytes rather than a re-derived approximation. Batched: one IN-list per 500.
+   */
+  async getRowsByIds(ids: string[]): Promise<Array<Record<string, unknown>>> {
+    await this.ensureInitialized();
+    if (!this.table || ids.length === 0) return [];
+    const out: Array<Record<string, unknown>> = [];
+    for (let i = 0; i < ids.length; i += 500) {
+      const part = ids.slice(i, i + 500);
+      const quoted = part.map((x) => `'${x.replace(/'/g, "''")}'`).join(", ");
+      const rows = await this.table
+        .query()
+        .where(`\`id\` IN (${quoted})`)
+        .limit(part.length)
+        .toArray();
+      out.push(...(rows as Array<Record<string, unknown>>));
+    }
+    return out;
+  }
+
+  /**
    * Delete a batch of chunks by id.
    *
    * The openclaw harvest needs this and the file-scoped delete above will not do:
