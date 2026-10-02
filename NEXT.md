@@ -7,12 +7,34 @@
 - [x] **1. 세션 코퍼스 통합** — 평생 폴더 + device roster (`v2026.9.3`, #10·#11 닫힘)
 - [x] **2. 2면 SSOT 동기화** — thinkpad↔oracle, 인덱스·매니페스트·코퍼스 한 묶음
 - [x] **3. OpenClaw 면 회수·사설 복제** ([#13](https://github.com/junghan0611/andenken/issues/13)) — authority harvest → Oracle private replica, 5,935 chunks / 1 fragment / API 0 검증 (`v2026.9.16`)
-- [ ] **4. 근본 정리** ← CURRENT: 위 §근본 1·2·3 — 오늘 정정 16건이 가리킨 자리
-- [ ] **5. 회수 품질** ([#12](https://github.com/junghan0611/andenken/issues/12)) ← PAUSED: 골든 세션 분기 추출이 선행(백로그 4번)
+- [ ] **4. 근본 정리** ← PAUSED: 10-02 GLG가 5를 먼저 잡았다. 재개할 자리는 아래 §근본 정리 (RAIL 4)
+- [ ] **5. 세션 축 입장 경계 — GLG↔에이전트 대화만 기억이 된다** ← CURRENT: 입장 규칙 코드화 + API 0 dry-run
+- [ ] **6. 회수 품질** ([#12](https://github.com/junghan0611/andenken/issues/12)) ← PAUSED: 골든 세션 분기 추출이 선행(백로그 4번)
 
-현재 좌표: 3 완료(`v2026.9.16`으로 끊음) → 4 진행(§sorge#1 반환분 닫힘, MD 축 freshness 남음) → 5 보류
+현재 좌표: 3 완료(`v2026.9.16`) → 4 보류(MD 축 freshness 남음) → **5 진행** → 6 보류
 
-# NOW — 근본 정리 (오늘 정정 16건이 가리킨 자리)
+# NOW — 세션 축 입장 경계 (2026-10-02 GLG)
+
+- **Stem**: GLG 원칙 — *"남아야 하는 것은 나와 에이전트 사이의 대화여야 돼. 그래야 자율
+  에이전트로 갈 때 decision-gate에서 정보의 의미가 견고해질 거야."* / *"웬만하면 의미가 오간
+  것들만 기억으로 남기자."* 하네스 주입(17.9%)과
+  에이전트↔에이전트(5.0%)를 **둘 다 지운다**. **전체 재임베딩은 하지 않는다**(GLG: 지금 시간이 없다).
+  빼기만 하면 되므로 API 0이다. 측정과 규칙은 아래 §세션 입장 경계.
+- **Next**: (1) 입장 규칙을 코드로 옮긴다 — `session-sanitize.ts`(줄 단위 drop) +
+  `extractSessionChunks` 루프(수신자 상태) + 테스트 → (2) `./run.sh`에 dry-run 항목을 둔다:
+  현 DB에서 규칙에 걸리는 id 집합·종류별 수·샘플, API 0 → (3) 백업 → id delete →
+  매니페스트 chunks 재계산 → compact → `verify sessions` → Oracle publish(DB·매니페스트
+  한 묶음, INVARIANT 6.6) → (4) acceptance before/after.
+- **Verify**: dry-run 종류별 수가 아래 측정표와 맞아야 한다(재추출 100,282 = 매니페스트 =
+  DB). 삭제 뒤에는 새 규칙으로 재추출한 합 = DB 행 수. "commit 복사본 764개가 사라지면
+  검색이 좋아진다"는 **아직 안 잰 가설**이다 — (4)에서 잰다.
+- **Blocker**: (1)(2)는 없음. (3) 삭제는 GLG가 원칙으로 승인했다(10-02). 실행 시점은
+  dry-run 수치를 GLG에게 보인 뒤 정한다.
+- **Do not touch**: 세션 단위 제외 — 형제 616 파일 중 **405에 GLG가 직접 친 턴**이 있다.
+  compaction / CC continuation 요약은 남긴다. 슬래시 래퍼는 벗기되 args(GLG의 말)는 남긴다.
+  full rebuild 금지.
+
+## 근본 정리 (RAIL 4, PAUSED) — 재개할 때의 자리
 
 - **Current**: tier 4는 authority harvest + Oracle private publish로 서서 `v2026.9.16`으로
   끊었다(09-10 5,935 chunks / 1 fragment). 닫힌 서술은 CHANGELOG에 있다.
@@ -57,6 +79,33 @@
       매 런 그 아래부터 다시 끌어온다. **09-04 덤프에서는 드롭 0이라 실제로 발생한 적이
       없다.** 커서 의미를 "받아들인 행"에서 "처리한 행"으로 바꾸는 문제라, 관측되기
       전에 고치면 관측에서 규칙을 발명하는 B형이 된다 — 발생하면 그때 잰다
+
+## 세션 입장 경계 — 측정과 규칙 (2026-10-02)
+
+agent-config 코디네이터(`20261002T141212-423c18`)가 넘긴 인계를 재측정한 결과다. 매니페스트 2,597 파일을
+실제 `extractSessionChunks`로 재추출했다. 재추출 합 100,282 = 매니페스트 합 = DB `Total` [측정].
+
+| 턴 출처 | chunks | % | 처분 |
+|---|---|---|---|
+| GLG 발화 + GLG에게 한 답 (형제 창에 GLG가 직접 친 1,269 + 답 3,877 포함) | 75,398 | 75.2 | 남김 |
+| 하네스 주입 | 17,925 | 17.9 | drop |
+| 에이전트↔에이전트 (entwurf 기동 브리프 1,301 + 코디네이터에게 한 답 3,739) | 5,040 | 5.0 | drop |
+| compaction / CC continuation | 279 | 0.3 | 남김 |
+| 첫 user 턴이 슬래시/skill인 세션의 assistant | 1,640 | 1.6 | 남김 (GLG가 실행한 것) |
+
+- **하네스 주입 내역**: CC `Base directory for this skill:` 8,291 (commit 764회 · session-recap 475회,
+  75개 skill) · `<task-notification>` 5,619 · 슬래시 래퍼 1,399 · `<local-command` 1,244 · pi
+  `<skill name=` 803 · `[Request interrupted` 432 · `/loop` 129 · `<system-reminder>` 8. 월별 비중은
+  05 5.4% → 07 25.6% → 09 21.0%. 형제 작업이 늘수록 도어벨도 함께 는다.
+- **수신자 규칙**: user 턴 = {human | agent-brief(`You are a fresh visible citizen that entwurf`) |
+  harness}. assistant 턴은 직전 human/agent-brief 턴의 출처를 수신자로 물려받는다. harness 턴은
+  수신자를 바꾸지 않는다. 에이전트 메시지는 기동 브리프만 빼고 이미 구조적으로 빠져 있다(pi는
+  `custom_message/entwurf-message`를 `parsePiLine`이 무시하고, CC inbox는 tool_result라 버려진다).
+- **A(200KB 바닥을 추출 문자로)는 기각.** 형제 전사는 바닥을 통과해도 4~12 chunk만 넣는다(5~22 문자/KB,
+  코디네이터는 334). 바닥은 축적을 다루는 손잡이가 아니다.
+- **증분 경로는 저절로 따라온다**: 바뀐 파일은 `deleteByFile` 뒤에 재삽입된다(`indexer.ts:625`). 그래서 새 규칙을
+  넣으면 그 뒤로 건드려진 파일은 스스로 정리된다. 한 번도 다시 건드려지지 않은 파일만 일회성 delete가 필요하다.
+- 측정 스크립트는 `/tmp/andk/*.mts`(휘발)에 있었다. (2)의 dry-run이 이 스크립트들을 대체한다.
 
 ## sorge#1 잔여 — MD 축 freshness (2026-09-06 반환분 중 안 닫힌 둘)
 
@@ -166,7 +215,7 @@ sessions/md 쪽 `to_index=0`, `orphan=0`, `dup=0`이 각각 어느 쪽인지 훑
 
 # 백로그 — 굽고 나서 남은 것
 
-순서는 위험한 것부터. 4번은 RAIL 4(#12)의 선행 조건이다.
+순서는 위험한 것부터. 4번은 RAIL 6(#12)의 선행 조건이다.
 
 
 인덱스는 살아 있다(75,922 chunks / 4096d / 양쪽 verify ✅). 순서는 위험한 것부터다.
