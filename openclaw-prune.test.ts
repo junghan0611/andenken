@@ -84,8 +84,9 @@ const held = (agent: string, rows: Array<[string, string, string]>): HeldRow[] =
 
 /**
  * Agent `a`: 10 upstream rows (MEMORY.md), held = those 10 + 1 old MEMORY.md
- * chunk (sup✓) + 1 dreaming + 1 reset archive + 1 deleted archive. 4/14 = 29%
- * gone, so `maxRatio` decides whether it is a mass decrease.
+ * chunk (sup✓) + 1 dreaming + 1 reset archive + 1 deleted archive. The prune
+ * step is 2 of 12 live rows = 17% (the two archives are kept, so they are not
+ * counted), so `maxRatio` decides whether it is a mass decrease.
  */
 function world(over: { identity?: string; dirty?: boolean; revision?: number | null } = {}) {
 	const up = Array.from({ length: 10 }, (_, i) => ({ id: `n${i}`, source: "memory", path: "MEMORY.md" }));
@@ -137,10 +138,13 @@ console.log("\n=== plan — every hold is a hold ===");
 		hold(world({ dirty: true }), 0.1, true).decision === "hold");
 	ok("no revision in the snapshot → hold (nothing to re-check against)", hold(world({ revision: null })).decision === "hold");
 
-	const massNo = hold(world(), 0.2, false);
-	ok("29% > 20% without the flag → hold, and the reason names the flag", massNo.decision === "hold" && /--allow-mass-decrease/.test(massNo.reason));
-	const massYes = hold(world(), 0.2, true);
+	const massNo = hold(world(), 0.1, false);
+	ok("17% > 10% without the flag → hold, and the reason names the flag", massNo.decision === "hold" && /--allow-mass-decrease/.test(massNo.reason));
+	const massYes = hold(world(), 0.1, true);
 	ok("…with --allow-mass-decrease → prune", massYes.decision === "prune" && /allowed for this invocation/.test(massYes.reason));
+	const routine = hold(world(), 0.2, false);
+	ok("17% ≤ 20%: the kept archives do not make it a mass decrease → prune without the flag",
+		routine.decision === "prune" && routine.reason === "all guards clear");
 
 	const w = world();
 	const noStatus = planPrune(

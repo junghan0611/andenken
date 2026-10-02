@@ -289,6 +289,61 @@ console.log("\n=== the 38% decrease ===");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+console.log("\n=== mass-decrease measures the prune step, not the archive stock ===");
+{
+	// One agent shaped like a live board: `live` rows held ∩ upstream, `sup` old
+	// MEMORY.md chunks whose replacements arrived (sup✓), `dream` moved dreaming
+	// rows, `archives` session reset archives kept forever.
+	const shaped = (live: number, sup: number, dream: number, archives: number) => {
+		const up = Array.from({ length: live }, (_, i) => ({ id: `k${i}`, source: "memory", path: "MEMORY.md" }));
+		const m = parseManifestLines(manifestLines({ a: { chunks: up } }));
+		const hs = held("a", [
+			...up.map((c) => [c.id, c.source, c.path] as [string, string, string]),
+			...Array.from({ length: sup }, (_, i) => [`s${i}`, "memory", "MEMORY.md"] as [string, string, string]),
+			...Array.from({ length: dream }, (_, i) => [`d${i}`, "memory", `memory/dreaming/light/${i}.md`] as [string, string, string]),
+			...Array.from({ length: archives }, (_, i) => [`r${i}`, "sessions", `sessions/a/${i}.jsonl.reset.2026-08-01T00-00-00.000Z`] as [string, string, string]),
+		]);
+		return reconcile({ held: hs, manifest: m, status: status({ a: {} }, m), statusPost: status({ a: {} }, m), binding: { ok: true }, run }).agents[0];
+	};
+
+	// main on 2026-10-02, after both prunes: 348 live, 98 reset + 9 renamed, 0 to prune.
+	// The old ratio (all gone / held) read 24% and held an agent with nothing to delete.
+	const main = shaped(348, 0, 0, 107);
+	ok("archives alone are not a decrease: nothing to prune → no mass-decrease", holdKind(main) === "none");
+
+	// gpt on 2026-10-02: 656 live, 37 sup✓, 186 archives. Old ratio 223/879 = 25%.
+	const gpt = shaped(656, 37, 0, 186);
+	ok("a routine sup✓ step on an archive-heavy agent clears (37 of 693 live = 5%)", holdKind(gpt) === "none");
+
+	// Archives must not dilute the step either: if they sat in the denominator,
+	// every reset archive kept forever would raise the bar a little more.
+	const diluted = shaped(100, 30, 0, 400);
+	ok("archives do not dilute the step: 30 of 130 live rows is 23% even with 400 archives held",
+		holdKind(diluted) === "mass-decrease" && diluted.flags.some((f) => f.startsWith("mass-decrease 23% > 20%")));
+
+	// mini on 2026-09-29, the smallest per-agent step of the post-rebuild prune
+	// (plan.json of data/openclaw-prune/2026-09-29T04-28-03-312Z-…): 210 upstream,
+	// 61 dreaming + 17 sup✓ pruned → 78 / 288 = 27%.
+	const rebuild = shaped(210, 17, 61, 55);
+	ok("the 2026-09-29 post-rebuild step (mini, 27%) still trips 20%",
+		holdKind(rebuild) === "mass-decrease" && rebuild.flags.some((f) => f.startsWith("mass-decrease 27% > 20%")));
+	ok("…and the flag names what it counted", rebuild.flags.some((f) => /78 of 288 live rows/.test(f)));
+
+	// sup? is kept (a replacement has not arrived with this snapshot's stamp), so
+	// it is not part of the step.
+	const up = Array.from({ length: 10 }, (_, i) => ({ id: `k${i}`, source: "memory", path: "MEMORY.md" }));
+	const m = parseManifestLines(manifestLines({ a: { chunks: up } }));
+	const stale = new Date(2).toISOString();
+	const hs = held("a", [
+		...up.map((c) => [c.id, c.source, c.path, stale] as [string, string, string, string]),
+		...Array.from({ length: 10 }, (_, i) => [`o${i}`, "memory", "MEMORY.md"] as [string, string, string]),
+	]);
+	const sq = reconcile({ held: hs, manifest: m, status: status({ a: {} }, m), statusPost: status({ a: {} }, m), binding: { ok: true }, run }).agents[0];
+	ok("sup? rows are kept, so they are not a decrease (10 sup?, 0 to prune)",
+		sq.gone.get("superseded-unconfirmed")?.length === 10 && holdKind(sq) === "none");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 console.log("\n=== same id, new updated_at ===");
 {
 	// Upstream re-embedded a row in place: same id, newer stamp. It is present

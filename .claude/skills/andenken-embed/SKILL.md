@@ -103,13 +103,16 @@ Reading the rows:
     are never classified; unknown or missing status, an unbound generation,
     mismatched identity, a dirty index and an empty upstream are **upstream
     holds**; `sup✓` requires every replacement at the same (source, path) to be held
-    with this snapshot's stamp; a per-agent drop
-    above 20% (`ANDENKEN_OPENCLAW_RECONCILE_MAX_RATIO`) is a **mass-decrease hold**.
+    with this snapshot's stamp; a per-agent prune step (`dream` + `sup✓` against
+    held ∩ upstream + that step) above 20% (`ANDENKEN_OPENCLAW_RECONCILE_MAX_RATIO`)
+    is a **mass-decrease hold**. Kept archives (`reset` / `del` / `renamed` /
+    `gone` / `sup?`) count on neither side, so an archive-heavy agent is not held
+    for its archives.
     The dry-run deletes nothing.
   - *Prune (stage C)* — `./run.sh prune:openclaw` (dry-run) / `--apply`. GLG
     approved `dream` + `sup✓` only (2026-09-29); session archives are never
-    pruned. An agent is pruned only if it clears every hold; a >20% drop needs
-    `--allow-mass-decrease` on that invocation (no env knob). Right before
+    pruned. An agent is pruned only if it clears every hold; a prune step >20%
+    needs `--allow-mass-decrease` on that invocation (no env knob). Right before
     deleting it re-reads the live upstream read-only — revision, rows and id
     digest must equal the run's snapshot — and keeps any dreaming row whose file
     is still in the workspace. Rows are backed up whole (float32 vectors) to
@@ -175,8 +178,9 @@ now carries OpenClaw's freshness and cleanup, in this order:
 4. **`prune:openclaw` (dry-run) → `prune:openclaw --apply`.** Deletes only
    `dreaming` + `superseded-confirmed` rows of agents that clear every hold, after
    a live read-only re-check. **`--allow-mass-decrease` is a first-time /
-   post-rebuild flag** (a rebuild re-mints every chunk id, so the old rows all
-   become sup✓): on a routine day a >20% drop is a signal to stop and look, not to
+   post-rebuild flag** (the 2026-09-29 post-rebuild prune was 27–60% of each
+   agent's live rows): a routine day's step is a few percent (2026-10-02: glg
+   8%, gpt 5%, mini 5%), so a >20% step is a signal to stop and look, not to
    pass. Do not apply on a board that still shows a hold you have not understood.
 5. **`compact openclaw` → `verify openclaw` → `sync:openclaw:oracle`.** (Or
    `prune:openclaw --apply --publish` for verify + publish in the same lock,

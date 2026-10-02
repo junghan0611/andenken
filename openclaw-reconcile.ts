@@ -612,8 +612,18 @@ export function reconcile(input: {
 			if (s.dirty) a.flags.push("dirty: upstream catch-up pending — hold");
 		}
 		if (up.length === 0 && mine.length > 0) a.flags.push("upstream-empty: hold");
-		if (mine.length > 0 && gone.length / mine.length > maxRatio) {
-			a.flags.push(`mass-decrease ${Math.round((100 * gone.length) / mine.length)}% > ${Math.round(maxRatio * 100)}%`);
+		// The step is what a prune would delete (dream + sup✓) against the live rows
+		// it is taken from (held ∩ upstream + that step). Kept classes — session
+		// archives, sup? — are a stock that only grows: in the numerator they held
+		// archive-heavy agents with nothing to delete (gpt 25%, main 24% on
+		// 2026-10-02, 0 rows to prune for main), in the denominator they would
+		// lower the bar a little with every archive kept.
+		const step = [...a.gone].filter(([c]) => PRUNE_ELIGIBLE.has(c)).reduce((n, [, l]) => n + l.length, 0);
+		const base = a.both + step;
+		if (step > 0 && step / base > maxRatio) {
+			a.flags.push(
+				`mass-decrease ${Math.round((100 * step) / base)}% > ${Math.round(maxRatio * 100)}% (${step} of ${base} live rows to prune)`,
+			);
 		}
 	}
 	return report;
@@ -623,9 +633,11 @@ export function reconcile(input: {
  * Why an agent's rows would not be touched even after GLG approves stage C.
  * `status-*` / `generation-unbound` / `identity` / `dirty` / `upstream-empty`
  * are about upstream being unknown or mid-change;
- * `mass-decrease` is about the size of the step. They are counted apart because
- * the first kind clears itself when upstream settles and the second needs an
- * explicit one-off decision (the first reconcile removes 38% at once).
+ * `mass-decrease` is about the size of the step — the share of live rows a
+ * prune would delete. They are counted apart because the first kind clears
+ * itself when upstream settles and the second needs an explicit one-off
+ * decision (the first reconcile removes 38% at once; the 2026-09-29
+ * post-rebuild prune was 27–60% per agent).
  */
 export function holdKind(a: AgentReconcile): "none" | "upstream" | "mass-decrease" {
 	if (a.flags.some((f) => f.endsWith("hold"))) return "upstream";

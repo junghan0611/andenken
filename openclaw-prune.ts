@@ -17,9 +17,11 @@
  *      status answered before and after the snapshot, the two answers agree and
  *      carry a chunk count equal to the snapshot's rows, identity valid, not
  *      dirty, upstream not empty.
- *   3. A per-agent decrease above 20% is held unless `--allow-mass-decrease`
- *      is given on THIS invocation. The threshold is not an env knob here: raising
- *      a number must not stand in for the approval.
+ *   3. A per-agent prune step above 20% — dream + sup✓ to delete, against the
+ *      live rows held ∩ upstream plus that step; kept archives count on neither
+ *      side — is held unless `--allow-mass-decrease` is given on THIS invocation.
+ *      The threshold is not an env knob here: raising a number must not stand in
+ *      for the approval.
  *   4. Immediately before deleting, the LIVE upstream database is re-read
  *      (read-only) and its revision, row count and id digest must equal the
  *      staged snapshot's. Anything that moved since the run → that agent is held.
