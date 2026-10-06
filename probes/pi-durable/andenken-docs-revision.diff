@@ -1,0 +1,185 @@
+--- a/AGENTS.md	2026-09-29 19:05:32.368653663 +0900
++++ b/AGENTS.md	2026-10-06 10:30:42.209884064 +0900
+@@ -174,15 +174,25 @@
+ That layout — the live path with one device segment prepended — **is the
+ contract.** `detectSource` decides by `/.claude/` and `extractProjectName` reads
+ the `projects` / `sessions` segment, so both pass unmodified and the lance schema
+-did not change. Two rules: append-only (no `--delete`) and real copies (no
++did not change. `pi-durable` keeps the path contract but not those two shortcuts:
++its source is decided by the durable root before the `/.claude/` test, and its
++project comes from the DB, because the bucket is a hash. Two rules: append-only (no `--delete`) and real copies (no
+ hardlinks — a shared inode cannot travel to another machine).
+ 
+-Inside each device directory the same two harness sources apply:
++Inside each device directory three harness sources apply:
+ 
+ | Source | Live path under each device | Format |
+ |--------|-----------------------------|--------|
+ | `pi` | `~/.pi/agent/sessions` | pi JSONL (`type="message"`, `message.role`) |
+ | `claude` | `~/.claude/projects` | Claude Code JSONL (`type="user" | "assistant"`) |
++| `pi-durable` | `~/.pi/agent/experimental/durable-sessions/<sha256(realpath cwd)[:24]>/<13-digit ms>-<UUIDv4>/session.sqlite` | durable SQLite, schema v1 (`entries` / `conversations` / `submissions` / `documents`) |
++
++`pi-durable` (GLG ruling 2026-10-06) is a **separate native harness**, not a
++variant of `pi`: its own storage, its own record model, its own admission. It is
++read, never exported into Pi JSONL, and nothing is added to the durable runtime
++to make it readable. Its corpus copy follows the same path contract, but the
++bytes are a **consistent snapshot**, not a copy of the live file — see
++*pi-durable source contract* below.
+ 
+ Corpus governance is a checksum manifest, not git — `MANIFEST.json` is the SSOT
+ and `MANIFEST.sha256` is `sha256sum -c` compatible, so the corpus is verifiable
+@@ -197,10 +207,14 @@
+ fails** — no index is built on a corpus of unknown freshness. The authority gate
+ sits *after* Step 0, so a refused call still completes its gather.
+ 
+-Entwurf sessions are **not a third source**. A spawned/resumed entwurf is just a
+-pi session written as `<created-at>_<native session id>.jsonl` under
+-`~/.pi/agent/sessions/<project>/`, and it is indexed by the normal `pi` source
+-path with project inferred from the cwd-shaped session directory.
++**Entwurf never creates a source; a harness storage format does.** A
++spawned/resumed entwurf on pi is just a pi session written as
++`<created-at>_<native session id>.jsonl` under `~/.pi/agent/sessions/<project>/`,
++indexed by the normal `pi` source path with project inferred from the cwd-shaped
++session directory. A durable citizen — coordinator or not — is a `pi-durable`
++session like any other durable session: no coordinator class, no garden-id join,
++no special rank. The third source exists because the storage is different, not
++because anyone's role is.
+ 
+ **Corpus admission is the current native id suffix `_<UUIDv7>.jsonl`** (2026-08-10
+ ruling). Retired species are *not* OR'd back in: `*_entwurf-<taskId>`,
+@@ -239,10 +253,66 @@
+ `sessions.lance`.
+ 
+ Do **not** index `~/.pi/agent/claude-config-overlay/projects`. That directory
+-is pi-shell-acp's Claude overlay, not a third memory source. Its work is already
++is pi-shell-acp's Claude overlay, not a memory source. Its work is already
+ represented through pi harness sessions / entwurf messages; indexing it would
+-create duplicate memory. If source optionalization is added, valid choices are
+-only `pi`, `claude`, and `all` (`pi + claude`). No `overlay` source.
++create duplicate memory. Valid `--source` values are `pi`, `claude`,
++`pi-durable`, and `all` (all three). No `overlay` source.
++
++### pi-durable source contract
++
++The durable coordinator is long-lived by design and is where GLG's own wording
++will mostly accumulate, so the quality bar for this source is **user-utterance
++fidelity, time-axis accuracy, and incremental cost** — in that order. Measured
++basis: the 2026-10-06 API 0 probe against a synthetic faux-provider DB built
++from the pinned durable source (`cd32f772`); stamp its receipt in ROADMAP
++History when the source lands.
++
++- **Discovery.** Path grammar above, anchored in full (24-hex bucket,
++  `\d{13}-<UUIDv4>`, `session.sqlite`). Sibling `<dir>.lock` directories and
++  `-wal` / `-shm` files are never admitted or copied. `durable_schema.version`
++  above the supported version is **refused by name**, never guessed. A durable
++  root that exists but admits zero sessions is a doctor WARN — the 2026-08-07
++  silent-darkness lesson applies to a second path grammar too.
++- **Snapshot, not copy.** A live durable DB keeps its committed rows in the WAL;
++  copying `session.sqlite` alone yields a file with **no tables at all**
++  (measured). The corpus copy is made with `VACUUM INTO` from a read-only
++  connection **on the host that owns the DB**, producing a single self-contained
++  file (journal mode `delete`, no WAL header). `immutable=1` and separate DB/WAL
++  rsync are forbidden. The native writer, its lock and `Harness.open` are never
++  touched. A snapshot holds one short read transaction; a held reader can delay
++  the native `close()` checkpoint by up to its 5 s busy timeout (measured), so
++  the snapshot must never hold a long read.
++- **Append-only, at the row level.** Durable `entries` and `conversations` are
++  INSERT-only, so a later snapshot is a superset. The corpus path is replaced by
++  a newer snapshot only when the new file passes `quick_check`, has a supported
++  schema, and contains every entry id the old one held; otherwise the old copy
++  stays and the gather reports it. An unchanged source (`durable_metadata.next_seq`
++  equal) produces no replacement, so mtime and manifest stay still.
++- **Chunks from physical rows only.** Fork inheritance is resolved by scan,
++  not storage — reading rows directly yields each entry exactly once; reading
++  per-conversation history would duplicate inherited rows.
++- **Classification by entry kind and placing submission, not by role.**
++  `pi.compaction` and handoff `pi.reset` carry `role: "user"`; a role filter would
++  index summaries as GLG's words. `pi.user` is GLG only when its placing
++  submission has no `request_id` (TUI input). `entwurf-doorbell:*` is a harness
++  notice (dropped, receiver unchanged); `subagent:*` is an agent brief (dropped,
++  receiver → agent); an unknown `request_id` prefix is dropped and counted
++  (fail closed). Assistant text inherits the conversation's receiver (the RAIL 5
++  rule shared with `pi` / `claude`); `stopReason` `error` / `aborted` partials are
++  dropped. `pi.tool-result` and `pi.system` are never embedded — the sibling
++  message body lands in a tool result, which is why agent↔agent traffic stays out.
++- **Identity.** chunk id `<corpus path>:e<entryId>[#part]`; `lineNumber` carries
++  the entry id. `entries.id` is per-DB monotonic and stable, so a chunk never
++  changes id between snapshots.
++- **Time.** `model[0].timestamp` (wall-clock ms) is the stored timestamp.
++  `commit_seq` orders; `documents.created_at` is a commit sequence, never a time.
++- **Watermark.** per corpus file, the max entry id already embedded. Indexing
++  appends chunks above it and never deletes the file's rows first — a durable
++  DB is never rewritten, so the JSONL stale path (delete-by-file, re-embed whole
++  file) would re-embed a months-long coordinator on every sync.
++- **Provenance.** device from the corpus path segment; project from the root
++  conversation's `pi.agent.cwd`, normalized exactly like `extractProjectName`,
++  cross-checked against the bucket hash. The meta-record is not consulted.
+ 
+ ### Why the split
+ 
+--- a/INVARIANT.md	2026-09-29 19:05:32.368653663 +0900
++++ b/INVARIANT.md	2026-10-06 10:30:59.858326862 +0900
+@@ -437,6 +437,41 @@
+ imported, unchanged, host}` keyed to the artifact it read, and `./run.sh status`
+ reports `folded` / `PENDING` from that key — not from a timestamp comparison.
+ 
++### 7.6 pi-durable: the snapshot is the copy, the row is the unit
++
++`pi-durable` (third session source, GLG ruling 2026-10-06) stores sessions in a
++live SQLite DB, not an append-only text file. Every corpus rule that the JSONL
++sources got for free from the file format has to be restated for rows.
++
++1. **A live DB is never copied, only snapshotted.** Committed rows of a live
++   durable session sit in the WAL; the main file alone can have no tables at all
++   (measured 2026-10-06: 4,096-byte main file, 3.8 MB WAL, `no such table:
++   entries` on the copy and under `immutable=1`; complete under `VACUUM INTO` and
++   the backup API). The snapshot is taken by `VACUUM INTO` from a read-only
++   connection on the host that owns the DB, and is the only thing that travels.
++2. **The snapshot is made where the DB lives.** The index authority does not
++   reach a remote durable DB through rsync. A peer's snapshot is produced on the
++   peer (piped stdlib script, as `corpus-admit.py` already is) and carried as a
++   closed file.
++3. **Append-only moves from the file to the row.** A newer snapshot replaces the
++   corpus copy only if it holds every entry id the old copy held, passes
++   `quick_check`, and has a supported schema. A shrinking or unreadable snapshot
++   never overwrites memory; the gather keeps the old copy and says so.
++4. **The durable runtime is not ours.** No native code, lock, migration or
++   `Harness.open` path is used to read; nothing is added to the runtime to make
++   it readable. A schema version above the supported one is refused by name.
++5. **Classify by kind and submission, never by role.** `pi.compaction` and
++   handoff `pi.reset` carry `role: "user"`. A role-based reader indexes summaries
++   and handoffs as GLG's words — the exact corruption this axis exists to avoid.
++6. **Physical rows only.** Fork history is inherited by scan, not stored twice;
++   any reader that walks per-conversation history must de-duplicate by entry id.
++7. **The watermark follows the flush.** A file's embedded-entry watermark is
++   persisted only after the WriteBuffer has flushed every chunk below it — 6.4 /
++   6.5, restated for a cursor instead of an mtime.
++
++`dedupeByBasename` is unsafe for this source: every durable session is named
++`session.sqlite`. Identity is the session directory.
++
+ ## 8. Test invariants
+ 
+ At minimum, unit tests must prove:
+@@ -452,6 +487,13 @@
+ 9. heading tier also excludes those headings
+ 10. `WriteBuffer.markFile()` deletes stale rows for zero-chunk files
+ 11. `WriteBuffer` still avoids duplicate writes under concurrency
++12. pi-durable: `pi.compaction` / handoff `pi.reset` never emit `role: "user"`
++13. pi-durable: doorbell (`entwurf-doorbell:*`) and subagent (`subagent:*`) user
++    entries never emit; an unknown `request_id` prefix is counted, not emitted
++14. pi-durable: a forked conversation emits each physical entry exactly once
++15. pi-durable: a snapshot missing an old entry id does not replace the corpus copy
++16. pi-durable: two durable sessions in different buckets both survive discovery
++    (no basename collapse)
+ 
+ Coverage gaps to close (not blocking, but tracked):
+ 
+@@ -474,6 +516,7 @@
+ - [ ] Does manifest update only after success?
+ - [ ] Does the change respect the 8K serving limit?
+ - [ ] Does any read path open a store without `{readOnly: true}`? (§7.4)
++- [ ] Does any pi-durable path read a live DB file directly, or classify by role? (§7.6)
+ - [ ] If scope policy changed, did we require full org rebuild?
+ - [ ] Did `npm test -- unit` pass?
+ - [ ] Did `npm run build` pass?

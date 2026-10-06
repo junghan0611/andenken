@@ -377,6 +377,11 @@ replicate 0). 임베딩 입력과의 교집합은 6 chunks / 4파일, 전부 `ro
 - 맥락 노트: [[botlog]] `20260406T140411` §andenken — llm-wiki·OKF·EKG 수렴.
   EKG/semext(ahyatt) 동행 좌표도 거기.
 
+## Parked — pi-durable third source (2026-10-06)
+
+- **좌표만, 구현 안 함.** GLG가 durable을 직접 써 본 뒤 Q1–Q7을 판정한다: [#15](https://github.com/junghan0611/andenken/issues/15).
+  증거(API 0)는 `probes/pi-durable/` — 노트북에서 `README.md` 순서대로 재검수. docs diff는 미적용 제안이다.
+
 ## Parked — Copilot third source
 
 - **안 함.** 양식은 커버 가능, 사용자 턴 코퍼스는 없다. 보라: [#9](https://github.com/junghan0611/andenken/issues/9).
