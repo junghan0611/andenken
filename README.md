@@ -89,7 +89,7 @@ covers all three.
 
 | Track | Quality bar | Scope |
 |-------|------------|-------|
-| **sessions** | Recover decisions and continuity inside canonical time windows | Core. pi + Claude Code JSONL, indexed from the device-merged corpus (`~/repos/gh/session`) with stored timestamp/project/role/source/file signals. OpenClaw parity is a technical baseline. |
+| **sessions** | Recover decisions and continuity inside canonical time windows | Core. pi + Claude Code JSONL, indexed from the device-merged corpus (`~/repos/gh/session`) with stored timestamp/project/role/source/file signals, plus closed pi-durable snapshots admitted into that corpus by an explicit act (source `pi-durable`). OpenClaw parity is a technical baseline. |
 | **md (public garden)** | Recover durable interpretation attached to dated notes and events | Current production knowledge axis. Direct Markdown embedding over exported `~/repos/gh/notes/content` (~2,200 md / ~27MB). OpenClaw builtin md memory logic + LanceDB backend. |
 | **openclaw (harvest)** | Recover what the bots said and kept, as its own nameable axis | Landed 2026-09-03. OpenClaw already embeds its agents' sessions and memory with `qwen/qwen3-embedding-8b` at 4096d — the same model we use, chosen independently — so the rows arrive carrying both text and vector and the import costs **zero embedding API calls**. Append-only, authority-harvested then explicitly published to the private Oracle replica, and never a search fallback. |
 | **org** | Currently disabled | 3,000+ Denote notes. Source track. Doctor/chunker/incremental work is upstream R&D, **not** what agents consume right now. |
@@ -184,6 +184,8 @@ represented in the pi sessions; indexing it would manufacture duplicate memory.
 ```
                     ┌─ Session Indexer ─── device-merged session corpus
 Query ──→ Embed ──→ │                       (pi + Claude Code .jsonl, all devices)
+  │                 ├─ Durable Indexer ─── admitted closed pi-durable snapshots
+  │                 │                       (session.sqlite, policy B.1, own checkpoint)
   │                 ├─ MD Chunker ──────── public garden (~2,200 .md, exported)
   │                 └─ (Org Chunker) ───── disabled — upstream R&D
   │
@@ -257,18 +259,23 @@ Cases live in `acceptance-cases.json`, so adding one never touches code.
 ## Stack
 
 - **Embeddings** Sessions + md: Qwen3-Embedding-8B via OpenRouter (4096d). Org (disabled): Qwen3-Embedding-4B (2560d).
-- **Vector store** LanceDB (file-based, one file per track)
+- **Vector store** LanceDB (`@lancedb/lancedb` pinned to `0.40.0`; file-based, one file per track)
 - **Retrieval** Weighted merge + RRF + MMR. Temporal decay is implemented but off in both live tracks; recency is `--mode recent`.
-- **Chunking** Track-specific. Sessions: message-aware. MD: Markdown-aware. Org (disabled): org 2-tier (heading + direct body).
+- **Chunking** Track-specific. Sessions: message-aware (pi-durable rows reuse the same sanitize + split). MD: Markdown-aware. Org (disabled): org 2-tier (heading + direct body).
 - **Query expansion** dictcli personal vocabulary graph
-- **Runtime** TypeScript (tsx)
+- **Runtime** TypeScript on Node 24. `run.sh` runs sources through `tsx`; pi loads the compiled `dist/` (`pnpm run build`). The Nix flake (`nixos-26.05`) provides Node and pnpm; dependencies install with `pnpm install --frozen-lockfile`.
+
+A rebuilt `dist/` or a new native module reaches **new processes only**. A
+running pi keeps the code and the LanceDB module it loaded at start; nothing
+here reloads a harness.
 
 ## Provider split — sessions, md, org
 
 | Track | Model / dim | Endpoint | Status |
 |-------|-------------|----------|--------|
-| **Sessions** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `ANDENKEN_SESSION_*` → `data/sessions.lance` | Live. Indexed from the device-merged corpus since `v2026.9.3`. 76,044 chunks / 1,627 files (2026-09-03). |
-| **MD** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `ANDENKEN_MD_*` → `data/md.lance` | Live production knowledge axis. 10,704 chunks / 2,230 indexed files (2026-09-03); `doctor --md` accounts for the manifest↔indexed gap. |
+| **Sessions** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `ANDENKEN_SESSION_*` → `data/sessions.lance` | Live. Indexed from the device-merged corpus since `v2026.9.3`. 109,190 rows on the authority and the Oracle replica, 103 of them `pi-durable` (2026-10-15). |
+| **MD** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `ANDENKEN_MD_*` → `data/md.lance` | Live production knowledge axis. 11,078 rows (2026-10-15); `doctor --md` accounts for the manifest↔indexed gap. |
+| **OpenClaw** | `qwen/qwen3-embedding-8b` / 4096d, **embedded by OpenClaw** | `sqlite3 -readonly` harvest → `data/openclaw.lance` | Live harvest axis, API 0. 8,076 rows (2026-10-15). Searched by name only, never a fallback. |
 | **Org** | Qwen3-Embedding-4B / 2560d | `ANDENKEN_ORG_*` → `data/org.lance` | **Disabled.** Upstream R&D only. Do not run `index:org` in production. |
 
 LanceDB stores are dimension- and track-separated. Each track's search must use
@@ -293,6 +300,7 @@ still reads the `projects` / `sessions` segment, so both pass unmodified and
 |--------|-----------------------------|-------|
 | `pi` | `~/.pi/agent/sessions` | pi-native harness sessions |
 | `claude` | `~/.claude/projects` | standalone Claude Code sessions |
+| `pi-durable` | `.pi/agent/experimental/durable-sessions/<bucket>/<session>/session.sqlite` | closed pi-durable snapshot (SQLite, schema v1); **admitted, never gathered** — see below |
 
 Two rules govern the corpus: **append-only** (never `rsync --delete`) and **real
 copies** (no hardlinks — a shared inode cannot move to another machine).
@@ -316,21 +324,59 @@ when it fails** — an index is never built on a corpus of unknown freshness.
 
 Do **not** index `~/.pi/agent/claude-config-overlay/projects`. It is the
 pi-shell-acp Claude overlay and would duplicate work already represented in pi
-sessions / entwurf messages. Valid source filters are `pi`, `claude`, and
-`all` (`pi + claude`) only. Invalid values are rejected with an explicit error.
+sessions / entwurf messages. JSONL discovery (indexing) accepts `pi`, `claude`
+and `all` (`pi + claude`); search filters add `pi-durable`. Invalid values are
+rejected with an explicit error.
 
 `session_search` / `search-sessions` source semantics:
 
 | `source` value      | Candidate pool        | MD cross-track fallback |
 |---------------------|-----------------------|-------------------------|
-| omitted / `all`     | pi + claude (mixed)   | enabled when results are thin |
-| `pi`                | pi only (LanceDB-side filter) | disabled (sessions-only intent) |
-| `claude`            | claude only (LanceDB-side filter) | disabled (sessions-only intent) |
+| omitted / `all`     | every row: pi + claude + pi-durable | enabled when results are thin |
+| `pi`                | pi JSONL rows only — `pi-durable` rows are **not** included | disabled (sessions-only intent) |
+| `claude`            | claude only           | disabled (sessions-only intent) |
+| `pi-durable`        | admitted pi-durable rows only | disabled (sessions-only intent) |
 
-The source filter is pushed down into LanceDB at the vector / FTS / substring
-query level so the candidate pool is source-specific. Explicit `pi` or `claude`
-also suppresses the md knowledge fallback — if the caller named a session
-source, they asked for sessions, not garden notes.
+The source filter is an exact match pushed down into LanceDB at the vector /
+FTS / substring query level, so the candidate pool is source-specific. A
+specific `pi`, `claude` or `pi-durable` source also suppresses the md knowledge
+fallback — if the caller named a session source, they asked for sessions, not
+garden notes (`all` is not a specific source; it means no filter). So does any
+other stored-signal filter or `--mode recent`.
+
+### pi-durable — closed snapshots only
+
+pi's durable sessions live in a SQLite store, not a JSONL file, and the live
+store is never read. A durable session reaches andenken as **one closed
+snapshot** made beforehand by an approved procedure outside this repo, and
+enters the corpus only through an explicit act. The rules are INVARIANT §7.7.
+
+- **No live gather.** `corpus:gather` admits `.jsonl` only, and a JSONL sync
+  never collects a durable store. `./run.sh corpus:durable-admit <snapshot>
+  --device <roster id>` copies one closed snapshot into the corpus (real copy
+  0600, atomic rename). A replacement must keep the lineage and the old last
+  entry and must not shrink. The reader refuses a recognizable live store by
+  name — that refusal is not proof that a store is closed.
+- **Own policy, own checkpoint.** `./run.sh index:durable` embeds policy `B.1`:
+  human input runs and their answers, with no length floor on human turns
+  (only empty text is excluded). A run still open in the snapshot is **held**
+  for a later one; a run that also holds a non-human input is reported as
+  **ambiguous** and not embedded. The checkpoint is `data/durable-manifest.json`,
+  never `session-manifest.json`. `--dry-run` is API 0; the real run is paid and
+  authority-only.
+- **Reading is not admission.** `./run.sh durable:read` can read entries of a
+  closed snapshot independently of B.1 admission — by window, range or
+  conversation, including entries B.1 does not embed (`durable:census` counts
+  them; `durable:plan` shows what each policy would decide, API 0). The raw
+  reader and the embedding filter are separate surfaces.
+- **Excerpts name their unit.** `withExcerpt` / `--with-excerpt` returns file
+  lines (`jsonl-line`) for a JSONL hit and neighbouring entries of the same
+  conversation (`durable-entry`, line numbers are entry ids) for a pi-durable
+  hit. A SQLite snapshot is not a JSONL file, and a refused read comes back as
+  a named `unsupported` with the `durable:read` command, never as an empty
+  excerpt.
+- **A full rebuild drops it.** `rebuild:sessions` and `index:sessions --force`
+  delete the durable checkpoint with the rows; run `index:durable` afterwards.
 
 ## md track — public garden direct embedding
 
@@ -346,7 +392,8 @@ therefore much easier to tune than the raw Denote tree.
 | provider env | `ANDENKEN_MD_*` | OpenRouter qwen/qwen3-embedding-8b |
 | md doctor | `./run.sh doctor --md` | provider / DB / manifest / gap explainability |
 
-Current state (2026-09-03):
+The store held `11,078` rows on 2026-10-15. The breakdown below is the
+2026-09-03 measurement:
 
 - `10,704` chunks / `2,230` indexed files / `2,245` manifest entries
 - the manifest↔indexed gap is accounted for by `doctor --md` through
@@ -381,6 +428,10 @@ cd ~/repos/gh/andenken
 ./run.sh rebuild:sessions             # sessions full rebuild (estimate + confirm)
 ./run.sh corpus:gather [--strict]     # collect admitted sessions from every device
 ./run.sh corpus:manifest verify       # sha256 integrity over the corpus
+./run.sh corpus:durable-admit <snapshot> --device <id>  # admit ONE closed pi-durable snapshot
+./run.sh index:durable --dry-run      # what the next durable run would embed (API 0)
+./run.sh index:durable                # PAID, authority-only: embed admitted snapshots (B.1)
+./run.sh durable:read <session.sqlite> --around <entry>  # raw entries of a closed snapshot
 ./run.sh index:md                     # md incremental / full (with gate when needed)
 ./run.sh search:md "<query>"          # md search
 ./run.sh sync:openclaw [--full]       # harvest OpenClaw's own index (API 0)
@@ -398,8 +449,23 @@ modes. `--local` (the default) indexes only this device's live sessions, uses no
 ssh, and does not touch the replica — cheap enough to put on a timer.
 `--global` gathers every device with `--strict`, embeds, verifies, and publishes
 the index, the manifest **and** the corpus in one act; that is the moment a human
-is meant to hold. `--push` remains as a deprecated alias. Nothing here is
-automated by default.
+is meant to hold. The publish ships `sessions.lance` with `session-manifest.json`
+and `durable-manifest.json` — or removes exactly that file on the replica when
+the authority has none — and admitted snapshots travel with the corpus. A failed
+step fails the whole publish. `--push` remains as a deprecated alias. Nothing
+here is automated by default.
+
+**One writer at a time, across processes.** Every `sessions.lance` writer —
+sync, rebuild, `index:sessions` / `index:durable`, sessions cleanup / compact,
+`corpus:durable-admit`, pi `/memory reindex` — first takes
+`data/.sessions-write.lock`, without waiting. A held lock exits 75
+(`sessions-writer-busy`, or `sessions-writer-stale-lock` when the owner is gone)
+and is never reclaimed automatically; dry-runs take no lock. `sync-sessions.sh`
+keeps its own older flock (`data/.sync-sessions.lock`) on top of that, so a
+`--local` request that finds another sync running coalesces (exit 0) and a
+`--global` one waits for it. The guarantee belongs to the code that runs: a pi
+process started before the lock existed does not take it. See
+[INVARIANT.md](./INVARIANT.md) §7.6.
 
 **Only the index authority writes.** `ANDENKEN_INDEX_AUTHORITY` (default
 `thinkpad`) gates the indexer itself, not just the push — see
@@ -444,6 +510,13 @@ the Greek *mnemo* turned into the German *Andenken*.
 
 ## Recent milestones
 
+- **2026-10-15** — closed pi-durable snapshots became a session source
+  (`pi-durable`): explicit admission, policy `B.1`, a separate
+  `durable-manifest.json` checkpoint, and a raw reader that is not the embedding
+  filter. One cross-process writer lock now guards `sessions.lance`. The dev
+  shell moved to Nix `nixos-26.05` / Node 24 and LanceDB to `0.40.0`. Sessions
+  109,190 rows (103 `pi-durable`), md 11,078, OpenClaw 8,076, on the authority
+  and the Oracle replica.
 - **2026-09-03** — sessions sync split into `--local` / `--global`, and the
   device corpus, index and manifest now publish as one act. Sessions reached
   76,044 chunks / 1,627 files; md 10,704 / 2,230.

@@ -5,10 +5,12 @@ andenken CalVer 스냅샷. 형식 `vYYYY.M.D[-suffix]`. 과거에 *닫힌* 작�
 
 ## Unreleased
 
-- Updated the development shell to NixOS 26.05 with default `nodejs` and Nix-provided `pnpm`; added `flake.lock`. The pinned Linux shell runs Node 24.21.0.
-- Pinned `@lancedb/lancedb` to stable 0.40.0 (not the 0.41 preview), and replaced the schema-sentinel deletion's double-quoted SQL string with a standard single-quoted literal. A synthetic database written by 0.15.0 passed row, vector, legacy FTS and substring reads on an isolated 0.40.0 copy; offline regressions passed. An isolated copy of the production sessions DB also passed 0.40.0 read, synthetic-only write/delete, vector and native FTS checks without changing the original. Rebuilt `dist` and verified its synthetic create/reset paths; redirected the Nix shell banner to stderr to preserve JSON stdout. Old 0.15 scan/vector readers could read 0.40-written copy versions, but their FTS already failed on the pre-upgrade copy. Running harnesses were not reloaded, md/openclaw DBs were not tested, and #16 compaction remains unresolved.
+## v2026.10.15 — Durable conversations, Node 24 and LanceDB 0.40
 
-## v2026.10.15 — Durable conversation evidence and safer sessions maintenance
+### Runtime and storage compatibility
+
+- Updated the development shell to NixOS 26.05 with default `nodejs` and Nix-provided `pnpm`; added `flake.lock`. The pinned Linux shell runs Node 24.21.0.
+- Pinned `@lancedb/lancedb` to stable 0.40.0 (not the 0.41 preview), and replaced the schema-sentinel deletion's double-quoted SQL string with a standard single-quoted literal. A synthetic database written by 0.15.0 passed row, vector, legacy FTS and substring reads on an isolated 0.40.0 copy; offline regressions passed. An isolated copy of the production sessions DB also passed 0.40.0 read, synthetic-only write/delete, vector and native FTS checks without changing the original. Rebuilt `dist` and verified its synthetic create/reset paths; redirected the Nix shell banner to stderr to preserve JSON stdout. Old 0.15 scan/vector readers could read 0.40-written copy versions, but their FTS already failed on the pre-upgrade copy. Oracle was fast-forwarded to the same runtime revision, installed with the frozen lockfile and rebuilt; ARM64 native vector/FTS/reset gates, offline tests and JSON output passed. Running harnesses were not reloaded. The subsequent normal maintenance run verified all three production tracks on both hosts; #16 sessions compaction remains unresolved.
 
 ### Durable conversations: one source, two independent reading paths (#15)
 
@@ -28,9 +30,17 @@ andenken CalVer 스냅샷. 형식 `vYYYY.M.D[-suffix]`. 과거에 *닫힌* 작�
 
 ### Known operational limits
 
-- A real source-filtered search recovered the target answer at rank 1 and the human input at rank 4, but the FTS arm also emitted a native Arrow/Rust panic. The FTS catch returned an empty arm, so successful CLI output does not establish clean hybrid-search quality. This remains unresolved ([#16](https://github.com/junghan0611/andenken/issues/16)); raw-reader acceptance, source indexing and whole-search acceptance are distinct.
+- Before the dependency upgrade, a real source-filtered search recovered the target answer at rank 1 and the human input at rank 4, but the FTS arm emitted a native Arrow/Rust panic which the wrapper caught as an empty arm. After upgrading to 0.40.0, native metadata-only production FTS probes returned 9 / 0 / 20 hits without that panic. This establishes the observed FTS path, not universal retrieval quality, a root cause, or closure of [#16](https://github.com/junghan0611/andenken/issues/16). Raw-reader acceptance, source indexing and whole-search acceptance remain distinct.
 - The mandatory sessions compaction attempt was stopped at its configured 600-second limit. The coordinator's subsequent read-only verification still found 107,656 unique rows / 2,844 existing source files / 4096d, without duplicates or orphans; partial output increased fragments/storage to 23 / 4.7G. Compaction and the post-compaction FTS retest were not completed. No deadlock or root cause is inferred, and no retry or full re-embedding was performed.
-- Existing running pi sessions retain previously loaded code after a build. The new excerpt/lock paths are validated in source, built output and offline tests, not certified as loaded into every active harness. Only one approved durable snapshot was collected; live durable gathering remains explicit and outside ordinary JSONL sync.
+- Existing running pi sessions retain previously loaded code after a build. Oracle's existing Pi was measured with the old 0.15 native module still mapped; fresh CLI processes use 0.40.0. No running harness was restarted, and active Pi FTS health is not certified. Only one approved durable snapshot was collected; live durable gathering remains explicit and outside ordinary JSONL sync.
+- The lock test's sync subprocess touches the real repo's empty `data/.sync-sessions.lock` before it loses the shared writer lock. Oracle verification observed its mtime changing, with DB files and manifests unchanged. A test-only temporary-script-tree isolation fix remains follow-up work; production lock semantics were not changed.
+
+### Completed authority maintenance and Oracle publication
+
+- Agent-config executed the normal incremental workflow once: sessions processed 42 files / 2,567 chunks with no errors, and MD processed 41 files / 166 chunks with no errors. Estimated provider usage was approximately $0.008 and $0.001 respectively, not final billing receipts; upstream OpenClaw indexing cost was not measured. This release lane did not repeat paid work.
+- Final authority and fresh Oracle CLI verification found sessions 109,190 rows, MD 11,078 and OpenClaw 8,076, all 4096d. Sessions and MD had no duplicate IDs or orphan source files; OpenClaw IDs were unique. Both hosts verified all 3,513 corpus files with no checksum mismatches, missing or untracked files. DB, both session manifests and corpus were published together.
+- Both hosts retained 103 durable rows; the final B.1 dry-run had no pending rows, with one held and one ambiguous entry still explicit. Oracle's narrow approved original-entry window matched the original evidence without printing private text or widening the window.
+- OpenClaw live checks passed before backing up and pruning exactly 18 confirmed-superseded rows; 880 archive rows were retained. Local and Oracle verification passed after publication. Compaction changed physical data files 15 → 16 and storage 168 → 304 MB, so it is not reported as a space reduction. Sessions remained at 25 physical data files / about 4.7 GB; the failed sessions compaction was not retried.
 
 ### OpenClaw harvest and maintenance since v2026.9.16
 

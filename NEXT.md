@@ -13,12 +13,13 @@
 
 현재 좌표: 3 완료(`v2026.9.16`) → 4 보류(MD 축 freshness 남음) → **5 진행** → 6 보류
 
-## Active detour — environment upgrade (2026-10-15, GLG)
+## Release handoff — v2026.10.15
 
-- Baseline: durable work committed as `15ea31c`. GLG approved committing/pushing the NixOS 26.05 / Node 24 / LanceDB 0.40.0 upgrade and setting up Oracle; no tag/release is part of this request. `dist` rebuilt, JSON-safe shell banner fixed.
-- Verified by existing Opus `20261015T114746-1ee521`: isolated real-copy read/vector/native FTS (107,656 rows, 4096d, durable 103), synthetic-only add/delete, compiled create/reset; original tree/manifests unchanged. Both Node 24 environments pass offline gates. Metadata-only receipts: `/tmp/andenken-lancedb040-receipts-wA078w` (`metadata.json` SHA-256 `46c8ce9b2def4cdc58a9daffee01509d54fc624ee35dbb3124eb5a66dab67a3f`). Private test copies deleted; archive hashes and deletion verified by the coordinator.
-- Boundary: old 0.15 scan/vector readers accept 0.40-written copy versions, but old FTS fails on the pre-upgrade copy too; 0.40 FTS passes. md/openclaw DBs remain untested; #16 compaction remains unresolved.
-- Next: push the verified upgrade, then the existing Opus implementer sets up the exact pushed revision on Oracle (clean fast-forward, frozen install, build, offline checks). Local incremental indexing belongs to agent-config under GLG's separate instruction and need not wait for Oracle setup; hold Oracle use/publication until its setup receipt. No additional raw reading, paid embedding by this lane, compaction, or running-harness restart.
+- The runtime detour and agent-config's one-pass incremental maintenance are closed; outcomes moved to CHANGELOG. Both hosts have the tested Node 24 / LanceDB 0.40 runtime (`5944185`); fresh Oracle CLI verified all three published tracks. GLG subsequently approved README updates, the tag and matching GitHub Release.
+- Metadata-only receipts: local `/tmp/andenken-lancedb040-receipts-wA078w`; Oracle `/tmp/andenken-oracle-setup-ALz6Qn/final-receipt.json` (SHA-256 `cc06c6d1c20dbfa5fa72704258b06b05bd0ba8025294aef740fa5ea07a9ce7cf`, independently checked). Private DB test copies were deleted. Final maintenance facts came from agent-config's coordinator; do not open its raw logs or widen the approved original-entry window.
+- Before the next `test:durable`, scope a test-only fix for the real empty sync flock being touched: copy the sync script and lock library into a temporary script tree with its own `data/`. A temporary cwd alone is insufficient because the script changes to its own repo root. Do not change production lock semantics as a shortcut.
+- Correct the stale pi `session_search.mode` description (`index.ts`: still says 14-day decay although the runtime passes `recencyHalfLifeDays: 0`) in a separately scoped tool-description follow-up; README describes the actual no-decay behavior.
+- Return to RAIL 5 after this release. Sessions compaction remains unresolved in #16 (25 physical data files / about 4.7 GB); do not repeat it or paid indexing without a new operational instruction. Existing Pi runtimes may still cache 0.15; no restart/reload was authorized. Native production FTS probes passed under 0.40, not universal search-quality acceptance.
 
 # NOW — 세션 축 입장 경계 (2026-10-02 GLG)
 
