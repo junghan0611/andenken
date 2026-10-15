@@ -5,6 +5,9 @@ andenken CalVer 스냅샷. 형식 `vYYYY.M.D[-suffix]`. 과거에 *닫힌* 작�
 
 ## Unreleased
 
+- Updated the development shell to NixOS 26.05 with default `nodejs` and Nix-provided `pnpm`; added `flake.lock`. The pinned Linux shell runs Node 24.21.0.
+- Pinned `@lancedb/lancedb` to stable 0.40.0 (not the 0.41 preview), and replaced the schema-sentinel deletion's double-quoted SQL string with a standard single-quoted literal. A synthetic database written by 0.15.0 passed row, vector, legacy FTS and substring reads on an isolated 0.40.0 copy; offline regressions passed. An isolated copy of the production sessions DB also passed 0.40.0 read, synthetic-only write/delete, vector and native FTS checks without changing the original. Rebuilt `dist` and verified its synthetic create/reset paths; redirected the Nix shell banner to stderr to preserve JSON stdout. Old 0.15 scan/vector readers could read 0.40-written copy versions, but their FTS already failed on the pre-upgrade copy. Running harnesses were not reloaded, md/openclaw DBs were not tested, and #16 compaction remains unresolved.
+
 ## v2026.10.15 — Durable conversation evidence and safer sessions maintenance
 
 ### Durable conversations: one source, two independent reading paths (#15)

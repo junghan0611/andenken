@@ -22,7 +22,7 @@
     "extensions": ["./dist/index.js"]
   },
   "dependencies": {
-    "@lancedb/lancedb": "^0.15.0"
+    "@lancedb/lancedb": "0.40.0"
   },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "*",

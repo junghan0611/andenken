@@ -429,7 +429,7 @@ export class VectorStore {
       ],
       { mode: "overwrite" },
     );
-    await this.table.delete('id = "__schema__"');
+    await this.table.delete("id = '__schema__'");
   }
 
   async init(): Promise<void> {

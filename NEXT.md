@@ -13,6 +13,13 @@
 
 현재 좌표: 3 완료(`v2026.9.16`) → 4 보류(MD 축 freshness 남음) → **5 진행** → 6 보류
 
+## Active detour — environment upgrade (2026-10-15, GLG)
+
+- Baseline: durable work committed as `15ea31c`. GLG approved committing/pushing the NixOS 26.05 / Node 24 / LanceDB 0.40.0 upgrade and setting up Oracle; no tag/release is part of this request. `dist` rebuilt, JSON-safe shell banner fixed.
+- Verified by existing Opus `20261015T114746-1ee521`: isolated real-copy read/vector/native FTS (107,656 rows, 4096d, durable 103), synthetic-only add/delete, compiled create/reset; original tree/manifests unchanged. Both Node 24 environments pass offline gates. Metadata-only receipts: `/tmp/andenken-lancedb040-receipts-wA078w` (`metadata.json` SHA-256 `46c8ce9b2def4cdc58a9daffee01509d54fc624ee35dbb3124eb5a66dab67a3f`). Private test copies deleted; archive hashes and deletion verified by the coordinator.
+- Boundary: old 0.15 scan/vector readers accept 0.40-written copy versions, but old FTS fails on the pre-upgrade copy too; 0.40 FTS passes. md/openclaw DBs remain untested; #16 compaction remains unresolved.
+- Next: push the verified upgrade, then the existing Opus implementer sets up the exact pushed revision on Oracle (clean fast-forward, frozen install, build, offline checks). Local incremental indexing belongs to agent-config under GLG's separate instruction and need not wait for Oracle setup; hold Oracle use/publication until its setup receipt. No additional raw reading, paid embedding by this lane, compaction, or running-harness restart.
+
 # NOW — 세션 축 입장 경계 (2026-10-02 GLG)
 
 - **Stem**: GLG 원칙 — *"남아야 하는 것은 나와 에이전트 사이의 대화여야 돼. 그래야 자율
