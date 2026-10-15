@@ -377,10 +377,13 @@ replicate 0). 임베딩 입력과의 교집합은 6 chunks / 4파일, 전부 `ro
 - 맥락 노트: [[botlog]] `20260406T140411` §andenken — llm-wiki·OKF·EKG 수렴.
   EKG/semext(ahyatt) 동행 좌표도 거기.
 
-## Parked — pi-durable third source (2026-10-06)
+## Durable follow-through — #15 / v2026.10.15
 
-- **좌표만, 구현 안 함.** GLG가 durable을 직접 써 본 뒤 Q1–Q7을 판정한다: [#15](https://github.com/junghan0611/andenken/issues/15).
-  증거(API 0)는 `probes/pi-durable/` — 노트북에서 `README.md` 순서대로 재검수. docs diff는 미적용 제안이다.
+- Closed implementation and review history moved to `CHANGELOG.md` v2026.10.15. One approved snapshot reached the canonical corpus and added 103 rows; raw-window acceptance is separate from degraded hybrid search.
+- **Next:** agent-config owns the single usual-ask 2+3+4 execution and Oracle publication. After the requested release, verify the clean Oracle checkout can consume the new source/entry reader with a fast-forward/build, without restarting active harnesses or reading beyond the approved window. Do not repeat durable embedding.
+- **Blocker/known limit:** [#16](https://github.com/junghan0611/andenken/issues/16) tracks the FTS native panic and 600-second compaction timeout. Read-only integrity remained valid; 23 fragments / 4.7G are not a completed compact. No repeated compact, paid rebuild, dependency upgrade or claim of wholly healthy hybrid search.
+- **Guard:** the corpus holds one snapshot, not every durable session or newer live turns. B.1 reports ambiguous/held entries; raw reading remains independent. Live DB access, new snapshots and wider raw windows need concrete scope approval. Old running pi code is not refreshed by a build; do not run old `/memory reindex` during maintenance.
+- **Parked:** SQLite citation/time-filter exploration belongs to later requirements, not a new engine now. Winner-path relocation intentionally refuses rather than migrating automatically; boot-identity diagnostics remain follow-up observations. The 1.0.2 probe is historical, not the SDK 1.2.0 contract.
 
 ## Parked — Copilot third source
 

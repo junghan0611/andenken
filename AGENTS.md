@@ -107,7 +107,13 @@ session-indexer.ts      pi + Claude Code JSONL parser
 md-chunker.ts           Markdown-aware chunker + analyzeMdFile SSOT classifier
 org-chunker.ts          Org-aware 2-tier chunker (disabled track — upstream R&D)
 indexer.ts              Indexing driver (manifest + hard guard + zero-chunk clear)
-write-buffer.ts         Single-writer serialization
+write-buffer.ts         Single-writer serialization (in-process)
+sessions-lock.ts        Cross-process sessions.lance writer lock (+ scripts/lib/sessions-lock.sh)
+durable-reader.ts       Closed pi-durable snapshot reader (refuses live stores by name)
+durable-plan.ts         pi-durable embedding admission plan (policy B.1)
+durable-source.ts       pi-durable corpus layout, admit, row extraction
+durable-index.ts        pi-durable incremental indexing + durable-manifest.json
+session-excerpt-dispatch.ts  Hit excerpt dispatch: JSONL lines or durable entries
 doctor.ts               Operator triage dispatch
 doctor-md.ts            MD production triage — provider / DB / manifest / gap
 doctor-org.ts           Org triage (upstream R&D only)
@@ -157,7 +163,7 @@ queryable only by a provider that emits the same dimension.
 
 | Track | Model / dim | Endpoint | When |
 |-------|-------------|----------|------|
-| **Sessions** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `https://openrouter.ai/api` via `ANDENKEN_SESSION_*` → `data/sessions.lance` | incremental via `scripts/sync-sessions.sh --local` (this device, ssh 0) / `--global` (all devices + publish); corpus `~/repos/gh/session`; full rebuild via `scripts/rebuild-sessions-full.sh`; gated by `ANDENKEN_INDEX_AUTHORITY` |
+| **Sessions** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `https://openrouter.ai/api` via `ANDENKEN_SESSION_*` → `data/sessions.lance` | incremental via `scripts/sync-sessions.sh --local` (this device, ssh 0) / `--global` (all devices + publish); corpus `~/repos/gh/session`; full rebuild via `scripts/rebuild-sessions-full.sh`; admitted pi-durable snapshots via `./run.sh index:durable`; gated by `ANDENKEN_INDEX_AUTHORITY` |
 | **MD** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `https://openrouter.ai/api` via `ANDENKEN_MD_*` → `data/md.lance` | incremental driven by `./run.sh sync:md`; full index via `./run.sh index:md`; corpus `~/repos/gh/notes/content`; Oracle replication via `./run.sh sync:md:oracle` |
 | **OpenClaw** | `qwen/qwen3-embedding-8b` / 4096d — **embedded by OpenClaw, not by us** | `ANDENKEN_OPENCLAW_HOST` (default `oracle`), `sqlite3 -readonly` snapshot of each bot's `openclaw-agent.sqlite` → `data/openclaw.lance` | explicit authority call only: `./run.sh sync:openclaw` (delta by per-agent watermark, `--full` from zero), then `./run.sh sync:openclaw:oracle` to publish the completed private store. **API 0** — the vectors come already computed. |
 | **Org** | Qwen3-Embedding-4B / 2560d | `ANDENKEN_ORG_*` / legacy vLLM path → `data/org.lance` | **disabled in production.** Upstream R&D only. Do not run from operator workflow. |
@@ -177,12 +183,14 @@ the `projects` / `sessions` segment, so both pass unmodified and the lance schem
 did not change. Two rules: append-only (no `--delete`) and real copies (no
 hardlinks — a shared inode cannot travel to another machine).
 
-Inside each device directory the same two harness sources apply:
+Inside each device directory the same two harness sources apply, plus one
+snapshot source that is never gathered:
 
-| Source | Live path under each device | Format |
-|--------|-----------------------------|--------|
+| Source | Path under each device | Format |
+|--------|------------------------|--------|
 | `pi` | `~/.pi/agent/sessions` | pi JSONL (`type="message"`, `message.role`) |
 | `claude` | `~/.claude/projects` | Claude Code JSONL (`type="user" | "assistant"`) |
+| `pi-durable` | `.pi/agent/experimental/durable-sessions/<bucket>/<session>/session.sqlite` | closed pi-durable SQLite snapshot (schema v1), admitted explicitly |
 
 Corpus governance is a checksum manifest, not git — `MANIFEST.json` is the SSOT
 and `MANIFEST.sha256` is `sha256sum -c` compatible, so the corpus is verifiable
@@ -235,14 +243,48 @@ nothing else. The transcript may carry backend/name hints, but canonical garden
 identity and the native-session join live only in the meta-record.
 
 Saved task metadata / control sockets are not separately embedded; only the
-transcript JSONL that lands under the pi sessions tree participates in
-`sessions.lance`.
+transcript JSONL that lands under the pi sessions tree, and admitted pi-durable
+snapshots (below), participate in `sessions.lance`.
+
+**pi-durable is snapshot-only** (issue #15; rules in INVARIANT §7.6–7.7).
+
+- **No live gather.** `corpus:gather` admits `.jsonl` only. A durable session
+  reaches the corpus as ONE closed snapshot, made beforehand by an approved
+  procedure outside this repo, through `./run.sh corpus:durable-admit <snapshot>
+  --device <roster id>` (real copy 0600, atomic rename; a replacement must keep
+  lineage and the old last entry and must not shrink). andenken never opens,
+  snapshots or finds a live durable store; the reader refuses recognizable live
+  stores by name, which is not proof that a store is closed.
+- **Separate checkpoint.** `./run.sh index:durable` (paid, authority-only;
+  `--dry-run` is API 0) embeds policy `B.1` — human input runs and their answers;
+  ambiguous entries are reported, not embedded; entries of a run still open in
+  the snapshot wait for a later one — and checkpoints in
+  `data/durable-manifest.json`, never `session-manifest.json`. A different policy,
+  lineage, rollback, divergence or winning path is refused by name.
+- **Reading is not admission.** `./run.sh durable:read` reads every entry of a
+  closed snapshot, including those B.1 does not embed; search excerpts for
+  pi-durable hits point to session, lineage and entry ids.
+- **Publish pairing.** `sync-sessions.sh --global` ships `durable-manifest.json`
+  with `sessions.lance` and, when the authority has none, removes exactly that
+  file on the replica. Admitted snapshots travel with the corpus.
+- **Full rebuild drops it.** `rebuild-sessions-full.sh` and `index:sessions
+  --force` delete the durable manifest with the rows; run `index:durable` again
+  afterwards.
+- **One writer lock.** Every sessions.lance writer — sync, rebuild,
+  `index:sessions`/`index:durable`, sessions cleanup/compact, durable admit, pi
+  `/memory` — takes `data/.sessions-write.lock` non-blocking (exit 75
+  `sessions-writer-busy` / `sessions-writer-stale-lock`, no automatic reclaim).
+  The guarantee belongs to the code that runs: pi honours it only from a rebuilt
+  `dist/` in a reloaded process. A pi process started before that keeps the old
+  `/memory reindex`, which takes no lock and must not be used during operations;
+  confirm no non-locking writer is active before a paid sessions run.
 
 Do **not** index `~/.pi/agent/claude-config-overlay/projects`. That directory
 is pi-shell-acp's Claude overlay, not a third memory source. Its work is already
 represented through pi harness sessions / entwurf messages; indexing it would
-create duplicate memory. If source optionalization is added, valid choices are
-only `pi`, `claude`, and `all` (`pi + claude`). No `overlay` source.
+create duplicate memory. JSONL discovery chooses only `pi`, `claude`, and `all`
+(`pi + claude`). Search filters add `pi-durable` for admitted snapshot rows. No
+`overlay` source.
 
 ### Why the split
 
@@ -417,6 +459,12 @@ workflow. Implications:
   A replica's own sessions reach search by travelling to the authority as source
   files and returning inside the pushed index. `ANDENKEN_ALLOW_REPLICA_INDEX=1`
   is a fork, not a way to catch up. See INVARIANT 7.1.
+- **One writer at a time, across processes.** A writer that finds
+  `data/.sessions-write.lock` held exits 75 and is not retried. The agent-config
+  warm path (`warm-local.sh`) stamps its request before detaching the sync and
+  logs its output, so a refusal there costs one warm request until the cooldown
+  passes. A stale lock is removed by an operator after checking no writer runs.
+  See INVARIANT 7.6.
 
 ## Pointers
 

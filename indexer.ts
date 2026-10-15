@@ -29,6 +29,9 @@ import { findSessionFiles, extractSessionChunks } from "./session-indexer.js";
 import { findOrgFiles, chunkOrgFile, shouldIndexOrgFile } from "./org-chunker.js";
 import { findMdFiles, chunkMdFile, mdChunkToStoreRow } from "./md-chunker.js";
 import { WriteBuffer } from "./write-buffer.js";
+import { durableCorpusRoot } from "./durable-source.js";
+import { forgetDurableFiles, invalidateDurableManifest, renderDurableIndexReport, runDurableIndex } from "./durable-index.js";
+import { SessionsLockRefused, withSessionsLock } from "./sessions-lock.js";
 
 // --- dictcli stem integration (Layer 3 → Layer 1 bridge) ---
 
@@ -521,7 +524,13 @@ async function indexSessions(force: boolean) {
 
   const store = new VectorStore(undefined, provider.dimensions || 2560);
   await store.init();
-  if (force) await store.reset();
+  if (force) {
+    // The reset takes the pi-durable rows too, so their checkpoint goes — FIRST.
+    // A failure between the two then leaves rows without a checkpoint (the next
+    // index:durable re-processes them), never a checkpoint claiming lost rows.
+    invalidateDurableManifest(path.join(getDataDir(), "durable-manifest.json"));
+    await store.reset();
+  }
   await store.ensureTable();
 
   // PR-D safety: refuse to write when the existing table dim doesn't match
@@ -652,6 +661,55 @@ async function indexSessions(force: boolean) {
   console.log(`💰 API: ${stats.calls} calls, ~${(stats.estimatedTokens / 1000).toFixed(0)}K tokens, ~$${stats.estimatedCostUSD.toFixed(3)}`);
   console.log(`Total in DB: ${total}`);
   await store.close();
+}
+
+// --- pi-durable snapshots (issue #15) ---
+//
+// Corpus snapshots only (durable-source.ts admits them); rows land in
+// sessions.lance under source "pi-durable", tracked by data/durable-manifest.json.
+// --dry-run builds no provider and opens no store.
+async function indexDurable(dryRun: boolean, json: boolean) {
+  const corpus = durableCorpusRoot();
+  if (!corpus) throw new Error("index:durable reads corpus snapshots only — set ANDENKEN_SESSION_CORPUS");
+  const deps = {
+    corpus,
+    manifestPath: path.join(getDataDir(), "durable-manifest.json"),
+    dryRun,
+  };
+  if (dryRun) {
+    const report = await runDurableIndex(deps);
+    console.log(json ? JSON.stringify(report, null, 2) : renderDurableIndexReport(report));
+    return;
+  }
+  // Same authority rule as scripts/sync-sessions.sh: only the index authority writes.
+  const device = (fs.existsSync(path.join(process.env.HOME ?? "", ".current-device"))
+    ? fs.readFileSync(path.join(process.env.HOME ?? "", ".current-device"), "utf-8")
+    : "").trim();
+  const authority = process.env.ANDENKEN_INDEX_AUTHORITY ?? "thinkpad";
+  if (device !== authority && process.env.ANDENKEN_ALLOW_REPLICA_INDEX !== "1") {
+    throw new Error(`index:durable writes only on the index authority (${authority}); this device is ${device || "unknown"}`);
+  }
+  // getSessionsProvider() announces itself on stdout; --json keeps stdout to the report.
+  const provider = json ? createSessionProviderFromEnv() : getSessionsProvider();
+  if (!provider) throw new Error("No sessions embedding provider available (ANDENKEN_SESSION_*)");
+  const store = new VectorStore(undefined, provider.dimensions || 2560);
+  await store.init();
+  await store.ensureTable();
+  await store.assertCompatibleDim();
+  try {
+    const report = await runDurableIndex({ ...deps, store, provider });
+    const stats = provider.getStats();
+    const api = { calls: stats.calls, estimatedTokens: stats.estimatedTokens, estimatedCostUSD: stats.estimatedCostUSD };
+    // --json: stdout carries one JSON document and nothing else.
+    if (json) console.log(JSON.stringify({ ...report, api }, null, 2));
+    else {
+      console.log(renderDurableIndexReport(report));
+      console.log(`💰 API: ${api.calls} calls, ~${(api.estimatedTokens / 1000).toFixed(0)}K tokens, ~$${api.estimatedCostUSD.toFixed(3)}`);
+    }
+    if (report.files.some((f) => f.status === "failed" || f.status === "refused")) process.exitCode = 1;
+  } finally {
+    await store.close();
+  }
 }
 
 // --- MD Indexing (public garden direct embedding) ---
@@ -1592,6 +1650,13 @@ async function cleanup(target: string) {
 
     // 3. Remove orphans
     if (orphanFiles.size > 0) {
+      if (t === "sessions") {
+        // A pi-durable file whose rows are about to go loses its checkpoint FIRST:
+        // a failed delete then leaves rows a rerun removes, never a checkpoint
+        // for rows that are gone.
+        const dropped = forgetDurableFiles(path.join(getDataDir(), "durable-manifest.json"), orphanFiles);
+        if (dropped.length > 0) console.log(`Durable checkpoints dropped: ${dropped.length}`);
+      }
       console.log(`Removing ${orphanFiles.size} orphan files from DB...`);
       for (const f of orphanFiles) {
         await table.delete(`\`sessionFile\` = '${f.replace(/'/g, "''")}'`);
@@ -2132,22 +2197,32 @@ if (isDirectInvocation) {
   const args = process.argv.slice(2);
   const cmd = args[0];
   const force = args.includes("--force");
+  const dryRun = args.includes("--dry-run");
+  // Every write to sessions.lance (or its manifests) holds the shared writer lock.
+  const touchesSessions = (target: string) => target === "sessions" || target === "all";
 
+  try {
   switch (cmd) {
     case "sessions":
-      await indexSessions(force);
+      await withSessionsLock("index:sessions", () => indexSessions(force));
       break;
     case "md":
       await indexMd(force);
+      break;
+    case "durable":
+      if (dryRun) await indexDurable(true, args.includes("--json"));
+      else await withSessionsLock("index:durable", () => indexDurable(false, args.includes("--json")));
       break;
     case "org":
       await indexOrg(force);
       break;
     case "compact":
-      await compact(args[1] ?? "all");
+      if (touchesSessions(args[1] ?? "all")) await withSessionsLock(`compact ${args[1] ?? "all"}`, () => compact(args[1] ?? "all"));
+      else await compact(args[1] ?? "all");
       break;
     case "cleanup":
-      await cleanup(args[1] ?? "org");
+      if (touchesSessions(args[1] ?? "org") && !dryRun) await withSessionsLock(`cleanup ${args[1]}`, () => cleanup(args[1] ?? "org"));
+      else await cleanup(args[1] ?? "org");
       break;
     case "verify":
       await verify(args[1] ?? "all");
@@ -2167,5 +2242,12 @@ if (isDirectInvocation) {
       console.log("  npx tsx indexer.ts verify all      # post-indexing integrity check (sessions + md)");
       console.log("  npx tsx indexer.ts status [--json] # status; --json emits machine-readable schema");
       console.log("  npx tsx indexer.ts estimate md     # API-0 dry-run cost estimate");
+  }
+  } catch (err) {
+    if (err instanceof SessionsLockRefused) {
+      console.error(`REFUSED ${err.message}`);
+      process.exit(err.exitCode);
+    }
+    throw err;
   }
 }

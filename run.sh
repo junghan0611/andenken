@@ -44,7 +44,14 @@ Usage: ./run.sh <command> [args]
   build                       rebuild dist/ only (after source edits)
 
 === Indexing ===
-  index:sessions [--force]    Index pi + Claude Code sessions
+  index:sessions [--force]    Index pi + Claude Code sessions. Every sessions.lance
+                              writer (index:sessions/durable, cleanup/compact sessions,
+                              sync/rebuild:sessions, corpus:durable-admit; pi /memory
+                              only from a rebuilt dist in a reloaded pi) takes ONE
+                              non-blocking lock, data/.sessions-write.lock;
+                              held → exit 75 sessions-writer-busy|-stale-lock, never
+                              waited on or reclaimed. Dry-runs take no lock.
+                              --force also drops data/durable-manifest.json
   index:md [--force]          Index public garden Markdown (issue #8)
   index:org [--force]         Index org-mode KB (disabled in production — upstream R&D)
   sync:md                     md incremental (alias for index:md without --force)
@@ -98,7 +105,8 @@ Usage: ./run.sh <command> [args]
   sync:sessions [--local|--global]
                               scripts/sync-sessions.sh (default --local: this
                               device only, ssh 0; --global: all devices + verify
-                              + publish index/manifest/corpus together)
+                              + publish index, session + durable manifests and
+                              corpus together)
                               wrong-dim → API0 abort
                               to_index=0 → API0 exit (or rsync-only with --push)
                               else → preflight 1 + incremental
@@ -188,6 +196,42 @@ Usage: ./run.sh <command> [args]
   excerpt:session <f> <line>  Render read-only excerpt around a JSONL line (C2.1a)
                               Flags: --before N --after N --max N --no-tool --no-session --json
   test:excerpt                Fixture tests for session-excerpt.ts (API 0)
+
+=== pi-durable reader (issue #15, API 0) ===
+  durable:census <session.sqlite> [--json]
+                              Counts only: conversations, kinds, origins, submissions
+  durable:read <session.sqlite> --around E [--before N --after N]
+  durable:read <session.sqlite> [--conversation C] [--from E] [--to E] [--limit N]
+                              Raw entries with origin + basis; --max-chars N cuts
+                              each entry and says so; --json for siblings.
+                              --around counts physical entries of E's own conversation
+                              CLOSED SNAPSHOTS ONLY — a live session DB (live root,
+                              hard link, WAL header, -wal/-shm beside it) is refused
+                              by name before it is opened
+  corpus:durable-admit <closed snapshot> --device <roster id> [--bucket B --session S] [--json]
+                              Copy ONE already-made closed snapshot into the session
+                              corpus (durable grammar, real copy 0600, atomic rename).
+                              Never snapshots or opens a live DB. Replacing a corpus
+                              copy needs same lineage + unchanged last entry.
+                              Holds the sessions writer lock (exit 75 if held)
+  index:durable --dry-run [--json]
+                              API 0: what the next durable indexing run would embed
+                              Reports row and character counts, estimated token count,
+                              and identifiers of held or ambiguous entries.
+  index:durable [--json]      PAID: embed corpus pi-durable snapshots (policy B.1)
+                              into sessions.lance; checkpoint in data/durable-manifest.json.
+                              Authority-only; run it only when the operator says when.
+                              Holds the sessions writer lock (exit 75 if held)
+  durable:plan <session.sqlite> [--json]
+                              Embedding PLAN only (API 0): per entry, what candidate
+                              policies B (human run) / C (root assistant) would do,
+                              with basis, hold watermark and token estimate. Writes,
+                              embeds and indexes nothing; prints no entry text
+  test:durable                Type fence (tsconfig.durable.json) + fixture tests for
+                              durable reader, plan, admit, index, excerpt, the
+                              sessions writer lock and sync-sessions publish failure
+                              propagation (API 0, temp corpus + temp LanceDB, stub
+                              provider at 127.0.0.1:9, stub rsync/ssh)
 
 === Utility ===
   env                         Show environment status
@@ -362,6 +406,23 @@ case "${1:-help}" in
     shift; cd "$SCRIPT_DIR" && pnpm exec tsx scripts/session-excerpt.ts "$@" ;;
   test:excerpt)
     cd "$SCRIPT_DIR" && pnpm exec tsx session-excerpt.test.ts ;;
+  durable:census)
+    # The snapshot path is resolved against the caller's directory, not the repo.
+    shift; export DURABLE_CALLER_CWD="$PWD"; cd "$SCRIPT_DIR" && pnpm exec tsx scripts/durable-read.ts census "$@" ;;
+  durable:read)
+    shift; export DURABLE_CALLER_CWD="$PWD"; cd "$SCRIPT_DIR" && pnpm exec tsx scripts/durable-read.ts read "$@" ;;
+  durable:plan)
+    shift; export DURABLE_CALLER_CWD="$PWD"; cd "$SCRIPT_DIR" && pnpm exec tsx scripts/durable-plan.ts "$@" ;;
+  corpus:durable-admit)
+    shift; load_env; export DURABLE_CALLER_CWD="$PWD"; cd "$SCRIPT_DIR" && pnpm exec tsx scripts/durable-admit.ts "$@" ;;
+  index:durable)
+    shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts durable "$@" ;;
+  test:durable)
+    # Type fence first (reader + CLI + test), then the fixtures.
+    cd "$SCRIPT_DIR" && pnpm exec tsc -p tsconfig.durable.json \
+      && pnpm exec tsx durable-reader.test.ts && pnpm exec tsx durable-plan.test.ts \
+      && pnpm exec tsx durable-source.test.ts && pnpm exec tsx sessions-lock.test.ts \
+      && pnpm exec tsx sync-publish.test.ts ;;
 
   # === PR-B sessions sync / rebuild ===
   rebuild:sessions)

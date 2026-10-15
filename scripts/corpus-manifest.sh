@@ -44,6 +44,7 @@ CORPUS="$CORPUS" python3 - "$CMD" <<'PY'
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 
@@ -53,16 +54,19 @@ json_path = os.path.join(corpus, "MANIFEST.json")
 sha_path = os.path.join(corpus, "MANIFEST.sha256")
 
 
+DURABLE = re.compile(r"^[^/]+/\.pi/agent/experimental/durable-sessions/[0-9a-f]{24}/\d{13}-[0-9a-f-]{36}/session\.sqlite$")
+
+
 def walk():
-	"""Every .jsonl under the corpus, as $CORPUS-relative paths, sorted."""
+	"""Every .jsonl, plus pi-durable snapshots in their corpus grammar (issue #15), as $CORPUS-relative paths, sorted."""
 	out = []
 	for dirpath, dirnames, filenames in os.walk(corpus):
 		dirnames.sort()
 		for name in sorted(filenames):
-			if not name.endswith(".jsonl"):
-				continue
 			full = os.path.join(dirpath, name)
-			out.append(os.path.relpath(full, corpus))
+			rel = os.path.relpath(full, corpus)
+			if name.endswith(".jsonl") or (name == "session.sqlite" and DURABLE.match(rel)):
+				out.append(rel)
 	return sorted(out)
 
 

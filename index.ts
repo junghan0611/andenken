@@ -36,7 +36,9 @@ import {
   mdResultToJson,
   MD_DEFAULT_LIMIT,
 } from "./md-search.js";
-import { readSessionExcerpt, type SessionExcerpt } from "./session-excerpt.js";
+import { readHitExcerpt, isHitExcerpt, type HitExcerpt, type HitUnsupported } from "./session-excerpt-dispatch.js";
+import { acquireSessionsLock, SessionsLockRefused, type SessionsLockHandle } from "./sessions-lock.js";
+import { invalidateDurableManifest } from "./durable-index.js";
 import { recordRecall } from "./recall-log.js";
 
 // Re-declare minimal SearchResult to avoid jiti-incompatible import() type syntax
@@ -368,17 +370,17 @@ export default function (pi: ExtensionAPI) {
       ),
       source: Type.Optional(
         Type.Union(
-          [Type.Literal("pi"), Type.Literal("claude"), Type.Literal("all")],
+          [Type.Literal("pi"), Type.Literal("claude"), Type.Literal("pi-durable"), Type.Literal("all")],
           {
             description:
-              "Filter by session source. Default 'all' = pi + claude, with md knowledge cross-track fallback when sessions results are thin. Explicit 'pi' or 'claude' restricts the candidate pool to that source AND disables the knowledge fallback (sessions-only intent).",
+              "Filter by session source. Default 'all' = pi + claude + pi-durable, with md knowledge cross-track fallback when sessions results are thin. Explicit 'pi', 'claude' or 'pi-durable' restricts the candidate pool to that source AND disables the knowledge fallback (sessions-only intent).",
           },
         ),
       ),
       withExcerpt: Type.Optional(
         Type.Boolean({
           description:
-            "If true, attach a read-only excerpt around each top result's lineNumber, expanding User/Assistant/toolResult/entwurf flow from the original JSONL. No API/DB writes. Default false.",
+            "If true, attach a read-only excerpt around each top result's lineNumber, expanding User/Assistant/toolResult/entwurf flow from the original JSONL (unit jsonl-line) or, for pi-durable hits, the neighbouring entries of the same conversation (unit durable-entry; line numbers are entry ids). No API/DB writes. Default false.",
           default: false,
         }),
       ),
@@ -670,7 +672,7 @@ export default function (pi: ExtensionAPI) {
       // Pure read-only: no API, no DB write. We tolerate per-file errors
       // (e.g. JSONL deleted since indexing) and just skip excerpt for that
       // hit rather than failing the whole search.
-      let excerpts: Map<string, SessionExcerpt> | undefined;
+      let excerpts: Map<string, HitExcerpt | HitUnsupported> | undefined;
       if (params.withExcerpt) {
         const excerptLimit = Math.max(0, Math.min(params.excerptLimit ?? 3, finalResults.length));
         excerpts = await fetchExcerptsForResults(finalResults.slice(0, excerptLimit));
@@ -840,6 +842,18 @@ export default function (pi: ExtensionAPI) {
             ctx.ui.notify("Session memory not initialized.", "warning");
             return;
           }
+          // Shared sessions writer lock (sessions-lock.ts). A long-lived pi never
+          // re-enters by token (env: {}), and nothing here writes the token to process.env.
+          let lock: SessionsLockHandle;
+          try {
+            lock = acquireSessionsLock("pi /memory reindex sessions", { env: {} });
+          } catch (err) {
+            if (err instanceof SessionsLockRefused) {
+              ctx.ui.notify(`⏸ ${err.message}`, "warning");
+              return;
+            }
+            throw err;
+          }
           p.resetStats();
           ctx.ui.notify(`🧠 Starting session index (${p.name})...`, "info");
           try {
@@ -856,6 +870,8 @@ export default function (pi: ExtensionAPI) {
               `❌ Failed: ${err instanceof Error ? err.message : String(err)}`,
               "error",
             );
+          } finally {
+            lock.release();
           }
         }
 
@@ -914,23 +930,18 @@ export default function (pi: ExtensionAPI) {
 // --- Helpers ---
 
 /**
- * Read excerpts for the top-N hits. Returns a Map keyed by `sessionFile:line`
- * (matching `SearchResult.id` shape from session-indexer.ts) → SessionExcerpt.
- * Errors per file are swallowed so a single missing JSONL never breaks the
- * whole search.
+ * Read excerpts for the top-N hits through the dispatch shared with the CLI
+ * (JSONL lines or pi-durable entries, unit labelled). Keyed by `SearchResult.id`.
+ * A JSONL that rotated away is skipped; a refused durable read is kept as a
+ * named `unsupported` so the agent sees why.
  */
 async function fetchExcerptsForResults(
   results: SearchResult[],
-): Promise<Map<string, SessionExcerpt>> {
-  const out = new Map<string, SessionExcerpt>();
+): Promise<Map<string, HitExcerpt | HitUnsupported>> {
+  const out = new Map<string, HitExcerpt | HitUnsupported>();
   for (const r of results) {
-    if ((r.source !== "pi" && r.source !== "claude") || !r.sessionFile.endsWith(".jsonl")) continue;
-    try {
-      const ex = await readSessionExcerpt(r.sessionFile, r.lineNumber);
-      out.set(r.id, ex);
-    } catch {
-      // file may have been deleted/rotated since indexing — skip silently
-    }
+    const ex = await readHitExcerpt(r);
+    if (ex) out.set(r.id, ex);
   }
   return out;
 }
@@ -943,7 +954,7 @@ async function fetchExcerptsForResults(
 function formatResults(
   query: string,
   results: SearchResult[],
-  excerpts?: Map<string, SessionExcerpt>,
+  excerpts?: Map<string, HitExcerpt | HitUnsupported>,
 ) {
   if (results.length === 0) {
     return {
@@ -966,12 +977,14 @@ function formatResults(
         `- Text:\n${r.text.slice(0, 500)}${r.text.length > 500 ? "..." : ""}`,
       ];
       const ex = excerpts?.get(r.id);
-      if (ex) {
+      if (isHitExcerpt(ex)) {
         const truncTag = ex.truncated ? " (truncated)" : "";
-        lines.push(
-          `- Excerpt L${ex.startLine}-L${ex.endLine}${truncTag}:`,
-          ex.text,
-        );
+        const span = ex.unit === "durable-entry"
+          ? `entries e${ex.startLine}-e${ex.endLine} (pi-durable session ${ex.session ?? "?"})`
+          : `L${ex.startLine}-L${ex.endLine}`;
+        lines.push(`- Excerpt ${span}${truncTag}:`, ex.text);
+      } else if (ex) {
+        lines.push(`- Excerpt unavailable (${ex.unsupported})${ex.read ? ` — read with: ${ex.read}` : ""}`);
       }
       return lines.join("\n");
     })
@@ -998,13 +1011,19 @@ function formatResults(
           sessionFile: r.sessionFile,
           lineNumber: r.lineNumber,
         };
-        if (ex) {
+        if (isHitExcerpt(ex)) {
           base.excerpt = {
+            unit: ex.unit,
             startLine: ex.startLine,
             endLine: ex.endLine,
             truncated: ex.truncated,
             text: ex.text,
+            ...(ex.unit === "durable-entry"
+        ? { session: ex.session, lineage: ex.lineage, entry: ex.entry, answeredInputs: ex.answeredInputs, read: ex.read }
+        : {}),
           };
+        } else if (ex) {
+          base.excerpt = ex;
         }
         return base;
       }) as Array<Record<string, unknown>>,
@@ -1019,7 +1038,13 @@ async function indexSessions(
   force: boolean = false,
 ): Promise<void> {
   const files = findSessionFiles();
-  if (force) await store.reset();
+  if (force) {
+    // The reset takes the pi-durable rows too, so their checkpoint goes — FIRST.
+    // A failure between the two then leaves rows without a checkpoint (the next
+    // index:durable re-processes them), never a checkpoint claiming lost rows.
+    invalidateDurableManifest(path.join(getDataDir(), "durable-manifest.json"));
+    await store.reset();
+  }
   await store.ensureTable();
 
   // PR-D safety: refuse to write to a store whose actual dim doesn't match

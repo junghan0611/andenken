@@ -246,6 +246,21 @@ replica whose source file is not there — seven such orphans were measured that
 day. This is why `--global` is a single act rather than three commands an
 operator is trusted to run in order.
 
+**Extended 2026-10-15 to the durable checkpoint.** pi-durable rows live in
+`sessions.lance`, so `data/durable-manifest.json` is a second manifest of the same
+DB and publishes with it. Its **absence** publishes too: when the authority has
+none (a full rebuild, `index:sessions --force`), `--global` removes exactly that
+one file on the replica. A failed rsync or ssh removal fails the publish and
+stops it before the corpus step; nothing else on the remote is deleted.
+
+`set -euo pipefail` alone did not give that. `publish_replica` calls
+`push_replica || return 1`, a condition context in which bash suppresses
+errexit inside the callee, so a failed sessions.lance rsync (rc 23) was
+swallowed whenever a later manifest step succeeded and publish reported OK.
+Every step in `push_replica` therefore ends in `|| return $?`;
+`sync-publish.test.ts` runs the production functions with stub rsync/ssh and
+pins each failure.
+
 ## 7. Single-writer invariant
 
 Invariant:
@@ -437,6 +452,111 @@ Invariant: **the import states its own outcome; nobody infers it from mtime.**
 imported, unchanged, host}` keyed to the artifact it read, and `./run.sh status`
 reports `folded` / `PENDING` from that key — not from a timestamp comparison.
 
+### 7.6 One writer lock for sessions.lance
+
+`WriteBuffer` serializes writes *inside* one process. Until 2026-10-15 nothing
+serialized the processes: `scripts/sync-sessions.sh` — which the agent-config
+session warm path reaches through `warm-local.sh`, whose own flock covers only
+the warm path — could run beside `index:sessions`, a cleanup or a pi `/memory
+reindex` against the same DB and manifests.
+
+Invariant: **every process that writes `sessions.lance`, `session-manifest.json`,
+`durable-manifest.json` or a corpus durable snapshot holds one lock first**:
+
+```
+<data dir>/.sessions-write.lock/owner      pid= token= command= startedAt= host=
+```
+
+`sessions-lock.ts` and `scripts/lib/sessions-lock.sh` implement the same rules:
+
+1. **Non-blocking, refused by name, exit 75.** `sessions-writer-busy` when the
+   owner pid is alive, `sessions-writer-stale-lock` when it is gone or the owner
+   file is unreadable. A held lock is never waited on.
+2. **No automatic reclaim.** A stale lock stays until an operator removes it
+   after checking that no writer runs. A dead pid is evidence that the last
+   writer stopped, not that the DB and manifests are consistent.
+3. **Atomic creation.** The owner file is written in a temp directory that is
+   renamed onto the lock path, so a lock never exists without an owner; the owner
+   read back after the rename must carry this holder's token.
+4. **Re-entry by token only.** A wrapper passes its token to its own children
+   (`ANDENKEN_SESSIONS_LOCK_TOKEN`); a child re-enters only when the token equals
+   the owner's **and** the owner pid is alive. Node holders never put the token
+   into `process.env`, so a long-lived pi process cannot leak it to unrelated
+   children.
+5. **Release only your own.** A holder removes the lock only while it still
+   carries that holder's token.
+
+Coverage: `sync-sessions.sh` from the status read through publish (after the
+authority gate); `rebuild-sessions-full.sh` from before the destroy step;
+`indexer.ts` `sessions`, `durable`, and `cleanup`/`compact` of `sessions`/`all`;
+`corpus:durable-admit`; pi `/memory reindex`. Dry-runs take no lock.
+
+**What the lock guarantees is a property of the code that runs, not of the
+source tree.** Keep three things apart:
+
+- **source** — the rules above, tested by `sessions-lock.test.ts` (real
+  subprocess writers racing a held lock);
+- **deployed dist** — pi loads `dist/`, so `/memory` honours the lock only after
+  a dist build;
+- **loaded runtime** — a pi process started before that build keeps the old code
+  and **does not take the lock**. Its explicit `/memory reindex` must not be used
+  during operations until the harness has been reloaded on the new dist.
+
+The lock therefore proves nothing about a writer that predates it. Before any
+paid sessions run, confirm no non-locking writer is active.
+
+### 7.7 pi-durable enters the corpus only as a closed snapshot
+
+A pi-durable session is a SQLite store a live pi process may be writing. andenken
+reads such stores only as **closed snapshots made beforehand by an approved
+procedure outside this repo**; it does not create snapshots, find live stores,
+or gather them.
+
+Invariant:
+
+1. **No live gather.** `corpus:gather` admits `.jsonl` only
+   (`scripts/corpus-admit.py`). A durable snapshot enters the corpus through one
+   explicit step, `corpus:durable-admit`, which needs a roster device, writes a
+   real copy (0600, new directories 0700) by atomic rename, and refuses a
+   replacement that changes lineage, alters the old last entry, has fewer
+   entries, or whose lineage is unknown.
+2. **Refuse before opening.** The reader refuses by name a path inside a live
+   durable root, a hard-linked file, a `-wal`/`-shm` sidecar beside it, a WAL
+   header, or a file that changed while it was opened. These are refusals of
+   recognizable live stores, **not proof that a store is closed**: a missing lock
+   or `-wal` file is not closure, and `immutable=1` — which the reader uses so a
+   read never writes a sidecar — ignores writers instead of excluding them, so it
+   cannot replace the closed check. A read-only connection is not a guarantee of
+   leaving `-shm` untouched either; a first read-only connection on a live WAL
+   store was measured changing it.
+3. **Its own manifest.** `data/durable-manifest.json`, never
+   `session-manifest.json`. Per snapshot: lineage, policy, `processedId`, and a
+   witness (the last entry ≤ `processedId` and the sha256 of its record). The
+   manifest advances only after the rows are flushed (6.5).
+4. **One policy at a time.** The admission policy is pinned (`B.1`). A manifest
+   written under another is refused (`durable-policy-changed`), never mixed.
+   Lineage change, fewer entries, a changed witness and a different winning path
+   for one lineage are refused as `durable-lineage-mismatch`, `durable-rollback`,
+   `durable-diverged` and `durable-winner-path-changed`; nothing is migrated
+   automatically.
+5. **Human is proven, not defaulted.** A NULL `submissions.request_id` alone does
+   not make an entry human: the entry kind, its conversation, and the input path
+   must agree. Unknown origins stay unknown and are not embedded as human.
+   Ambiguous entries are not embedded and are reported by id.
+6. **Reading is not admission.** `durable:read` reads every entry a snapshot
+   holds, including those B.1 does not embed. An entry outside the index is not
+   absent; search excerpts point back to it by session, lineage and entry id.
+7. **A full rebuild drops the checkpoint.** `rebuild-sessions-full.sh` and
+   `index:sessions --force` delete `durable-manifest.json` together with the
+   rows; durable rows return only through a later `index:durable`. Cleanup
+   orphan removal drops the checkpoints of the files it removes.
+8. **The checkpoint goes before its rows.** A reset or orphan delete removes
+   the durable checkpoint first and the rows second. If the checkpoint step
+   fails, no row is touched; if the row step fails, rows remain without a
+   checkpoint — a rerun of cleanup removes them, the next `index:durable`
+   re-processes them from 0 — and never a checkpoint claiming rows that are
+   gone, which `index:durable` would report as up to date.
+
 ## 8. Test invariants
 
 At minimum, unit tests must prove:
@@ -474,6 +594,8 @@ Before merging chunking/indexing changes, verify:
 - [ ] Does manifest update only after success?
 - [ ] Does the change respect the 8K serving limit?
 - [ ] Does any read path open a store without `{readOnly: true}`? (§7.4)
+- [ ] Does a new sessions.lance writer take the sessions writer lock? (§7.6)
+- [ ] Does any path open, snapshot or gather a live pi-durable store? (§7.7)
 - [ ] If scope policy changed, did we require full org rebuild?
 - [ ] Did `npm test -- unit` pass?
 - [ ] Did `npm run build` pass?
@@ -484,6 +606,7 @@ Before merging chunking/indexing changes, verify:
 npm test -- unit
 npm run build
 ./run.sh test:absent      # §7.4 — a read never creates an axis (API 0)
+./run.sh test:durable     # §7.6, §7.7 — writer lock + durable snapshots (API 0)
 ```
 
 For policy / chunking changes, also run a local scan or doctor-style check before force rebuild.

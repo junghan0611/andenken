@@ -23,7 +23,7 @@ import {
 import { VectorStore, getSessionsDbPath, getOrgDbPath, getMdDbPath, getOpenclawDbPath, getDataDir, isAxisAbsentError, EXIT_AXIS_ABSENT, type SearchResult, type SearchFilters } from "./store.js";
 import { findSessionFiles, extractSessionChunks, normalizeSourceFilter } from "./session-indexer.js";
 import { retrieve, expandQueryForBM25, getShortCJKTokens, sortByTimestampDesc, type MergeStrategy } from "./retriever.js";
-import { readSessionExcerpt, type SessionExcerpt } from "./session-excerpt.js";
+import { readHitExcerpt, isHitExcerpt, type HitExcerpt, type HitUnsupported } from "./session-excerpt-dispatch.js";
 import {
   searchMdCore,
   dictcliExpand,
@@ -372,17 +372,14 @@ async function searchSessions(
   recordRecall(query, "search-sessions", finalResults, { limit });
 
   // C2.1c — opt-in excerpt attachment for top hits.
-  let excerpts: Map<string, SessionExcerpt> | undefined;
+  let excerpts: Map<string, HitExcerpt | HitUnsupported> | undefined;
   if (opts.withExcerpt) {
     const n = Math.max(0, Math.min(opts.excerptLimit ?? 3, finalResults.length));
     excerpts = new Map();
     for (const r of finalResults.slice(0, n)) {
-      if ((r.source !== "pi" && r.source !== "claude") || !r.sessionFile.endsWith(".jsonl")) continue;
-      try {
-        excerpts.set(r.id, await readSessionExcerpt(r.sessionFile, r.lineNumber));
-      } catch {
-        /* skip silently — file may have rotated since indexing */
-      }
+      // Shared with the pi tool: JSONL lines or pi-durable entries, unit labelled.
+      const ex = await readHitExcerpt(r);
+      if (ex) excerpts.set(r.id, ex);
     }
   }
 
@@ -649,7 +646,7 @@ async function reindex(force: boolean): Promise<void> {
 
 // --- Helpers ---
 
-function formatResult(r: SearchResult, excerpt?: SessionExcerpt) {
+function formatResult(r: SearchResult, excerpt?: HitExcerpt | HitUnsupported) {
   const base: Record<string, unknown> = {
     project: r.project,
     role: r.role,
@@ -660,13 +657,19 @@ function formatResult(r: SearchResult, excerpt?: SessionExcerpt) {
     timestamp: r.timestamp,
     text: r.text.slice(0, 800) + (r.text.length > 800 ? "..." : ""),
   };
-  if (excerpt) {
+  if (isHitExcerpt(excerpt)) {
     base.excerpt = {
+      unit: excerpt.unit,
       startLine: excerpt.startLine,
       endLine: excerpt.endLine,
       truncated: excerpt.truncated,
       text: excerpt.text,
+      ...(excerpt.unit === "durable-entry"
+        ? { session: excerpt.session, lineage: excerpt.lineage, entry: excerpt.entry, answeredInputs: excerpt.answeredInputs, read: excerpt.read }
+        : {}),
     };
+  } else if (excerpt) {
+    base.excerpt = excerpt;
   }
   return base;
 }
@@ -781,7 +784,7 @@ async function main() {
         console.error(
           JSON.stringify({
             error:
-              "Usage: search-sessions <query> [--limit N] [--source pi|claude|all] [--with-excerpt] [--excerpt-limit N] " +
+              "Usage: search-sessions <query> [--limit N] [--source pi|claude|pi-durable|all] [--with-excerpt] [--excerpt-limit N] " +
               "[--date-from ISO] [--date-to ISO] [--project name[,name]] [--role user|assistant|compaction[,...]] " +
               "[--session-file path] [--session-file-contains substr] [--mode semantic|hybrid|recent]",
           }),

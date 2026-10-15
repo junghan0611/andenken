@@ -5,6 +5,36 @@ andenken CalVer 스냅샷. 형식 `vYYYY.M.D[-suffix]`. 과거에 *닫힌* 작�
 
 ## Unreleased
 
+## v2026.10.15 — Durable conversation evidence and safer sessions maintenance
+
+### Durable conversations: one source, two independent reading paths (#15)
+
+- Added closed-snapshot census, raw entry windows and API-0 admission planning. Entries retain message boundaries, origin inference and its basis, explicit input/answer references, tool reports, compaction history and truncation markers. Physical conversation windows never silently merge root, fork or child histories.
+- Added explicit `corpus:durable-admit` and incremental `index:durable` into the existing sessions store. Admission verifies roster, path, lineage and snapshot continuity; canonical copies join the corpus checksum inventory. A separate durable manifest records B.1 policy and processed-entry checkpoints only after successful writes.
+- Preserved short human decisions and intermediate human-run replies. Mixed-origin replies remain named ambiguities; unfinished runs hold the checkpoint. Raw reading remains independent of embedding admission. One approved conversation supplied real-use evidence; this does not claim automatic collection of every durable session.
+- Unified CLI and pi excerpt dispatch, with durable entry units, source/session identity, explicit answered-input pointers and absolute raw-reader commands. SQLite is never treated as JSONL.
+- Admitted one authorized private snapshot to the canonical corpus and verified all 3,485 recorded corpus files. Its first incremental run added 103 rows: 107,553 → 107,656 sessions rows, 4096d, no duplicate IDs or orphan files. Provider statistics estimated 22,647 tokens / $0.00022647 across two calls, not a final billing receipt. One mixed-origin reply and one unfinished-run reply remained explicitly ambiguous/held; later live turns were not collected.
+
+### Sessions integrity and publishing
+
+- Added one cross-process writer lock for JSONL/durable indexing, admission, cleanup, compaction, rebuild and publication. Wrapper children re-enter only with a live owner's token. Busy/stale locks refuse with exit 75; stale locks are not reclaimed automatically. The existing sync-only flock keeps its distinct coalescing/wait behavior.
+- Refused an indexed lineage moving to another winner path, preventing duplicate rows and repeated embedding charges. Embed, flush and manifest-save failures leave a retryable unfinished range without deleting accepted rows or other sources.
+- Invalidated durable checkpoints before destructive reset/orphan deletion, including CLI, pi and rebuild paths. Fault-injection tests proved recovery after either side fails.
+- Fixed publication reporting success after an earlier rsync failure: shell conditional contexts suppressed `errexit`. Every transfer now explicitly propagates failure. Publishing carries DB, both manifests (including durable-manifest absence) and corpus together; production-function stub tests cover each failed stage without network access.
+- Added continuous type fences and offline reader/plan/source/lock/publication gates. Building dist does not refresh functions already loaded by running pi sessions; old `/memory reindex` must not race maintenance.
+
+### Known operational limits
+
+- A real source-filtered search recovered the target answer at rank 1 and the human input at rank 4, but the FTS arm also emitted a native Arrow/Rust panic. The FTS catch returned an empty arm, so successful CLI output does not establish clean hybrid-search quality. This remains unresolved ([#16](https://github.com/junghan0611/andenken/issues/16)); raw-reader acceptance, source indexing and whole-search acceptance are distinct.
+- The mandatory sessions compaction attempt was stopped at its configured 600-second limit. The coordinator's subsequent read-only verification still found 107,656 unique rows / 2,844 existing source files / 4096d, without duplicates or orphans; partial output increased fragments/storage to 23 / 4.7G. Compaction and the post-compaction FTS retest were not completed. No deadlock or root cause is inferred, and no retry or full re-embedding was performed.
+- Existing running pi sessions retain previously loaded code after a build. The new excerpt/lock paths are validated in source, built output and offline tests, not certified as loaded into every active harness. Only one approved durable snapshot was collected; live durable gathering remains explicit and outside ordinary JSONL sync.
+
+### OpenClaw harvest and maintenance since v2026.9.16
+
+- Decoded upstream binary64 embedding blobs without re-embedding. Added a freshness board and same-snapshot reconciliation, refusing unbound generations and isolating failed agent deltas.
+- Added backed-up, receipted stage-C pruning for dreaming and confirmed-superseded rows only. Session archives remain preserved; live rechecks protect against changed revisions and still-present dreaming files. Mass-decrease checks measure the actual prune step rather than accumulated archive stock.
+- Folded harvest, freshness review, narrow pruning, compaction, verification and private Oracle publication into the normal maintenance skill. Added the explicit approved-durable prelude; ordinary sessions sync does not gather live durable databases or automatically index durable snapshots.
+
 ## v2026.9.16 — 네 번째 축이 서고, 읽기가 축을 만들지 않게 되었다
 
 `v2026.9.4-docs.1` 이후 12일. 이 스냅샷의 주인공은 **OpenClaw 회수(tier 4)**다 —

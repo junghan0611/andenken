@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "allowImportingTsExtensions": true
+  },
+  "include": [
+    "durable-reader.ts", "scripts/durable-read.ts", "durable-reader.test.ts",
+    "durable-plan.ts", "scripts/durable-plan.ts", "durable-plan.test.ts",
+    "durable-source.ts", "durable-index.ts", "session-excerpt-dispatch.ts",
+    "scripts/durable-admit.ts", "durable-source.test.ts",
+    "sessions-lock.ts", "sessions-lock.test.ts", "sync-publish.test.ts"
+  ],
+  "exclude": ["node_modules"]
+}

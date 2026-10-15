@@ -24,7 +24,7 @@ not compose your own sequence.
 | GLG says | tier | command | ssh | replica gets |
 |---|---|---|---|---|
 | "세션 임베딩", "기억 최신화" | 1 | `./run.sh sync:sessions` | 0 | nothing |
-| "글로벌", "오라클까지", "양쪽 맞춰줘" | 2 | `./run.sh sync:sessions --global` | yes | index + manifest + corpus |
+| "글로벌", "오라클까지", "양쪽 맞춰줘" | 2 | `./run.sh sync:sessions --global` | yes | index + JSONL/durable manifests + corpus |
 | "가든 임베딩", "노트도" | 3 | `./run.sh sync:md` → `./run.sh verify md` → `./run.sh sync:md:oracle` | yes | md.lance + md-manifest |
 | "openclaw 가져와", "회수" | 4 | `./run.sh sync:openclaw` → read board → `prune:openclaw [--apply]` → `compact openclaw` → `verify openclaw` → `sync:openclaw:oracle` | yes | private openclaw.lance |
 
@@ -148,6 +148,67 @@ cd ~/repos/gh/andenken
 ./run.sh verify openclaw
 ./run.sh sync:openclaw:oracle     # → oracle: private openclaw.lance (API 0)
 ```
+
+### Approved pi-durable snapshot — explicit prelude, not automatic gather
+
+Only when GLG has authorized a particular **closed snapshot**, run this prelude
+before tier 2. It does not open, discover or snapshot any live durable DB. The
+initial 2026-10-15 coverage is **one approved agent-config session**, not every
+durable conversation. Creating a snapshot from a live DB is a separate approval:
+even a read-only SQLite connection can touch `-shm` and delay writer close. Missing
+lock/sidecar files do not prove that a DB is closed. Never bypass the reader's
+live-path, hardlink, sidecar or WAL-header refusals.
+
+```bash
+cd ~/repos/gh/andenken
+# SNAPSHOT is the explicitly approved closed copy, not a live session path.
+# DEVICE is its rostered collection device, not an inferred origin or new roster id.
+./run.sh corpus:durable-admit "$SNAPSHOT" --device "$DEVICE" --json
+./run.sh corpus:manifest update
+./run.sh index:durable --dry-run --json   # API 0: inspect rows/chars/estTokens first
+# Only the designated embedding executor runs the following, once approval and
+# independent review are complete. Do not launch it alongside the usual ask.
+./run.sh index:durable --json            # paid incremental, B.1 only
+./run.sh verify sessions
+# Continue with the usual ask's tier 2, then 3, then 4, in the same serial lane.
+./run.sh sync:sessions --global
+```
+
+The final line replaces, rather than duplicates, tier 2 in the usual ask above.
+One executor owns this entire paid sequence; do not run both local and global
+syncs or have another sibling repeat the durable index. `sync:sessions` itself
+**does not admit or index durable**: it publishes already indexed durable rows
+with `durable-manifest.json`, `session-manifest.json` and the corpus. Publish also
+propagates absence of a local durable manifest; an old replica checkpoint must
+not outlive a reset DB. Corpus checksum inventory includes admitted snapshots.
+
+`index:durable` requires the index authority (`thinkpad` by default), reuses the
+sessions provider (production Qwen3-Embedding-8B / 4096d), and checks DB/provider
+dimension compatibility before paid embedding. Never use the replica override
+to catch up. Dry-run constructs no provider and opens no vector store; its token
+estimate is a heuristic, not a spend cap. No automatic paid full rebuild is
+introduced. Inspect the predicted pending scope and stop if it exceeds the
+approved snapshot/estimate before issuing the paid command.
+
+B.1 preserves nonempty human inputs without a length floor and human-run assistant
+text, including human steer; ambiguous mixed-origin replies and unfinished runs
+are reported separately, not silently claimed as indexed. C remains a plan
+comparison, not the production policy. Reading raw entries is independent of
+embedding admission. Report `ambiguous`/`held` entry IDs and freshness: turns after
+the admitted snapshot are **not collected** until a separately authorized newer
+snapshot is admitted. Do not claim current live-conversation coverage.
+
+Admission and indexing share the common sessions writer lock described below.
+Its busy/stale refusal exits 75: inspect the owner, do not spin/re-run the paid
+command or remove a live lock. The separate sync-only flock still coalesces a
+concurrent local sync to exit 0 and makes a global sync wait for another sync;
+that is not the common writer lock's exit-75 contract. A failed embed/flush/manifest save does not advance the saved
+checkpoint; a later serial retry of the same command cleans only the unfinished
+range. A lineage, witness, policy or winner-path refusal needs diagnosis, not an
+override or a full rebuild. Direct `index:sessions --force` and full rebuilds
+invalidate durable checkpoints along with the DB; recovering durable rows then
+requires explicit `index:durable` again. Do not perform those destructive actions
+as part of the usual incremental ask.
 
 ### Tier 4 in the usual ask — read the board before the prune
 
@@ -539,9 +600,10 @@ thinkpad is the **canonical host**, oracle is a **query replica** (see the
 corpus section above for why, and for the authority guard, which refuses the
 whole sessions command — not just its publish half). Rules:
 
-- **§6.6 (INVARIANT.md)**: don't ship only the `.lance` DB. Sessions must rsync
-  `session-manifest.json`, md must rsync `md-manifest.json` **alongside** — otherwise
-  the replica is inconsistent. Both sync commands already carry the manifest.
+- **§6.6 (INVARIANT.md)**: don't ship only the `.lance` DB. Sessions must carry
+  `session-manifest.json`, the matching `durable-manifest.json` state (including
+  absence), and the corpus; md must rsync `md-manifest.json` **alongside** its DB.
+  Otherwise the replica is inconsistent. The normal sync commands own this pairing.
 - **§7.1**: oracle is not an indexing node. **Running the indexer on oracle diverges
   it from the source.** Replicate only.
 - push is outward-facing, so it needs an operator asking for it — but the ask
@@ -590,10 +652,26 @@ and prints `✅ preflight dim=4096`. Copy what the probe said.
 
 ## single-writer
 
-- **One writer per track at a time.** `sync:sessions` takes a non-blocking flock
-  (`data/.sync-sessions.lock`), so a second sessions sync — cron or manual — backs
-  off cleanly ("already running") instead of racing. compact/cleanup and md are
-  not yet lock-guarded, so still avoid running two of those on the same track at once.
+- **Two lock layers, different outcomes.** The pre-existing sync-only
+  `data/.sync-sessions.lock` flock remains: local-vs-sync coalesces to exit 0;
+  global-vs-sync waits for its own pass. This only coordinates sync wrappers.
+  After gather/authority checks, sync also takes the common writer lock below.
+  A conflict there is non-blocking exit 75, not coalesced success. Do not mistake
+  the first lock's behavior for proof that other index/cleanup/admit writers
+  cannot race.
+- **One sessions writer across entry points.** The non-blocking
+  `data/.sessions-write.lock/` directory is shared by sessions sync (status through
+  publish), JSONL/durable indexing, durable admission, sessions cleanup/compact,
+  rebuild destruction and newly loaded pi `/memory` reindex. A wrapper passes its
+  owner token only to its children; re-entry requires the same token and a live
+  owner. Busy/stale refusals exit 75. Stale locks are never reclaimed automatically.
+- **Source, build and loaded runtime are different evidence.** Building dist does
+  not replace functions already imported by a running pi. Before paid execution,
+  confirm no old non-locking writer is active and do not invoke `/memory reindex`
+  from an old session during maintenance. External warm requests reach the locked
+  sync script; a busy request may consume its warm cooldown. No unsolicited
+  harness reload/restart is implied. Step 0 JSONL gather remains outside this lock;
+  there is no whole-corpus snapshot lock. md retains its own existing discipline.
 - Check by hand with a self-match-safe pattern: `pgrep -af '[s]ync-sessions'`
   (a plain `pgrep -af sync-sessions` also matches its own command line).
 - Don't re-launch a background sync out of impatience. Wait for the completion signal.
@@ -614,7 +692,10 @@ and prints `✅ preflight dim=4096`. Copy what the probe said.
 | Oracle replicate (md) | `./run.sh sync:md:oracle` |
 | Oracle replicate (OpenClaw) | `./run.sh sync:openclaw:oracle` |
 | Cost estimate (API-0) | `./run.sh estimate:sessions\|md [--full]` |
-| Gather all devices' sessions | `./run.sh corpus:gather [--dry-run] [--strict]` |
+| Gather devices' JSONL sessions (not durable) | `./run.sh corpus:gather [--dry-run] [--strict]` |
+| Admit one approved durable closed snapshot | `./run.sh corpus:durable-admit <snapshot> --device <roster-id> --json` |
+| Durable pending scope (API 0) | `./run.sh index:durable --dry-run --json` |
+| Durable incremental (explicit approved paid step before tier 2) | `./run.sh index:durable --json` |
 | Corpus inventory / integrity | `./run.sh corpus:manifest update\|verify\|status` |
 | Push corpus to a push-only device | `./run.sh corpus:replicate [--to X]` |
 

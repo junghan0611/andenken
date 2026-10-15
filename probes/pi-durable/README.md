@@ -1,4 +1,23 @@
-# pi-durable source probe (parked — #15)
+# pi-durable source probe (#15)
+
+> **2026-10-15 — superseded as the current baseline.** The running durable
+> engine is the published `@earendil-works/pi-durable` **1.2.0** (entwurf's
+> carrier, `pi/pi-durable/overlay/upstream-pin.json`), not the 1.0.2 fixture
+> below. Current evidence:
+>
+> - `make-sample-1.2.mjs` → `sample-1.2/<bucket>/<session>/session.sqlite`:
+>   faux provider, API 0, every input path the coordinator root receives today
+>   (launcher brief, TUI, doorbell, subagent, background report, onYield
+>   continuation, 1.2.0 input entry / display write, steer, compaction, fork,
+>   both handoff paths, error, abort).
+> - The reader that consumes it: `durable-reader.ts`, `./run.sh durable:census`,
+>   `./run.sh durable:read`, `./run.sh test:durable`.
+>
+> `extract-durable.py` below is kept as 1.0.2 history. Against the 1.2.0 sample
+> it admits the onYield continuation (a `pi.user` with **no** submission) as a
+> GLG turn and calls the launcher brief and background report unknown — do not
+> use it as the contract. The parked / Q1–Q7 framing is history; the issue's
+> 2026-10-15 direction is the source of truth.
 
 API-0 evidence for making `pi-durable` the third session source
 (`pi | claude | pi-durable`). **Parked by GLG on 2026-10-06** until GLG has used

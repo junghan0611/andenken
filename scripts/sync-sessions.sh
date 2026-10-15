@@ -201,6 +201,13 @@ if [ "$LOCAL_DEVICE" != "$INDEX_AUTHORITY" ] && [ "${ANDENKEN_ALLOW_REPLICA_INDE
   exit 1
 fi
 
+# --- Writer lock: one sessions.lance writer at a time (exit 75 when held) ---
+# Held from the status read through publish so the index, its manifests and what
+# ships to the replica stay one consistent state. Children re-enter by token.
+# shellcheck source=lib/sessions-lock.sh
+. scripts/lib/sessions-lock.sh
+sessions_lock_acquire "sync-sessions --$MODE"
+
 # --- Step 1: status --json (API 0 — read DB schema + manifest) ---
 # One JSON read gives us actual_dim and to_index. We never spawn `tsx -e`
 # with top-level await here; the env's tsx CJS output has bitten us before.
@@ -252,11 +259,15 @@ push_replica() {
     echo "   To move the authority, set ANDENKEN_INDEX_AUTHORITY deliberately."
     return 1
   fi
+  # Every step ends in `|| return $?`: publish_replica calls this as
+  # `push_replica || return 1`, a condition context in which bash suppresses
+  # errexit, so without it a failed rsync was swallowed by a later step's success
+  # and publish reported OK. pipefail makes $? the rsync rc, not tail's.
   echo "== rsync sessions.lance → oracle =="
   rsync -az --delete \
     data/sessions.lance/ \
     oracle:/home/junghan/repos/gh/andenken/data/sessions.lance/ \
-    2>&1 | tail -3
+    2>&1 | tail -3 || return $?
 
   # Manifest must travel with the DB: oracle is a replica, and a stale remote
   # manifest would make a local run there skip files the pushed DB no longer has.
@@ -264,7 +275,22 @@ push_replica() {
   rsync -az \
     data/session-manifest.json \
     oracle:/home/junghan/repos/gh/andenken/data/session-manifest.json \
-    2>&1 | tail -3
+    2>&1 | tail -3 || return $?
+
+  # pi-durable rows live in sessions.lance too (issue #15); their checkpoint
+  # manifest travels with the index for the same reason (INVARIANT 6.6).
+  if [ -f data/durable-manifest.json ]; then
+    echo "== rsync durable-manifest.json → oracle =="
+    rsync -az \
+      data/durable-manifest.json \
+      oracle:/home/junghan/repos/gh/andenken/data/durable-manifest.json \
+      2>&1 | tail -3 || return $?
+  else
+    # Absence travels too: a replica must not keep a checkpoint for rows the
+    # pushed index no longer has. Exactly this one file; a failure is a failure.
+    echo "== no local durable-manifest.json → remove the replica's copy =="
+    ssh -o BatchMode=yes oracle 'rm -f /home/junghan/repos/gh/andenken/data/durable-manifest.json' || return $?
+  fi
 }
 
 # publish = verify, then ship the index AND the sources it points at, as one act.

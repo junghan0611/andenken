@@ -12,7 +12,7 @@ import type * as LanceDB from "@lancedb/lancedb";
 import * as path from "node:path";
 import * as fs from "node:fs";
 import * as os from "node:os";
-import type { SessionSource } from "./session-indexer.js";
+import type { IndexedSource } from "./session-indexer.js";
 
 // Lazy import to avoid startup cost
 let lancedbImportPromise: Promise<typeof import("@lancedb/lancedb")> | null =
@@ -47,12 +47,12 @@ export interface SearchResult {
  * "어제/지난주" to ISO ranges and pass `dateFrom` / `dateTo` explicitly.
  *
  * Backward-compat: search() / fullTextSearch() / substringSearch() still
- * accept a bare `SessionSource` string for legacy call sites; runtime
+ * accept a bare `IndexedSource` string for legacy call sites; runtime
  * normalizes string → `{ source }` automatically.
  */
 export interface SearchFilters {
   /** Source filter (single value). Equivalent to legacy `sourceFilter` arg. */
-  source?: SessionSource;
+  source?: IndexedSource;
   /** Inclusive lower bound on `timestamp` (ISO 8601). */
   dateFrom?: string;
   /** Exclusive upper bound on `timestamp` (ISO 8601). */
@@ -71,7 +71,7 @@ export interface SearchFilters {
 
 /** Convert legacy 4th-arg shape to SearchFilters. */
 function normalizeFilters(
-  arg: SessionSource | SearchFilters | undefined,
+  arg: IndexedSource | SearchFilters | undefined,
 ): SearchFilters | undefined {
   if (arg === undefined) return undefined;
   if (typeof arg === "string") return { source: arg };
@@ -554,6 +554,19 @@ export class VectorStore {
   }
 
   /**
+   * Delete the chunks of one file whose `lineNumber` is above `lineNumber`.
+   * pi-durable rows use the entry id as lineNumber, so this removes only what a
+   * failed run wrote past the file's checkpoint. Unlike `deleteByFile`, errors
+   * propagate: a retry must not proceed on a delete that did not happen.
+   */
+  async deleteByFileAbove(filePath: string, lineNumber: number): Promise<void> {
+    if (!Number.isInteger(lineNumber) || lineNumber < 0) throw new Error(`deleteByFileAbove: bad lineNumber ${lineNumber}`);
+    await this.ensureTable();
+    if (!this.table) return;
+    await this.table.delete(`\`sessionFile\` = '${filePath.replace(/'/g, "''")}' AND \`lineNumber\` > ${lineNumber}`);
+  }
+
+  /**
    * Add chunks with their embeddings.
    * Safe: deletes existing chunks for the same file before inserting,
    * preventing duplicates on re-indexing.
@@ -630,7 +643,7 @@ export class VectorStore {
     queryVector: number[],
     limit: number = 10,
     minScore: number = 0.1,
-    filterOrSource?: SessionSource | SearchFilters,
+    filterOrSource?: IndexedSource | SearchFilters,
   ): Promise<SearchResult[]> {
     await this.ensureInitialized();
     if (!this.table) return [];
@@ -681,7 +694,7 @@ export class VectorStore {
    * filtered row set, not recent among semantic candidates.
    */
   async filterSearch(
-    filterOrSource?: SessionSource | SearchFilters,
+    filterOrSource?: IndexedSource | SearchFilters,
     scanLimit: number = 100_000,
   ): Promise<SearchResult[]> {
     await this.ensureInitialized();
@@ -731,7 +744,7 @@ export class VectorStore {
   async fullTextSearch(
     query: string,
     limit: number = 10,
-    filterOrSource?: SessionSource | SearchFilters,
+    filterOrSource?: IndexedSource | SearchFilters,
   ): Promise<SearchResult[]> {
     await this.ensureInitialized();
     if (!this.table) return [];
@@ -793,7 +806,7 @@ export class VectorStore {
   async substringSearch(
     term: string,
     limit: number = 10,
-    filterOrSource?: SessionSource | SearchFilters,
+    filterOrSource?: IndexedSource | SearchFilters,
   ): Promise<SearchResult[]> {
     await this.ensureInitialized();
     if (!this.table) return [];

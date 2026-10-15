@@ -63,6 +63,21 @@ export class WriteBuffer {
     });
   }
 
+  /**
+   * Buffer records WITHOUT deleting the file's existing rows first. For
+   * pi-durable's append-only rows past a checkpoint; the caller has already
+   * removed anything a failed run left above it.
+   */
+  async append(records: BufferedRecord[]): Promise<void> {
+    await this.enqueue(async () => {
+      if (records.length === 0) return;
+      this.buffer.push(...records);
+      if (this.buffer.length >= this.batchSize) {
+        await this.flushUnlocked();
+      }
+    });
+  }
+
   async flush(): Promise<void> {
     await this.enqueue(async () => {
       await this.flushUnlocked();

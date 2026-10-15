@@ -5,7 +5,8 @@
 #   1. estimate --full     — API 0. Caller can stop here.
 #   2. confirmation prompt — interactive, exact "yes" required. NO --yes flag.
 #   3. preflight dim probe — API 1. Only after operator confirmed.
-#   4. destroy             — sessions ONLY (data/sessions.lance + session-manifest.json).
+#   4. destroy             — sessions ONLY (data/sessions.lance + session-manifest.json
+#                            + durable-manifest.json, whose rows live in the same DB).
 #                            Org track is never touched.
 #   5. force rebuild       — gated behind ANDENKEN_ALLOW_PAID_FULL_REBUILD=1
 #                            (set by this script itself, not by env).
@@ -107,7 +108,7 @@ fi
 # --- Step 3: explicit confirmation (interactive only — no --yes flag) ---
 echo "Proceed with FULL sessions rebuild?"
 echo "  - Step 4: 1 preflight API call to verify endpoint dim=4096."
-echo "  - Step 5: delete data/sessions.lance + data/session-manifest.json."
+echo "  - Step 5: delete data/sessions.lance + data/session-manifest.json + data/durable-manifest.json."
 echo "  - Step 6: re-embed entire sessions corpus through OpenRouter (paid)."
 echo "  - org track: NOT touched."
 read -r -p "Type 'yes' to proceed (anything else aborts): " REPLY
@@ -135,9 +136,14 @@ if [ "$DIM" != "4096" ]; then
 fi
 echo "✅ preflight dim=4096"
 
+# --- Writer lock from destroy through rebuild (exit 75 when another writer holds it) ---
+# shellcheck source=lib/sessions-lock.sh
+. scripts/lib/sessions-lock.sh
+sessions_lock_acquire "rebuild-sessions-full"
+
 # --- Step 5: destroy (sessions ONLY, paths enumerated) ---
 echo "== Step 5/6: destroy sessions index =="
-rm -rf data/sessions.lance data/session-manifest.json
+rm -rf data/durable-manifest.json data/session-manifest.json data/sessions.lance
 
 # --- Step 6: full rebuild + verify ---
 # ANDENKEN_ALLOW_PAID_FULL_REBUILD is set in-line ONLY for these commands so

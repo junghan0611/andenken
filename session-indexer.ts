@@ -35,6 +35,12 @@ import { sanitizeSessionChunkText } from "./session-sanitize.js";
 
 export type SessionSource = "pi" | "claude";
 export type SourceFilter = SessionSource | "all";
+/**
+ * Every `source` value a sessions.lance row may carry. `pi-durable` rows come
+ * from closed pi-durable snapshots (durable-source.ts / durable-index.ts), not
+ * from JSONL discovery, so JSONL paths keep using `SessionSource`.
+ */
+export type IndexedSource = SessionSource | "pi-durable";
 
 /**
  * Normalize a `--source` argument for SEARCH paths.
@@ -49,10 +55,10 @@ export type SourceFilter = SessionSource | "all";
  *   normalizeSourceFilter(undefined) // undefined (no filter)
  *   normalizeSourceFilter("PI")      // throws
  */
-export function normalizeSourceFilter(raw: string | undefined): SessionSource | undefined {
+export function normalizeSourceFilter(raw: string | undefined): IndexedSource | undefined {
   if (raw === undefined || raw === "all") return undefined;
-  if (raw === "pi" || raw === "claude") return raw;
-  throw new Error(`invalid source: ${raw}. Valid: pi | claude | all`);
+  if (raw === "pi" || raw === "claude" || raw === "pi-durable") return raw;
+  throw new Error(`invalid source: ${raw}. Valid: pi | claude | pi-durable | all`);
 }
 
 /**

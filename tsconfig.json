@@ -26,7 +26,13 @@
     "openclaw-importer.ts",
     "openclaw-reconcile.ts",
     "openclaw-prune.ts",
-    "md-search.ts"
+    "md-search.ts",
+    "durable-reader.ts",
+    "durable-plan.ts",
+    "durable-source.ts",
+    "durable-index.ts",
+    "session-excerpt-dispatch.ts",
+    "sessions-lock.ts"
   ],
   "exclude": ["test.ts", "benchmark.ts", "node_modules"]
 }
