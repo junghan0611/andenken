@@ -21,6 +21,7 @@ import * as path from "node:path";
 import { execSync } from "node:child_process";
 import { VectorStore, type SearchResult } from "./store.js";
 import type { EmbeddingProvider } from "./embedding-provider.js";
+import { FtsDiagnosticsCollector, type FtsRequestDiagnostic } from "./fts-diagnostics.js";
 import {
   retrieve,
   expandQueryForBM25,
@@ -126,6 +127,8 @@ export interface MdSearchOutcome {
   results: SearchResult[];
   /** dictcli expansion terms actually applied (empty when expand is off). */
   expanded: string[];
+  /** Outcome of this request's full-text (BM25) leg (fts-diagnostics.ts). */
+  fts: FtsRequestDiagnostic;
 }
 
 export interface MdSearchOptions {
@@ -164,7 +167,8 @@ export async function searchMdCore(
   const queryVector = await provider.embedQuery(enrichedQuery);
   const bm25Query = expandQueryForBM25(enrichedQuery);
   const vectorResults = await store.search(queryVector, candidates, 0.05);
-  const ftsResults = await store.fullTextSearch(bm25Query, candidates);
+  const ftsDiag = new FtsDiagnosticsCollector();
+  const ftsResults = await store.fullTextSearch(bm25Query, candidates, undefined, ftsDiag.observe);
 
   // gpt-5.5 review #2 (2026-05-12): short-CJK substring fallback.
   // LanceDB FTS drops 1-2 char Hangul/CJK tokens below the match threshold,
@@ -221,7 +225,7 @@ export async function searchMdCore(
     documentCap: { maxPerDoc: MD_MAX_CHUNKS_PER_DOC },
   });
 
-  return { results: results.slice(0, limit), expanded };
+  return { results: results.slice(0, limit), expanded, fts: ftsDiag.result() };
 }
 
 // --- Presentation ---------------------------------------------------------

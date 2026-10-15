@@ -13,6 +13,7 @@ import * as path from "node:path";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import type { IndexedSource } from "./session-indexer.js";
+import type { FtsDiagnostic } from "./fts-diagnostics.js";
 
 // Lazy import to avoid startup cost
 let lancedbImportPromise: Promise<typeof import("@lancedb/lancedb")> | null =
@@ -81,6 +82,40 @@ function normalizeFilters(
 /** Escape a SQL string literal value (single quotes doubled). */
 function sqlEscape(v: string): string {
   return v.replace(/'/g, "''");
+}
+
+/** The stored row columns that vector and full-text search project. */
+const ROW_COLUMNS = [
+  "id",
+  "text",
+  "sessionFile",
+  "project",
+  "lineNumber",
+  "timestamp",
+  "role",
+  "source",
+  "metadata",
+];
+
+/**
+ * A stored row broke the store's own invariant (its `metadata` is not JSON).
+ * The message is a fixed code: never the parser's message, a cause, or row text.
+ */
+export class StoreRowDecodeError extends Error {
+  readonly code = "row-decode-failed" as const;
+  constructor() {
+    super("row-decode-failed: a stored row's metadata is not valid JSON");
+    this.name = "StoreRowDecodeError";
+  }
+}
+
+function decodeMetadata(raw: unknown): Record<string, string> {
+  if (typeof raw !== "string") throw new StoreRowDecodeError();
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new StoreRowDecodeError();
+  }
 }
 
 /**
@@ -653,7 +688,8 @@ export class VectorStore {
 
     let results;
     try {
-      let query = this.table.vectorSearch(queryVector);
+      // `_distance` is projected explicitly; LanceDB stops adding it implicitly.
+      let query = this.table.vectorSearch(queryVector).select([...ROW_COLUMNS, "_distance"]);
       if (whereBody) query = query.where(whereBody);
       results = await query.limit(limit).toArray();
     } catch (err) {
@@ -678,7 +714,7 @@ export class VectorStore {
         timestamp: r.timestamp as string,
         role: r.role as string,
         source: (r.source as string) ?? "",
-        metadata: JSON.parse(r.metadata as string),
+        metadata: decodeMetadata(r.metadata),
         score: r._distance != null ? 1 / (1 + (r._distance as number)) : 0,
       }))
       .filter((r) => r.score >= minScore);
@@ -729,7 +765,7 @@ export class VectorStore {
         timestamp: r.timestamp as string,
         role: r.role as string,
         source: (r.source as string) ?? "",
-        metadata: JSON.parse(r.metadata as string),
+        metadata: decodeMetadata(r.metadata),
         score: 0,
       }));
     } catch {
@@ -740,39 +776,55 @@ export class VectorStore {
   /**
    * Full-text search (BM25-style via LanceDB FTS)
    * Uses query().fullTextSearch() — not search() which requires embedding functions
+   *
+   * Returns rows only, as before. `onDiagnostic`, when given, receives exactly
+   * one outcome per call (fts-diagnostics.ts), so "0 rows, healthy" and "0 rows,
+   * the leg failed" stop looking alike. Without an observer, a native failure
+   * still returns [] but leaves one fixed-code line on stderr instead of
+   * vanishing. A stored row whose metadata is not JSON is not an empty result:
+   * it is reported and then thrown as `StoreRowDecodeError`, observer or not.
+   * The observer runs outside every catch here, so its own throw propagates
+   * unchanged and is never classified as a native failure.
    */
   async fullTextSearch(
     query: string,
     limit: number = 10,
     filterOrSource?: IndexedSource | SearchFilters,
+    onDiagnostic?: (d: FtsDiagnostic) => void,
   ): Promise<SearchResult[]> {
     await this.ensureInitialized();
-    if (!this.table) return [];
+    const report = (d: FtsDiagnostic): void => {
+      if (onDiagnostic) onDiagnostic(d);
+      else if (d.status !== "ok" && d.code !== "row-decode-failed") {
+        process.stderr.write(`⚠ andenken: full-text search ${d.status} (${d.code}); this call returns no FTS rows\n`);
+      }
+    };
+    if (!this.table) {
+      report({ status: "unavailable", code: "no-table" });
+      return [];
+    }
 
-    const filters = normalizeFilters(filterOrSource);
-    const whereBody = buildFilterWhere(filters);
+    const whereBody = buildFilterWhere(normalizeFilters(filterOrSource));
 
+    let rows: Record<string, unknown>[] | null = null;
     try {
-      let lanceQuery = this.table
-        .query()
-        .fullTextSearch(query);
+      let lanceQuery = this.table.query().fullTextSearch(query);
       if (whereBody) lanceQuery = lanceQuery.where(whereBody);
-      const results = await lanceQuery
-        .select([
-          "id",
-          "text",
-          "sessionFile",
-          "project",
-          "lineNumber",
-          "timestamp",
-          "role",
-          "source",
-          "metadata",
-        ])
-        .limit(limit)
-        .toArray();
+      // `_score` is projected explicitly; LanceDB stops adding it implicitly.
+      rows = await lanceQuery.select([...ROW_COLUMNS, "_score"]).limit(limit).toArray();
+    } catch {
+      // The native message is never inspected or shown.
+    }
+    if (rows === null) {
+      report((await this.hasFtsIndex()) === false
+        ? { status: "unavailable", code: "no-fts-index" }
+        : { status: "error", code: "query-failed" });
+      return [];
+    }
 
-      return results.map((r, i) => ({
+    let results: SearchResult[] | null;
+    try {
+      results = rows.map((r, i) => ({
         id: r.id as string,
         text: r.text as string,
         sessionFile: r.sessionFile as string,
@@ -781,12 +833,28 @@ export class VectorStore {
         timestamp: r.timestamp as string,
         role: r.role as string,
         source: (r.source as string) ?? "",
-        metadata: JSON.parse(r.metadata as string),
+        metadata: decodeMetadata(r.metadata),
         score: r._score != null ? (r._score as number) : 1 / (i + 1), // rank-based fallback
       }));
+    } catch (err) {
+      if (!(err instanceof StoreRowDecodeError)) throw err;
+      results = null;
+    }
+    if (results === null) {
+      report({ status: "error", code: "row-decode-failed" });
+      throw new StoreRowDecodeError();
+    }
+    report({ status: "ok" });
+    return results;
+  }
+
+  /** Whether an FTS index exists; undefined when that cannot be read. */
+  private async hasFtsIndex(): Promise<boolean | undefined> {
+    try {
+      const indices = await this.table!.listIndices();
+      return indices.some((index) => index.indexType === "FTS");
     } catch {
-      // FTS index might not exist yet
-      return [];
+      return undefined;
     }
   }
 
@@ -846,7 +914,7 @@ export class VectorStore {
         timestamp: r.timestamp as string,
         role: r.role as string,
         source: (r.source as string) ?? "",
-        metadata: JSON.parse(r.metadata as string),
+        metadata: decodeMetadata(r.metadata),
         score: 1 / (i + 1), // rank-based; not comparable to BM25
       }));
     } catch {

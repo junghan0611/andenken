@@ -144,6 +144,10 @@ Usage: ./run.sh <command> [args]
   test:openclaw               Fixture tests for the OpenClaw harvest, reconcile and prune (API 0)
   test:absent                 Fixture tests for the absent-axis invariant — a read never creates (API 0)
   test:parity                 Credential regex parity: python ↔ typescript (API 0)
+  test:diagnostics            Type fence (tsconfig.diagnostics.json) + tests for the
+                              full-text leg diagnostics (store, md core, CLI/pi report
+                              fields) and the table-shape report vocabulary (API 0,
+                              synthetic temp LanceDB, no optimize is run)
 
 === Session corpus (~/repos/gh/session) ===
   corpus:gather [--dry-run] [--strict]
@@ -315,6 +319,9 @@ case "${1:-help}" in
     cd "$SCRIPT_DIR" && pnpm exec tsx axis-absent.test.ts ;;
   test:parity)
     cd "$SCRIPT_DIR" && pnpm exec tsx credential-parity.test.ts ;;
+  test:diagnostics)
+    cd "$SCRIPT_DIR" && pnpm exec tsc -p tsconfig.diagnostics.json \
+      && pnpm exec tsx store-fts-diagnostics.test.ts && pnpm exec tsx table-shape.test.ts ;;
 
   # === Session corpus ===
   corpus:gather)

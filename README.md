@@ -256,6 +256,55 @@ from `golden`:
 
 Cases live in `acceptance-cases.json`, so adding one never touches code.
 
+### Full-text leg diagnostics (#16 follow-up)
+
+The source API reports additive `degraded` and `diagnostics.fts` fields on CLI
+JSON and pi tool details. A normal zero-match FTS call is `ok`; a missing table
+or index is `unavailable`; a failed native query is `error`. If FTS did not run
+(for example, `--mode recent`), it is `not-run`, not a health certificate.
+Diagnostics carry fixed safe codes, never native messages, queries or row text.
+A malformed stored row is a typed error, not an empty search result.
+
+`degraded` covers every FTS leg that ran, including an MD fallback's separately
+reported `diagnostics.fallbackFts`. It is independent of the existing
+cross-axis `fallback` flag; a later successful FTS call cannot erase an earlier
+failure within the same request. Pi also adds a model-visible note when a leg
+is degraded. **`degraded: false` does not certify whole-search quality**: it can
+also mean FTS never ran, and it says nothing about human usefulness.
+
+Run `./run.sh test:diagnostics` for the fenced synthetic store, consumer-report
+and table-shape tests (API 0, no optimize). Maintenance reports distinguish
+logical fragments, physical data files, manifest-reported bytes, disk usage
+and an optimize call's own statistics; none alone guarantees space reduction.
+These follow-up changes are source and temporary-build validated; they do not
+update the existing deployed `dist` or any running Pi automatically.
+
+### Legacy FTS and explicit maintenance (#16)
+
+A 0.15-built FTS index can remain readable in 0.40 while `optimize()` panics
+in its legacy-index reindex path. This was reproduced with generated data.
+On one byte-identical, isolated sessions copy, explicitly rebuilding only FTS
+with 0.40 (`Index.fts()`, `replace: true`) followed by one unchanged optimize
+call succeeded. Existing row IDs, dimensions and a bounded positive FTS match
+set were preserved; **no embedding API or vector re-embedding was needed**.
+This is a verified repair candidate, not an automatic migration or a production
+repair: the original was unchanged and the copy was deleted. Reading that new
+FTS format from already-loaded 0.15 Pi processes remains unverified.
+
+For future maintenance, obtain explicit execution and backup/rollback scope,
+serialize writers with the shared lock, and record engine versions, row/ID and
+source counts, dimensions, FTS coverage, logical statistics and disk/RAM headroom.
+After an approved FTS rebuild, verify those invariants and bounded positive,
+empty-match and failed-query distinctions before optimizing once with the
+existing cleanup policy. Rebuilding FTS recomputes BM25 scores; a changed top-K
+is not by itself missing data. Record OptimizeStats, logical fragments, physical
+data files and disk usage separately. The rehearsal reached **15 → 1 logical
+fragments but grew from about 7.0 → 8.4 billion apparent bytes**: successful
+compaction does not guarantee immediate space recovery. On panic or timeout,
+stop and verify; do not retry blindly, manually delete partial files, or force
+`deleteUnverified`. Oracle, paid embedding, loaded-runtime refresh and later
+execution each retain their own approval boundary.
+
 ## Stack
 
 - **Embeddings** Sessions + md: Qwen3-Embedding-8B via OpenRouter (4096d). Org (disabled): Qwen3-Embedding-4B (2560d).

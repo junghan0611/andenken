@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "allowImportingTsExtensions": true
+  },
+  "include": [
+    "fts-diagnostics.ts", "table-shape.ts", "store.ts", "md-search.ts",
+    "store-fts-diagnostics.test.ts", "table-shape.test.ts"
+  ],
+  "exclude": ["node_modules"]
+}

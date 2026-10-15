@@ -32,6 +32,7 @@ import { WriteBuffer } from "./write-buffer.js";
 import { durableCorpusRoot } from "./durable-source.js";
 import { forgetDurableFiles, invalidateDurableManifest, renderDurableIndexReport, runDurableIndex } from "./durable-index.js";
 import { SessionsLockRefused, withSessionsLock } from "./sessions-lock.js";
+import { countDataFiles, formatOptimizeStats, formatShape, readLogicalShape } from "./table-shape.js";
 
 // --- dictcli stem integration (Layer 3 → Layer 1 bridge) ---
 
@@ -1185,22 +1186,27 @@ async function compact(target: string) {
     const table = await db.openTable("session_chunks");
     const rows = await table.countRows();
 
-    const fragDir = path.join(dbPath, "session_chunks.lance", "data");
-    const fragsBefore = fs.existsSync(fragDir)
-      ? fs.readdirSync(fragDir).length
-      : 0;
-
     const { execSync } = await import("node:child_process");
     const sizeBefore = execSync(`du -sh ${dbPath}`).toString().split("\t")[0];
 
-    console.log(`${t}: ${rows} rows, ${fragsBefore} fragments, ${sizeBefore}`);
+    // Logical fragments, physical data files and disk size are reported apart
+    // (table-shape.ts); an unreadable measure prints as unknown, never as 0.
+    console.log(`${t}: ${rows} rows | ${formatShape(await readLogicalShape(table), countDataFiles(dbPath), sizeBefore)}`);
     console.log(`  compacting...`);
 
-    await table.optimize({ cleanupOlderThan: new Date() });
+    const started = Date.now();
+    let optimizeStats;
+    try {
+      optimizeStats = await table.optimize({ cleanupOlderThan: new Date() });
+    } catch (err) {
+      console.log(`  optimize did not complete after ${((Date.now() - started) / 1000).toFixed(1)}s`);
+      throw err;
+    }
+    const elapsedMs = Date.now() - started;
 
-    const fragsAfter = fs.readdirSync(fragDir).length;
     const sizeAfter = execSync(`du -sh ${dbPath}`).toString().split("\t")[0];
-    console.log(`  → ${fragsAfter} fragments, ${sizeAfter}`);
+    console.log(`  → ${formatShape(await readLogicalShape(table), countDataFiles(dbPath), sizeAfter)}`);
+    console.log(`  ${formatOptimizeStats(optimizeStats, elapsedMs)}`);
   }
 }
 
@@ -1439,7 +1445,7 @@ async function status() {
       ? `empty, provider=${sessionsProviderDim}d`
       : "empty";
   console.log(
-    `🧠 Sessions (${sDimLabel}): ${sessions.count} chunks | ${sessions.indexed_files}/${sessions.files} files | ${sFrags} frags | ${sSize}`,
+    `🧠 Sessions (${sDimLabel}): ${sessions.count} chunks | ${sessions.indexed_files}/${sessions.files} files | ${sFrags} data files | ${sSize}`,
   );
   if (sessions.manifest_entries > 0) {
     console.log(
@@ -1471,7 +1477,7 @@ async function status() {
         ? `empty, provider=${mdProviderDim}d`
         : "empty";
     console.log(
-      `📝 MD (${mDimLabel}): ${md.count} chunks | ${md.indexed_files}/${md.files} files | ${mFrags} frags | ${mSize}`,
+      `📝 MD (${mDimLabel}): ${md.count} chunks | ${md.indexed_files}/${md.files} files | ${mFrags} data files | ${mSize}`,
     );
     if (md.manifest_entries > 0) {
       console.log(
@@ -1515,7 +1521,7 @@ async function status() {
         ? `empty, provider=${orgProviderDim}d`
         : "empty";
     console.log(
-      `📚 Org (${oDimLabel}): ${org.count} chunks | ${org.indexed_files}/${org.files} files | ${oFrags} frags | ${oSize}`,
+      `📚 Org (${oDimLabel}): ${org.count} chunks | ${org.indexed_files}/${org.files} files | ${oFrags} data files | ${oSize}`,
     );
     if (org.actual_dim && orgProviderDim && org.actual_dim !== orgProviderDim) {
       console.log(
@@ -1549,7 +1555,7 @@ async function status() {
     const ocFrags = fs.existsSync(ocFragDir) ? fs.readdirSync(ocFragDir).length : 0;
     const ocSize = execSync(`du -sh ${getOpenclawDbPath()}`).toString().split("\t")[0];
     console.log(
-      `🤖 OpenClaw (${ocDim ?? "?"}d): ${ocCount} chunks | ${ocFrags} frags | ${ocSize} | harvested, not embedded here`,
+      `🤖 OpenClaw (${ocDim ?? "?"}d): ${ocCount} chunks | ${ocFrags} data files | ${ocSize} | harvested, not embedded here`,
     );
 
     const wmPath = path.join(getDataDir(), "openclaw-watermark.json");
@@ -1748,13 +1754,20 @@ async function cleanup(target: string) {
 
     // 6. Compact
     console.log(`Compacting...`);
-    await table.optimize({ cleanupOlderThan: new Date() });
+    const started = Date.now();
+    let optimizeStats;
+    try {
+      optimizeStats = await table.optimize({ cleanupOlderThan: new Date() });
+    } catch (err) {
+      console.log(`optimize did not complete after ${((Date.now() - started) / 1000).toFixed(1)}s`);
+      throw err;
+    }
+    const elapsedMs = Date.now() - started;
 
     const totalAfter = await table.countRows();
     const sizeAfter = execSync(`du -sh ${dbPath}`).toString().split("\t")[0];
-    const fragDir = path.join(dbPath, "session_chunks.lance", "data");
-    const fragsAfter = fs.existsSync(fragDir) ? fs.readdirSync(fragDir).length : 0;
-    console.log(`After: ${totalAfter.toLocaleString()} rows, ${fragsAfter} frags, ${sizeAfter}`);
+    console.log(`After: ${totalAfter.toLocaleString()} rows | ${formatShape(await readLogicalShape(table), countDataFiles(dbPath), sizeAfter)}`);
+    console.log(formatOptimizeStats(optimizeStats, elapsedMs));
     console.log(`Removed: ${(totalBefore - totalAfter).toLocaleString()} rows`);
   }
 }
@@ -1881,11 +1894,11 @@ async function verify(target: string) {
     if (allRows.length === count) pass(`Row count consistent: ${count.toLocaleString()}`);
     else fail(`Row count mismatch: query=${allRows.length} vs count=${count}`);
 
-    // 4. Fragment report
+    // 4. Physical size report (data files, not logical fragments; see table-shape.ts)
     const fragDir = path.join(dbPath, "session_chunks.lance", "data");
     const frags = fs.existsSync(fragDir) ? fs.readdirSync(fragDir).length : 0;
     const dbSize = execSync(`du -sh ${dbPath}`).toString().split("\t")[0];
-    pass(`${frags} fragments, ${dbSize}`);
+    pass(`${frags} data files, ${dbSize}`);
 
     // 5. Org-specific: manifest consistency
     if (t === "org") {

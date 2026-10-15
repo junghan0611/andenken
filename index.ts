@@ -40,6 +40,7 @@ import { readHitExcerpt, isHitExcerpt, type HitExcerpt, type HitUnsupported } fr
 import { acquireSessionsLock, SessionsLockRefused, type SessionsLockHandle } from "./sessions-lock.js";
 import { invalidateDurableManifest } from "./durable-index.js";
 import { recordRecall } from "./recall-log.js";
+import { FtsDiagnosticsCollector, attachFtsReport, ftsRequestReport, type FtsRequestDiagnostic } from "./fts-diagnostics.js";
 
 // Re-declare minimal SearchResult to avoid jiti-incompatible import() type syntax
 interface SearchResult {
@@ -520,6 +521,9 @@ export default function (pi: ExtensionAPI) {
       let expanded: string[] = [];
       let enrichedQuery = params.query;
       let results: SearchResult[];
+      // Request-local: mode=recent never runs FTS and reports not-run.
+      const ftsDiag = new FtsDiagnosticsCollector();
+      let fallbackFts: FtsRequestDiagnostic | undefined;
 
       if (mode === "recent") {
         // Stored-signal mode: no embedding call, no BM25, no dictcli expansion.
@@ -537,7 +541,7 @@ export default function (pi: ExtensionAPI) {
         const queryVector = await sessP.embedQuery(enrichedQuery);
         const vectorResults = await getSessionStore().search(queryVector, candidates, 0.1, filters);
         const bm25Query = expandQueryForBM25(enrichedQuery); // include dictcli expand terms in FTS
-        const ftsResults = await getSessionStore().fullTextSearch(bm25Query, candidates, filters);
+        const ftsResults = await getSessionStore().fullTextSearch(bm25Query, candidates, filters, ftsDiag.observe);
 
         // Track 1 — CJK substring fallback for tokens LanceDB FTS drops
         // (1-2 char Hangul like "맘", "갑", "쟈", "맘마"). Augments the FTS
@@ -649,13 +653,14 @@ export default function (pi: ExtensionAPI) {
               // the 3-row budget, and the output shape are unchanged; what the
               // core adds is the stable candidate floor and the lossless
               // per-document cap.
-              const { results: mdResults } = await searchMdCore(
+              const { results: mdResults, fts: mdFts } = await searchMdCore(
                 getMdStore(),
                 mdP,
                 params.query,
                 3,
                 { expandFn: dictcliExpand },
               );
+              fallbackFts = mdFts;
               if (mdResults.length > 0) {
                 results = [...results.slice(0, limit - 3), ...mdResults.slice(0, 3)];
                 fallbackUsed = true;
@@ -688,6 +693,12 @@ export default function (pi: ExtensionAPI) {
       } else if (fallbackDiagnostic) {
         output.content[0].text += `\n\n(ℹ ${fallbackDiagnostic})`;
       }
+      // A degraded full-text leg is said apart from the cross-axis fallback
+      // above; `degraded` covers every leg that ran, the md fallback included.
+      attachFtsReport(output, ftsRequestReport(ftsDiag.result(), fallbackFts), {
+        fts: "sessions",
+        fallbackFts: "knowledge fallback",
+      });
       return output;
     },
   });
@@ -767,7 +778,7 @@ export default function (pi: ExtensionAPI) {
       // line-by-line copy of that pipeline, which meant the golden gate and
       // `./run.sh accept` measured a function no agent ever called.
       // `expandFn` keeps this surface's 30-minute expansion cache.
-      const { results: finalResults, expanded } = await searchMdCore(
+      const { results: finalResults, expanded, fts } = await searchMdCore(
         getMdStore(),
         mdP,
         params.query,
@@ -781,7 +792,7 @@ export default function (pi: ExtensionAPI) {
       // else. Expansion terms are unbounded (one per matched Korean word, from
       // dictcli) and carry no decision value on the first screen, so they live
       // in `details`, which pi never sends to the model.
-      return {
+      const output = {
         content: [
           { type: "text" as const, text: formatMdScreen(params.query, finalResults) },
         ],
@@ -796,6 +807,8 @@ export default function (pi: ExtensionAPI) {
           })),
         },
       };
+      attachFtsReport(output, ftsRequestReport(fts), { fts: "knowledge" });
+      return output;
     },
   });
 

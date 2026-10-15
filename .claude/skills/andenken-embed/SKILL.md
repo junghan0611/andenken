@@ -550,24 +550,38 @@ ANDENKEN_COMPACT_CPUS=0-7 ./run.sh compact md    # override to 8 cores
 ```
 
 - Default `0-3`. Override with `ANDENKEN_COMPACT_CPUS` in taskset `-c` syntax (`0-3`, `0,2,4,6`).
-- compact **only when fragments grew a lot** — not every increment. The operational
-  threshold is **20 or more fragments** on a track's verification receipt: finish
-  every writer first, compact that track, verify it again, then publish that compacted
-  DB to Oracle with the track's normal replication command. `sync:sessions --global`
-  publishes a compacted sessions DB; `sync:md:oracle` and `sync:openclaw:oracle`
-  publish their respective compacted DBs. md was once compacted 162 → 1 fragment.
-  `verify` reports the fragment count; for openclaw, `./run.sh status` does (it has
-  no manifest).
+- Compact only for an evidenced maintenance need, not every increment or a
+  physical-file threshold. Native logical fragments/small-fragment statistics,
+  physical data files and disk usage are different measurements. Older receipts
+  called a data-directory file count "fragments"; **20 physical files is not an
+  automatic compaction trigger**. Retained historical/partial files can remain
+  after logical compaction. Finish every writer, agree backup/rollback scope,
+  verify the approved operation, then publish only when replication is authorized.
+  `sync:sessions --global`, `sync:md:oracle` and `sync:openclaw:oracle` retain
+  their existing track-specific publication contracts.
 - `compact all` is sessions+md+org. **openclaw is asked for by name** — the
   harvest runs on explicit call, so its defrag does too.
 
-## Fragment cleanup — a required follow-through when the receipt crosses 20
+## Logical compaction and physical retention — separate maintenance evidence
 
-An incremental embedding run can accumulate LanceDB data fragments and historical
-index generations. They are not extra conversation rows, but they consume disk until
-`compact` rewrites the live state and removes old versions. **Do not compact by
-calendar or after every increment.** Read the completed verification receipt; when a
-track reaches **20 fragments or more**, clean it before calling the maintenance done.
+Incremental runs can accumulate live fragments, historical versions and partial
+output files. Use native logical/small-fragment statistics and a demonstrated
+maintenance need to decide whether to compact. Physical data-file counts and disk
+usage are separate observations, not row counts or mandatory retry triggers.
+**Do not compact by calendar, after every increment, or until physical files fall
+below 20.** A successful optimize does not guarantee immediate space reclamation.
+
+Issue #16 reproduced a 0.40 panic while automatically rewriting a readable legacy
+FTS index. An approved byte-identical sessions copy passed explicit 0.40 FTS
+replacement followed by one unchanged optimize: logical fragments 15→1, but
+apparent bytes grew about 7.0→8.4 billion. The original was unchanged and the copy
+was deleted. FTS replacement used existing rows/vectors with no embedding API;
+this candidate does not imply that paid vector re-embedding is required. The
+exact native defect, physical retention cause and old loaded 0.15 readers against
+the rebuilt FTS format remain unverified. Production FTS replacement needs its
+own execution/backup/rollback approval; readable legacy FTS is not proof that
+its automatic rewrite will succeed. Never force `deleteUnverified` or manually
+remove suspected partial files to manufacture a smaller count.
 
 Run one track at a time, after all writers for that track are finished. `compact` uses
 four cores by default; raise `ANDENKEN_COMPACT_CPUS` only when GLG explicitly says the
@@ -592,7 +606,11 @@ machine is idle. The compacted database is local until its replication command r
 
 A compacted sessions DB that is not re-published leaves Oracle querying the old large
 copy. The post-compact verification receipt must show the same row count, no duplicate
-ids/orphans, and the reduced fragment count before reporting success.
+ids/orphans, dimensions and source counts, plus separately recorded logical
+statistics, FTS coverage/probes, OptimizeStats, physical files and disk usage.
+Keep both manifests unchanged when no rows were re-indexed. After a panic or
+timeout, stop and verify instead of retrying; only claim the measured outcome,
+not storage reduction or whole-search health.
 
 ## Oracle replication — DB and manifest travel together
 

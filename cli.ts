@@ -35,6 +35,7 @@ import {
 // `ANDENKEN_DISABLE_RECALL_TRACKING` guard cannot drift between the two search
 // entry points. See recall-log.ts for why that guard exists.
 import { recordRecall } from "./recall-log.js";
+import { FtsDiagnosticsCollector, ftsRequestReport } from "./fts-diagnostics.js";
 
 // --- Config ---
 
@@ -212,6 +213,8 @@ async function searchSessions(
   let enrichedQuery = query;
   let bm25Query = expandQueryForBM25(query);
   let results: SearchResult[];
+  // Request-local: mode=recent never runs FTS and reports not-run.
+  const ftsDiag = new FtsDiagnosticsCollector();
 
   if (mode === "recent") {
     // Stored-signal mode: no embedding call, no BM25, no dictcli expansion.
@@ -227,7 +230,7 @@ async function searchSessions(
     const queryVector = await provider.embedQuery(enrichedQuery);
     bm25Query = expandQueryForBM25(enrichedQuery); // include dictcli expand terms in FTS
     const vectorResults = await store.search(queryVector, candidates, 0.1, filters);
-    const ftsResults = await store.fullTextSearch(bm25Query, candidates, filters);
+    const ftsResults = await store.fullTextSearch(bm25Query, candidates, filters, ftsDiag.observe);
 
     // Track 1 — CJK substring fallback (mirrors index.ts session_search path).
     // Short Hangul tokens like "맘", "갑", "쟈" return 0 hits via LanceDB FTS;
@@ -319,6 +322,9 @@ async function searchSessions(
   // those modes would silently break the sessions-only intent.
   let fallback = false;
   let fallbackDiagnostic: string | undefined;
+  // The md fallback is another axis; its FTS outcome is reported apart from
+  // the sessions leg and only when that search actually ran.
+  let fallbackFtsDiag: FtsDiagnosticsCollector | undefined;
   const topScore = results[0]?.score ?? 0;
   const wantsFallback =
     !source &&
@@ -347,7 +353,8 @@ async function searchSessions(
         const mdCandidates = Math.min(limit * 4, 200);
         const mdQueryVector = await mdProvider.embedQuery(enrichedQuery);
         const mdVec = await mdStore.search(mdQueryVector, mdCandidates, 0.05);
-        const mdFts = await mdStore.fullTextSearch(bm25Query, mdCandidates);
+        fallbackFtsDiag = new FtsDiagnosticsCollector();
+        const mdFts = await mdStore.fullTextSearch(bm25Query, mdCandidates, undefined, fallbackFtsDiag.observe);
         const mdResults = await retrieve(query, mdVec, mdFts, {
           vectorWeight: 0.7,
           bm25Weight: 0.3,
@@ -389,6 +396,7 @@ async function searchSessions(
       expanded: expanded.length > 0 ? expanded : undefined,
       fallback,
       diagnostic: fallbackDiagnostic,
+      ...ftsRequestReport(ftsDiag.result(), fallbackFtsDiag?.result()),
       count: finalResults.length,
       results: finalResults.map((r) => formatResult(r, excerpts?.get(r.id))),
     }),
@@ -489,7 +497,7 @@ async function searchMd(query: string, limit: number, full: boolean = false): Pr
 
   // Pipeline lives in md-search.ts so golden-queries.ts evaluates the exact
   // path this command runs. See that module's header for why.
-  const { results: finalResults, expanded } = await searchMdCore(
+  const { results: finalResults, expanded, fts } = await searchMdCore(
     store,
     provider,
     query,
@@ -502,6 +510,7 @@ async function searchMd(query: string, limit: number, full: boolean = false): Pr
     JSON.stringify({
       query,
       expanded: expanded.length > 0 ? expanded : undefined,
+      ...ftsRequestReport(fts),
       count: finalResults.length,
       documents: groups.length,
       results: finalResults.map((r) => mdResultToJson(r, { full })),
@@ -734,7 +743,8 @@ async function searchOpenclaw(query: string, limit: number, full: boolean): Prom
   const candidates = Math.min(limit * 4, 200);
   const queryVector = await provider.embedQuery(query);
   const vectorResults = await store.search(queryVector, candidates, 0.05);
-  const ftsResults = await store.fullTextSearch(expandQueryForBM25(query), candidates);
+  const ftsDiag = new FtsDiagnosticsCollector();
+  const ftsResults = await store.fullTextSearch(expandQueryForBM25(query), candidates, undefined, ftsDiag.observe);
 
   // `minScore` is read on the SCALE OF THE MERGE, and rrf and weighted do not
   // share one. An rrf score is `weight/(60+rank+1)` plus a top-rank bonus, so its
@@ -762,7 +772,7 @@ async function searchOpenclaw(query: string, limit: number, full: boolean): Prom
     text: full ? r.text : r.text.slice(0, 400),
   }));
 
-  console.log(JSON.stringify({ axis: "openclaw", query, count: out.length, results: out }, null, 2));
+  console.log(JSON.stringify({ axis: "openclaw", query, ...ftsRequestReport(ftsDiag.result()), count: out.length, results: out }, null, 2));
   await store.close();
 }
 

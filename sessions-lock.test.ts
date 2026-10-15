@@ -166,8 +166,32 @@ console.log("\n# real writers race the lock (subprocess)");
   eq([durable.status, durable.stderr.includes("sessions-writer-busy")], [75, true], "index:durable loses: exit 75, sessions-writer-busy");
   const jsonl = run(["sessions"]);
   eq([jsonl.status, jsonl.stderr.includes("sessions-writer-busy")], [75, true], "index:sessions loses the same way");
-  const sync = spawnSync("bash", [path.join(repo, "scripts", "sync-sessions.sh")], { cwd: repo, env, encoding: "utf-8" });
+  // sync-sessions.sh cds to its own repo root and opens `data/.sync-sessions.lock`
+  // there before the writer lock refuses it, so a temp cwd does not isolate it.
+  // Run byte-identical copies from a temp tree; the repo's own flock file is
+  // only ever stat'ed, before and after.
+  const tree = path.join(tmp, "sync-tree");
+  const copied = ["scripts/sync-sessions.sh", "scripts/lib/sessions-lock.sh"];
+  for (const rel of copied) {
+    fs.mkdirSync(path.dirname(path.join(tree, rel)), { recursive: true });
+    fs.copyFileSync(path.join(repo, rel), path.join(tree, rel));
+  }
+  fs.mkdirSync(path.join(tree, "data"));
+  eq(copied.map((rel) => fs.readFileSync(path.join(tree, rel)).equals(fs.readFileSync(path.join(repo, rel)))), [true, true], "the sync script runs from byte-identical copies in a temp tree");
+  const repoFlock = path.join(repo, "data", ".sync-sessions.lock");
+  const flockStat = () => {
+    try {
+      const s = fs.lstatSync(repoFlock);
+      return { exists: true, size: s.size, mtimeMs: s.mtimeMs, ino: s.ino };
+    } catch {
+      return { exists: false };
+    }
+  };
+  const flockBefore = flockStat();
+  const sync = spawnSync("bash", [path.join(tree, "scripts", "sync-sessions.sh")], { cwd: tree, env, encoding: "utf-8" });
   eq([sync.status, sync.stderr.includes("sessions-writer-busy")], [75, true], "sync-sessions.sh (the warm path) loses the same way");
+  truthy(fs.existsSync(path.join(tree, "data", ".sync-sessions.lock")), "the copy's flock file lands in the temp tree, not the repo root");
+  eq(flockStat(), flockBefore, "the repo's own data/.sync-sessions.lock is untouched (stat only)");
   const dry = run(["durable", "--dry-run"]);
   eq(dry.status, 0, "index:durable --dry-run needs no lock and runs meanwhile");
   eq(fs.readFileSync(path.join(data, "durable-manifest.json"), "utf-8"), marker, "the losers wrote nothing into the winner's manifest");

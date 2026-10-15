@@ -32,7 +32,9 @@
     "durable-source.ts",
     "durable-index.ts",
     "session-excerpt-dispatch.ts",
-    "sessions-lock.ts"
+    "sessions-lock.ts",
+    "fts-diagnostics.ts",
+    "table-shape.ts"
   ],
   "exclude": ["test.ts", "benchmark.ts", "node_modules"]
 }
