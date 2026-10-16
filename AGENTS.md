@@ -23,6 +23,16 @@ andenken agent-in-charge.
 | exported | `~/repos/gh/notes/content/botlog/20260319T110800.md` |
 | public | https://notes.junghanacs.com/botlog/20260319T110800.html |
 
+**Project home:** [English](https://junghanacs.com/projects/andenken/) ·
+[한국어](https://junghanacs.com/ko/projects/andenken/). Its sources live in
+`~/repos/gh/homepage/content/projects/andenken/index.md` and `index.ko.md`, with
+cards in the bilingual `content/projects/_index` pages. The andenken steward
+maintains the project facts on both public surfaces; homepage owns rendering and
+publication. The landing pages introduce purpose, capabilities and boundaries;
+the Denote report preserves dated judgments. Keep them aligned when those change,
+without copying private corpora or operational logs into either public surface.
+README/run.sh remain the implementation and usage reference, not a third report.
+
 The split of duty: **this file is the standing baseline for identity,
 boundaries and ownership inside the repo; the Denote note is where the
 agent-in-charge reports outward** — what andenken is for, the two turns
@@ -474,6 +484,7 @@ workflow. Implications:
 | **Detailed sessions + md matrix vs OpenClaw** | **[COMPARISON.md](./COMPARISON.md)** |
 | **Next / parked items this agent should return to** | **[NEXT.md](./NEXT.md)** |
 | Rules that must stay true | [INVARIANT.md](./INVARIANT.md) |
+| Project introduction (EN / KO) | [Project home](https://junghanacs.com/projects/andenken/) / [한국어](https://junghanacs.com/ko/projects/andenken/) — sources in `homepage/content/projects/andenken/` |
 | Public framing / naming | [README.md](./README.md) |
 | What actually closed, by CalVer snapshot | [CHANGELOG.md](./CHANGELOG.md) |
 | **My public standing report (Korean)** | [botlog `20260319T110800`](https://notes.junghanacs.com/botlog/20260319T110800.html) |

@@ -13,6 +13,11 @@ return to the present.
 > who owns this repo: what andenken is for, the two turns it must make, where
 > its boundaries are, and why it is named after Heidegger's *Andenken*.
 
+**Project home:** [English](https://junghanacs.com/projects/andenken/) ·
+[한국어](https://junghanacs.com/ko/projects/andenken/). A public introduction beside
+Entwurf; the steward's report above keeps dated judgments, while this README
+owns implementation and usage.
+
 ## Who owns the memory
 
 The agent-memory field mostly answers *how do we store memory intelligently*.
@@ -58,7 +63,8 @@ understand where it fits.
                  │ Sessions: Qwen3-Embedding-8B (4096d).
                  │ MD (public garden export): Qwen3-Embedding-8B (4096d).
                  │ Org: 4B/2560d — currently disabled (upstream R&D).
-                 │ Two live tracks: sessions and md.
+                 │ Own embeddings: sessions and md.
+                 │ OpenClaw: a separate existing-vector harvest.
 
  dream           │ Overnight consolidation. Compacts recent memory into
   (consolidation)│ distilled units. Separate axis; separate roadmap.
@@ -97,7 +103,8 @@ covers all three.
 **Split of effort.** The agent-in-charge separates *what we ship to agents now*
 from *upstream development*:
 
-- **Now:** sessions + md tracks. These are what agents consume as memory axes.
+- **Now:** sessions + md are the two directly embedded tracks. OpenClaw is
+  also queryable as a separate, explicitly named harvest of existing vectors.
   Garden export is controlled, easier to tune, and immediately useful.
 - **Upstream:** org track. Org notes are richer but messier; few people actually
   retrieve them well today. Doctor WARN cleanup, chunker improvements, and
@@ -172,7 +179,7 @@ agent-in-charge who does own it.
 | Korean morphology, ko↔en vocabulary pairs | `dictcli` | Layer 1 does not absorb Layer 3. Particle stripping lives here only because it is BM25 preprocessing. |
 | Note structure, backlinks, dblocks | `denotecli` | Layer 2 is navigation, not retrieval. |
 | Bot memory quality, chunking, model, retention — and their `openclaw-agent.sqlite` itself | OpenClaw (nixos-config) | The tier-4 track is a **harvest**, not a sync. We import; we do not tune their axis. Their databases are opened `sqlite3 -readonly` and snapshotted; we never write to them and never compact them. |
-| `data/openclaw.lance` — the store those vectors land in | **andenken** | The mirror image of the row above, and the names make it easy to miss. Their vectors, our LanceDB: our schema, our ids, our FTS index, fragmented by our own import writes. So compacting it is ours to do, by name (`compact openclaw`), and nothing else will — the file exists on the authority alone. |
+| `data/openclaw.lance` — the store those vectors land in | **andenken** | The mirror image of the row above: their vectors, our LanceDB schema, ids and index maintenance. Authority-side import writes can fragment it, so its justified compaction is ours (`compact openclaw`). The completed store can be explicitly published to a private query replica; neither copy is OpenClaw's upstream SQLite database. |
 | The garden content itself | GLG | andenken reads the notes; it never curates the source. |
 
 And one rule that reads like a feature but is a boundary: an overlay or a bridge
@@ -181,21 +188,31 @@ represented in the pi sessions; indexing it would manufacture duplicate memory.
 
 ## Architecture
 
+```text
+INDEXING — sources stay outside the index
+
+Device-merged Pi / Claude Code corpus ─→ extract / chunk / embed ─┐
+Admitted closed pi-durable snapshots ──→ policy B.1 / checkpoint ─┴→ sessions.lance
+Exported public garden Markdown ──────→ chunk / embed ────────────→ md.lance
+OpenClaw's existing text + vectors ────→ append-only harvest ──────→ openclaw.lance
+
+QUERYING — choose a named surface and source filters
+
+semantic / hybrid → query embedding + vector search / BM25 as appropriate
+                  → weighted fusion or RRF → MMR diversity → bounded candidates
+recent (sessions) → stored-signal scan + timestamp DESC, no query embedding
+
+READING — choose evidence before opening more context
+
+candidate → source / file / entry reference → selected excerpt or original
 ```
-                    ┌─ Session Indexer ─── device-merged session corpus
-Query ──→ Embed ──→ │                       (pi + Claude Code .jsonl, all devices)
-  │                 ├─ Durable Indexer ─── admitted closed pi-durable snapshots
-  │                 │                       (session.sqlite, policy B.1, own checkpoint)
-  │                 ├─ MD Chunker ──────── public garden (~2,200 .md, exported)
-  │                 └─ (Org Chunker) ───── disabled — upstream R&D
-  │
-  ├─ Vector Search (sessions + md 8B/4096d; org 4B/2560d when re-enabled; LanceDB)
-  ├─ Full-Text Search (BM25, Korean particle stripping)
-  ├─ Hybrid Merge (weighted sum / RRF)
-  ├─ Temporal Decay — OFF in production (see below); `mode=recent` carries recency
-  ├─ MMR Diversity Re-ranking
-  └─ dictcli Query Expansion (Korean→English cross-lingual)
-```
+
+Sessions and md use Qwen3-Embedding-8B / 4096d; OpenClaw harvest accepts compatible
+existing vectors without re-embedding them. Raw Org indexing remains disabled
+upstream R&D, not another production input. BM25 includes Korean particle
+preprocessing; `dictcli` supplies the separate vocabulary-expansion capability.
+Indexing, retrieval and original reading have different admission/cost boundaries;
+a search query does not re-index the corpus.
 
 `applyRecencyDecay` still exists in `retriever.ts`, but both live tracks pass
 `recencyHalfLifeDays: 0` (`index.ts`, `cli.ts` session path, `md-search.ts`).
@@ -238,9 +255,11 @@ longer measure different pipelines. A copy of a production path is not a
 shortcut — `golden` once kept its own inline decay constant and silently held the
 old value after production changed it.
 
-**A capability is not equally reachable from every surface.** The CLI may carry
-an axis the pi tool surface does not yet expose. Where they differ, this repo
-says so rather than letting a sibling hunt for something that is not there.
+**A capability is not equally reachable from every surface.** OpenClaw search
+currently uses CLI `search-openclaw`; there is no dedicated Pi OpenClaw tool.
+The Pi extension exposes `session_search` and `knowledge_search`. A harness may
+use the CLI through a skill, but that is not native tool parity. Where surfaces
+differ, this repo says so rather than letting a sibling hunt for a missing tool.
 
 ### Is it any good? — three layers, and only one of them is automatic
 
@@ -279,39 +298,18 @@ and an optimize call's own statistics; none alone guarantees space reduction.
 These follow-up changes are source and temporary-build validated; they do not
 update the existing deployed `dist` or any running Pi automatically.
 
-### Legacy FTS and explicit maintenance (#16)
+### Explicit maintenance, separate from retrieval
 
-A 0.15-built FTS index can remain readable in 0.40 while `optimize()` panics
-in its legacy-index reindex path. This was reproduced with generated data.
-On one byte-identical, isolated sessions copy, explicitly rebuilding only FTS
-with 0.40 (`Index.fts()`, `replace: true`) followed by one unchanged optimize
-call succeeded. Existing row IDs, dimensions and a bounded positive FTS match
-set were preserved; **no embedding API or vector re-embedding was needed**.
-The rehearsal left the original unchanged and its copy was deleted. A separately
-approved production operation then rebuilt FTS and optimized once successfully;
-normal increments and the later byte-verified Oracle publication completed at
-version 3846 / 109509 unique 4096d rows, including durable-source count 103.
-See CHANGELOG Unreleased and #16 for measured scope and the temporary publication
-controller's comparator stop/recovery. This is not an automatic migration or a
-reason to regenerate all vectors. New live inputs require normal gather/estimate
-and incremental sync. Oracle's measured final free space was only about 2.24GB;
-future capacity checks and compatible 0.40 readers remain necessary. Reading the
-rebuilt FTS format from loaded 0.15 Pi processes is not certified; harness refresh
-retains its separate approval boundary.
-
-For future maintenance, obtain explicit execution and backup/rollback scope,
-serialize writers with the shared lock, and record engine versions, row/ID and
-source counts, dimensions, FTS coverage, logical statistics and disk/RAM headroom.
-After an approved FTS rebuild, verify those invariants and bounded positive,
-empty-match and failed-query distinctions before optimizing once with the
-existing cleanup policy. Rebuilding FTS recomputes BM25 scores; a changed top-K
-is not by itself missing data. Record OptimizeStats, logical fragments, physical
-data files and disk usage separately. The rehearsal reached **15 → 1 logical
-fragments but grew from about 7.0 → 8.4 billion apparent bytes**: successful
-compaction does not guarantee immediate space recovery. On panic or timeout,
-stop and verify; do not retry blindly, manually delete partial files, or force
-`deleteUnverified`. Oracle, paid embedding, loaded-runtime refresh and later
-execution each retain their own approval boundary.
+Readable legacy FTS does not guarantee its automatic rewrite will succeed.
+An explicitly approved FTS rebuild followed by one optimize mitigated the tested
+legacy-reindex failure without vector re-embedding; it is not automatic migration.
+Future maintenance needs compatible readers, byte-backup/rollback scope, shared
+writer exclusion, capacity checks and before/after row/ID/source/dimension/FTS
+invariants. Keep cleanup defaults: on panic or timeout, stop and verify rather
+than retrying blindly, removing partial files or forcing `deleteUnverified`.
+Logical compaction, physical space recovery and loaded-runtime applicability are
+separate claims. Dated measurements and the completed recovery are in
+[CHANGELOG Unreleased](./CHANGELOG.md#unreleased) and [#16](https://github.com/junghan0611/andenken/issues/16), not live operating counts in this introduction.
 
 ## Stack
 
@@ -326,14 +324,17 @@ A rebuilt `dist/` or a new native module reaches **new processes only**. A
 running pi keeps the code and the LanceDB module it loaded at start; nothing
 here reloads a harness.
 
-## Provider split — sessions, md, org
+## Provider split — directly embedded tracks and harvest
 
 | Track | Model / dim | Endpoint | Status |
 |-------|-------------|----------|--------|
-| **Sessions** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `ANDENKEN_SESSION_*` → `data/sessions.lance` | Live. Indexed from the device-merged corpus since `v2026.9.3`. 109,190 rows on the authority and the Oracle replica, 103 of them `pi-durable` (2026-10-15). |
-| **MD** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `ANDENKEN_MD_*` → `data/md.lance` | Live production knowledge axis. 11,078 rows (2026-10-15); `doctor --md` accounts for the manifest↔indexed gap. |
-| **OpenClaw** | `qwen/qwen3-embedding-8b` / 4096d, **embedded by OpenClaw** | `sqlite3 -readonly` harvest → `data/openclaw.lance` | Live harvest axis, API 0. 8,076 rows (2026-10-15). Searched by name only, never a fallback. |
+| **Sessions** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `ANDENKEN_SESSION_*` → `data/sessions.lance` | Live. Device-merged Pi/Claude Code corpus plus explicitly admitted closed pi-durable snapshots. |
+| **MD** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `ANDENKEN_MD_*` → `data/md.lance` | Live production knowledge axis. `doctor --md` accounts for the manifest↔indexed gap. |
+| **OpenClaw** | `qwen/qwen3-embedding-8b` / 4096d, **embedded by OpenClaw** | `sqlite3 -readonly` harvest → `data/openclaw.lance` | Live harvest axis; import reuses vectors without embedding calls. CLI search is explicitly named, never a fallback; query cost is separate from import. |
 | **Org** | Qwen3-Embedding-4B / 2560d | `ANDENKEN_ORG_*` → `data/org.lance` | **Disabled.** Upstream R&D only. Do not run `index:org` in production. |
+
+For current counts use `./run.sh status`; dated verification snapshots belong in
+CHANGELOG, not the provider contract.
 
 LanceDB stores are dimension- and track-separated. Each track's search must use
 its own provider env. The 4096d sessions/md providers and the 2560d org provider
@@ -572,8 +573,9 @@ the Greek *mnemo* turned into the German *Andenken*.
   `durable-manifest.json` checkpoint, and a raw reader that is not the embedding
   filter. One cross-process writer lock now guards `sessions.lance`. The dev
   shell moved to Nix `nixos-26.05` / Node 24 and LanceDB to `0.40.0`. Sessions
-  109,190 rows (103 `pi-durable`), md 11,078, OpenClaw 8,076, on the authority
-  and the Oracle replica.
+  At that day's earlier maintenance checkpoint, both hosts reported sessions
+  109,190 rows (103 `pi-durable`), md 11,078 and OpenClaw 8,076. These are
+  historical checkpoint counts; later increments and recovery are in CHANGELOG.
 - **2026-09-03** — sessions sync split into `--local` / `--global`, and the
   device corpus, index and manifest now publish as one act. Sessions reached
   76,044 chunks / 1,627 files; md 10,704 / 2,230.
