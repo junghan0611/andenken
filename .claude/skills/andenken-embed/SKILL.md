@@ -574,14 +574,20 @@ below 20.** A successful optimize does not guarantee immediate space reclamation
 Issue #16 reproduced a 0.40 panic while automatically rewriting a readable legacy
 FTS index. An approved byte-identical sessions copy passed explicit 0.40 FTS
 replacement followed by one unchanged optimize: logical fragments 15→1, but
-apparent bytes grew about 7.0→8.4 billion. The original was unchanged and the copy
-was deleted. FTS replacement used existing rows/vectors with no embedding API;
-this candidate does not imply that paid vector re-embedding is required. The
-exact native defect, physical retention cause and old loaded 0.15 readers against
-the rebuilt FTS format remain unverified. Production FTS replacement needs its
-own execution/backup/rollback approval; readable legacy FTS is not proof that
-its automatic rewrite will succeed. Never force `deleteUnverified` or manually
-remove suspected partial files to manufacture a smaller count.
+apparent bytes grew about 7.0→8.4 billion. The rehearsal left the original unchanged
+and its copy was deleted. A separately approved production FTS replacement and
+16-CPU optimize then passed once under the shared lock, followed by normal
+incremental maintenance and verified Oracle publication at version 3846 /
+109509 unique 4096d rows. This required no paid full vector re-embedding. See
+CHANGELOG Unreleased/#16 for bounded evidence, physical growth and the temporary
+publication controller's key-order stop/controlled resume. Oracle final free was
+about 2.24GB; later increments require fresh gather/estimates, compatible 0.40
+readers and capacity checks. The exact native defect, physical retention cause
+and old loaded 0.15 readers against the rebuilt FTS format remain unverified.
+Any further production FTS replacement needs its own execution/backup/rollback
+approval; readable legacy FTS is not proof that its automatic rewrite will
+succeed. Never force `deleteUnverified` or manually remove suspected partial files
+to manufacture a smaller count.
 
 Run one track at a time, after all writers for that track are finished. `compact` uses
 four cores by default; raise `ANDENKEN_COMPACT_CPUS` only when GLG explicitly says the

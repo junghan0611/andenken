@@ -287,9 +287,17 @@ On one byte-identical, isolated sessions copy, explicitly rebuilding only FTS
 with 0.40 (`Index.fts()`, `replace: true`) followed by one unchanged optimize
 call succeeded. Existing row IDs, dimensions and a bounded positive FTS match
 set were preserved; **no embedding API or vector re-embedding was needed**.
-This is a verified repair candidate, not an automatic migration or a production
-repair: the original was unchanged and the copy was deleted. Reading that new
-FTS format from already-loaded 0.15 Pi processes remains unverified.
+The rehearsal left the original unchanged and its copy was deleted. A separately
+approved production operation then rebuilt FTS and optimized once successfully;
+normal increments and the later byte-verified Oracle publication completed at
+version 3846 / 109509 unique 4096d rows, including durable-source count 103.
+See CHANGELOG Unreleased and #16 for measured scope and the temporary publication
+controller's comparator stop/recovery. This is not an automatic migration or a
+reason to regenerate all vectors. New live inputs require normal gather/estimate
+and incremental sync. Oracle's measured final free space was only about 2.24GB;
+future capacity checks and compatible 0.40 readers remain necessary. Reading the
+rebuilt FTS format from loaded 0.15 Pi processes is not certified; harness refresh
+retains its separate approval boundary.
 
 For future maintenance, obtain explicit execution and backup/rollback scope,
 serialize writers with the shared lock, and record engine versions, row/ID and
