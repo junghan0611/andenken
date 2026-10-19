@@ -448,7 +448,7 @@ export default function (pi: ExtensionAPI) {
           ],
           {
             description:
-              "Retrieval mode. semantic|hybrid (default): vector+BM25 hybrid with 14d temporal decay. recent: stored-signal scan + timestamp-DESC sort (no embedding/BM25/dictcli; caller should pass filters). Cross-track md fallback is suppressed whenever any filter is set or mode='recent'.",
+              "Retrieval mode. semantic|hybrid (default): vector+BM25 hybrid without age-based score decay. recent: stored-signal scan + timestamp-DESC sort (no embedding/BM25/dictcli; caller should pass filters). Cross-track md fallback is suppressed whenever any filter is set or mode='recent'.",
           },
         ),
       ),

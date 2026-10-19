@@ -13,6 +13,13 @@
 
 현재 좌표: 3 완료(`v2026.9.16`) → 4 보류(MD 축 freshness 남음) → **5 진행** → 6 보류
 
+## CURRENT — maintenance accepted; narrow repairs approved for publication (2026-10-19)
+
+- **Execution and audit:** Opus `20261019T090544-262682` owned the usual tiers 2→3→4 plus one global catch-up, on code `ef45713`. Agent-config `20261007T104525-12d0ca` directly reviewed the named execution logs: final sessions 112207, md 11139, OpenClaw 8577; sessions/md source integrity passed, whereas 532 OpenClaw remote source paths were explicitly not checked. This coordinator directly read `/tmp/andenken-audit-20261019/{receipt.json,audit.mts}` and SHA-checked receipt `b5bd89a10fa51f0df9f3e2d4c14c445729fc347c9f77588a4117205305809d85`: at 09:27 both hosts had sessions version 3930 / 112207 rows / durable 103, equal and stable full session/durable/md/corpus-checksum manifest hashes, successful owned audit-lock acquisition/release and no lock residue. This lane ran no production DB/SSH/provider operation; the executor alone ran that API-0 audit. Its first .ts transform failed before execution, then .mts succeeded, not a busy-lock retry.
+- **Measured scope, not universal freshness:** no new durable snapshot/admission/indexing was authorized or executed; the existing 103-row snapshot coverage was preserved, not all newer live durable turns. The audit is a 09:27 snapshot, not proof of perpetual parity, full payload equality or human search usefulness. Agent-config's log review separates MD's eight metadata changes plus 33 payload-hash candidates (41 processed files), OpenClaw logical fragments 15→1 from physical files 22→16 / 330→323M, and harvest-board cleanliness from upstream SQLite checkpoint/active-lease state. Seven previously unheld OpenClaw rows remain unexplained; the two current deltas show no drop counters and cannot establish their cause. Do not open their possibly sensitive contents or rerun harvest merely to explain them.
+- **Uncertainties remain explicit:** T2 finished 09:10:21 before later corpus/manifest changes; their writer identity is unproven, not an established concurrent-writer collision or SDK attribution. Catch-up ended 09:21:11. Start-time runtime/reader/capacity measurements were not captured; the 09:12 observations cannot be backdated. Known logs report 190 indexer calls plus two dimension probes and about $0.025 estimated cost; the unrecorded local-style update, OpenClaw upstream usage and actual bill are outside that subtotal. The October 16 counts/free-space below are historical, not fresh checks.
+- **Narrow repairs and next decision:** agent-config corrected three unsupported consumer-skill guarantees (native freshness receipt, automatic warm/top-up and native-tool absence implying no CLI capability); this lane read its diff and accepted the bounded correction. With agent-config sign-off and after audit completion, only the `index.ts` tool-mode description's obsolete 14-day decay phrase was changed to no age-based decay. Exact one-string-only comparison, `pnpm exec tsc --noEmit` and diff checks passed; ranking/default/schema/registration/indexing behaviour and existing dist hashes are unchanged. The optional native OpenClaw shortcut wording in NEXT is also corrected. GLG explicitly approved this scoped source/NEXT commit and push on October 19 after final acceptance; agent-config publishes its consumer-skill correction separately. No build/reload/deployment, extra data work, new snapshot, FTS repair, forced cleanup, full rebuild or further audit is queued. Agent-config owns the single final human report.
+
 ## Project home — accepted; homepage publication delegated (2026-10-16)
 
 - **Complete:** the bilingual `homepage/content/projects/andenken/index{,.ko}.md` introduces the whole project, not today's incident. README aligns purpose, index/query/read architecture and actual tool reach; AGENTS records public-surface ownership. Existing steward Denote `20260319T110800` has a dated report/history and refreshed description/lastmod, with old reports preserved. No new note, private corpus copy or runtime feature was created.
@@ -68,10 +75,9 @@ The #16 operational detour is complete. The stem below remains the next developm
 - **Do not touch**: tier 4의 append-only(§7.3 규칙 1). path 단위 대체로 옛 판 누적을
   흉내내면 `.deleted.` 행까지 지우는 길이 열린다 — 그건 GLG 정책 항목이지 최적화가 아니다.
 
-## tier 4 잔여 (기능, #13 열린 항목)
+## Tier 4 — optional follow-ups (see #13 history)
 
-- [ ] pi extension `openclaw_search` — 없으면 pi 형제는 이 축을 영영 못 본다.
-      CLI만 나누면 GLG의 "축을 나눠라"가 절반만 지켜진다
+- [ ] Optional native Pi `openclaw_search` shortcut. Pi callers can already reach the OpenClaw axis through the shared CLI/semantic-memory contract; no dedicated native tool does not mean no capability. Adding that shortcut remains a separately scoped feature.
 - [ ] 재군음 사건당 전량 재전송 — 정확도는 지금이 최선(`updated_at` ⊃ id-diff ⊃ hash).
       2단계(원격 id manifest 후 로컬 diff)는 키가 id여야 하고 **provider 변경 실명을
       GLG가 승인**해야 한다
