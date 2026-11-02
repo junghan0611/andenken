@@ -507,11 +507,16 @@ modes. `--local` (the default) indexes only this device's live sessions, uses no
 ssh, and does not touch the replica — cheap enough to put on a timer.
 `--global` gathers every device with `--strict`, embeds, verifies, and publishes
 the index, the manifest **and** the corpus in one act; that is the moment a human
-is meant to hold. The publish ships `sessions.lance` with `session-manifest.json`
-and `durable-manifest.json` — or removes exactly that file on the replica when
-the authority has none — and admitted snapshots travel with the corpus. A failed
-step fails the whole publish. `--push` remains as a deprecated alias. Nothing
-here is automated by default.
+is meant to hold. The publish runs in a fixed order: verify → corpus
+(`replicate-corpus.sh --strict`, which refuses a corpus failing the source-form
+check and, in archive mode, also carries the archive — see *Corpus archive
+mode* below) → `sessions.lance` with `session-manifest.json` and its paired
+files (`durable-manifest.json`, `session-policy.json`, `s0-held.json`; each
+removed on the replica when the authority has none). A failure before the index
+step leaves the replica's index as it was, and a 0-row index is never
+published. Admitted snapshots travel with the corpus. A failed step fails the
+whole publish.
+`--push` remains as a deprecated alias. Nothing here is automated by default.
 
 **One writer at a time, across processes.** Every `sessions.lance` writer —
 sync, rebuild, `index:sessions` / `index:durable`, sessions cleanup / compact,
@@ -579,6 +584,10 @@ What keeps a long run going, and what stops it:
   file, duplicate id or changed source is refused. Only the remaining files are
   sent. Every attempt's receipt, manifest and ledger is archived byte-for-byte
   under `<target>/attempts/`.
+- **Adoption ends resume.** Once a candidate has been adopted as the live data
+  directory, its historical build target is no longer a `--resume` target: the
+  live address is governed by its adoption receipt, and any further build is a
+  new candidate. Resume applies only to a target that has not been adopted.
 - **Operator stops.** A stale candidate lock (SIGKILL / OOM) is never removed
   automatically. A changed plan source voids the plan (re-plan, never resume into
   a different input). `--resume` still needs a human `yes`: a run that stops
@@ -613,6 +622,207 @@ Total embedding time
 for about 115k rows was about 75 minutes of active run; the candidate occupies
 about 2.05 GB allocated, against 9.28 GB for the production `sessions.lance`
 (directory metadata only, which also carries the production version history).
+
+### Selection policy pin — which writers follow it (issue #18)
+
+A data directory says which selection policy its sessions index was built with
+in two places that must agree: `data/session-policy.json` and a `selectionPolicy`
+field at the top level of `data/session-manifest.json`, both exactly
+
+```json
+{"kind":"andenken-sessions-policy","version":1,"selection":"control-v1","s0":"whole-message-v1"}
+```
+
+Both absent means legacy — every index written before the pin, unchanged
+byte for byte. Both present and identical means control-v1. Anything else — one
+side only, the two differ, malformed JSON, an unknown key, version or value, a
+pin file or manifest that is a symlink or not a regular file, a manifest that is
+not a JSON object — refuses every sessions writer (exit 2,
+`REFUSED sessions-policy …`) before a provider, store or corpus is touched. A
+lost pin file therefore cannot turn a control-v1 index back into a legacy one.
+
+**The pin is a declaration, not a verification.** It says which policy the
+rows *were built with*; pinning reads and re-selects no row. Pin only a data
+directory built under control-v1 (a verified candidate). Pinning an existing
+legacy index does not upgrade it — it would mislabel legacy rows and unheld S0
+matches as control-v1.
+
+```bash
+./run.sh policy:sessions                         # read-only: the pin of data/ as JSON
+./run.sh policy:sessions:pin --data <abs dir>    # cutover step: pin a dir (API 0)
+```
+
+`policy:sessions:pin` writes the manifest field, then the pin file, under that
+directory's writer lock, and refuses a directory whose `sessions.lance` is not a
+real directory, whose manifest is not a regular JSON-object file, or that
+already carries any pin entry (a broken symlink at the pin path counts). It is a
+cutover step; nothing runs it automatically.
+
+In a pinned directory the writers read `data/s0-held.json` before the provider
+and refuse (exit 2, fixed code, row index and field name only — never a value)
+anything but the candidate's exact shape: `{note,count,rows}` with the
+candidate's note, rows of exactly `{id,kinds,chars}`, a unique `<file>.jsonl:<line>[#<part>]`
+id without `.`/`..` segments, known S0 kinds in canonical order, and a length
+the splitter can emit (1–2200). A file's ledger rows move at the same point as
+its manifest entry, so a provider failure leaves both as they were. A message
+whose retained text fails sanitize (`held-sanitize-conflict`, explicit in the
+candidate plan) refuses its whole file: that file's rows and manifest entry stay,
+the run fails, and `estimate:sessions` counts it. Conservative limit: the file's
+clean messages wait too, until an operator resolves the conflict.
+
+| writer | legacy dir | pinned (control-v1) dir |
+|---|---|---|
+| `sync:sessions` → `indexer.ts sessions` | unchanged | new and appended files embed the control-v1 send set; whole messages with an S0 match are held, never sent, and their ids / kinds / lengths go to `data/s0-held.json` (saved before the manifest at each checkpoint) |
+| `index:sessions --force`, `rebuild:sessions` | unchanged | refused — the wrapper refuses before gather, estimate, preflight or destroy; a pinned index is rebuilt as a candidate, never in place |
+| `estimate:sessions` | unchanged | control-v1 send count; S0-held reported apart; `--full` refused |
+| `index:durable` | unchanged | a snapshot whose B.1 rows hold any S0 match stops the run before its delete / embed / checkpoint |
+| `cli.ts reindex`, pi `/memory reindex` | unchanged, plus the guards below | refused (legacy-only writers); use `sync:sessions` |
+| `compact sessions` / `all` | pin and authority read first | same; rows and pin unchanged |
+| `cleanup sessions` / `all` | pin and authority read first | refused (`pinned-cleanup-unsupported`): it deletes rows whose source file is absent, which is not decided here for a pinned index; `--dry-run` stays read-only and ungated |
+| `estimate.ts sessions` (`./run.sh estimate`) | unchanged | refused — it counts legacy selection; use `estimate:sessions` |
+| `sync-sessions-legacy-4b.sh` | retired — refuses (exit 2) | retired |
+
+Independent of the pin: a paid run into an index that holds **none of the
+discovered sessions** — missing, empty, or holding only pi-durable rows — is a
+full rebuild in all but name, so `indexer.ts sessions`, `cli.ts reindex` and pi
+`/memory reindex` refuse it without `ANDENKEN_ALLOW_PAID_FULL_REBUILD=1`;
+`sync-sessions.sh` refuses a 0-row index before its 1-call preflight. That
+wrapper guard is coarse (total rows): an index holding only pi-durable rows passes
+it, costs the one preflight call, and is then refused by the indexer before any
+embedding. The index
+authority rule (INVARIANT 7.1) now also gates `indexer.ts sessions`, `cli.ts
+reindex`, pi `/memory reindex` and `rebuild-sessions-full.sh` (before it gathers
+or destroys anything), as it already gated `sync-sessions.sh` and
+`index:durable`. `cli.ts reindex` now takes the writer lock, and its `--force`
+against a paid endpoint takes the same flag. The shell wrappers also refuse
+when `ANDENKEN_DATA` names a different directory from the `data/` they destroy
+or publish.
+
+**Corpus source form.** `corpus-manifest.sh` walks the corpus without its
+root `.git` (device trees such as `<device>/.pi` and `<device>/.claude` are
+the corpus and are walked as before). `form`, `update` and `verify` refuse with
+exit 3, writing nothing, when a selected session file is a symlink (a locked
+git-annex file or any link) or a git-annex pointer file. `gather-corpus.sh`
+runs that check before copying anything, and `replicate-corpus.sh` runs it
+before the manifest update and the transfer, ships with `--exclude=/.git/`,
+and stops when the manifest update fails. Nothing here gets, unlocks or rewrites
+corpus files.
+
+What a source change does not do: a running pi process keeps the `dist/` it
+loaded, so `/memory reindex` refuses a pinned dir only after `dist/` is rebuilt
+and pi is reloaded.
+
+### Corpus archive mode (issue #18 / agent-config #32)
+
+When the corpus root has a `.git` (git-annex, owned by agent-config), the corpus
+is in **archive mode**. The archive itself is not andenken's: andenken calls the
+owner's helper (`agent-config/skills/memory-sync/scripts/corpus-archive.py`,
+override `ANDENKEN_CORPUS_ARCHIVE_HELPER`) as
+`python3 -I HELPER PHASE --corpus ABS --lock-fd 8 [--annex-bin DIR] [args]`,
+logs its one-line JSON, and propagates its exit code (`0` ok … `75` lock)
+through every wrapper unchanged — `sync:sessions` and `rebuild:sessions` exit
+with the failing child's code, not a folded `1`. Exit `19` (a phase failed AND
+its index restore failed) is printed as `REFUSED corpus-archive-restore-failed`
+and needs an operator; nothing after it runs. A missing helper fails closed
+(exit 10) before anything is gathered. `--annex-bin` is passed only when
+`ANDENKEN_CORPUS_ANNEX_BIN` is set, and then it must be an absolute existing
+directory (else exit 2, `corpus-annex-bin-invalid`, before any helper call);
+unset means the helper's normal `PATH`. andenken installs nothing. Without a
+`.git` nothing below happens and every path behaves as before.
+
+**Custody.** `<corpus>/.git/corpus-custody.lock`, held with flock on **FD 8** by
+the outermost wrapper (order: sync flock 9 → custody 8 → sessions writer lock),
+exported as `ANDENKEN_CORPUS_CUSTODY_FD=8`. Children re-enter on the inherited
+descriptor (same dev/inode, `flock -n` on the same open file description); none
+unlocks or reopens it. A separate open that finds it busy exits 75. A set
+`ANDENKEN_CORPUS_CUSTODY_FD` is a claim of inherited custody: if FD 8 is missing
+or is another file, the wrapper refuses (75, `corpus-custody-fd-lost`) instead
+of opening the lock afresh; only an unset variable means a standalone run that
+takes it. What the inherited check proves is narrower than ownership: the
+descriptor is the lock file and no other open file description holds it
+(`flock` also succeeds on a matching descriptor nobody held yet). That the
+outermost wrapper takes it before any child runs is the wrappers' order. Node writers
+are launched with `node --import tsx`, because `pnpm exec tsx` does not pass FD
+8 through (measured); `corpus-custody.ts` refuses a Node writer without it.
+
+**Commits.** Only two explicit human calls commit the archive, once each:
+`sync:sessions --global` and a full `rebuild:sessions` (not `--dry-run`). In
+archive mode either of them with `SKIP_GATHER=1` is refused before the lock,
+custody or any probe (exit 2, `archive-skip-gather-refused`, API 0): without its
+gather there is no checkpoint, and they would publish or rebuild from a ledger
+the archive never committed. Their gather runs with `--checkpoint`, and the checkpoint runs
+on the index authority (`~/.current-device` only) after the copy, the ledger
+refresh and a complete gather. A rebuild refused for its pin or authority is
+refused before it gathers, so it commits nothing. A local / warm sync and a
+standalone `corpus:gather` hold custody and run the owner's `preflight` (safety
+and form readiness) but never commit; the corpus may then be ahead of the
+archive HEAD, by design. The first commit (`checkpoint --bootstrap`) is a
+one-time operator step outside andenken; no andenken path bootstraps.
+
+**Writers without a gather** — `index:sessions`, `index:durable` (not
+`--dry-run`), `corpus:durable-admit`, and `sync:sessions --local` with
+`SKIP_GATHER=1` — run the owner's `preflight` and the read-only source
+`form` under the held custody before Node starts; either failing exits with its
+code and no writer runs. This is readiness, not a HEAD binding: a corpus ahead
+of HEAD is still accepted.
+
+**The marker.** Only a `.git` that is entirely absent is legacy. A gitfile, a
+symlink (even to a directory) or a `.git` whose lstat fails for another reason
+is refused with exit 10 (`corpus-archive-marker-invalid`), API 0, by the shell
+wrappers (also under `--dry-run`) and by every Node writer alike. The custody
+lock path must be a regular file (a symlink is refused, 75).
+
+`./run.sh test:archive-real` runs this glue against the real owner helper,
+pinned by SHA-256 (a different helper is refused before it runs; a private copy
+is what runs), on a synthetic temp corpus and replica — never the real ones.
+
+**Replicas.** `replicate-corpus.sh` (non-dry) runs, per replica, each step only
+after the one before it succeeded:
+
+1. the replica's `preflight` under the replica's custody, before any byte moves
+   (one ssh: `exec 8>>LOCK && flock -n 8 || exit 75; python3 -I HELPER preflight
+   … --lock-fd 8`). It is a safety and form check, not proof that the incoming
+   transfer fits or is complete;
+2. the corpus rsync with the replica's lock held for the transfer
+   (`--rsync-path "flock -n LOCK rsync"`, root `.git` excluded);
+3. the run's one local `bundle`, in a job-owned `mktemp -d` (0700) as
+   `canonical.bundle` (0600), its sha256 printed;
+4. a job-owned 0700 dir on the replica (`mktemp -d ~/.cache/andenken/archive.XXXXXXXX`);
+   the bundle is copied in, made 0600 and its sha256 must equal (3), else exit 18;
+5. the replica's `receive --bundle` under its custody;
+6. the location log back: the replica bundles its refs into the same job dir,
+   that bundle comes back (sha256 checked, else 18) and the canonical side runs
+   `merge-log --bundle … --from <roster id>` under local custody, so both
+   hosts' git-annex branches record both copies. Bundles carry Git refs only —
+   never annexed source content — and nothing is pushed to any other remote;
+7. this run's payload files and job dirs are removed (nothing else). A failed
+   step keeps the replica's job dir and prints its path; the local one is
+   always removed.
+
+In archive mode `replicate` does **not** refresh the ledger first (legacy mode
+still does): the ledger is refreshed by gather and committed by its checkpoint,
+and the MANIFEST that ships must be the committed one. `update` always rewrites
+it (`generated` moves even when no file changed), so refreshing it here made
+every `receive` refuse (13, "worktree MANIFEST.json is not the canonical one") —
+measured against the real helper. A standalone `corpus:replicate` after an
+uncommitted local gather is therefore refused by the replica's `receive`, fail
+closed; `sync:sessions --global` is the path that commits and ships together.
+
+Any non-zero step stops the run with that step's code, so `sync:sessions
+--global` ships no index. The roster id must be a valid location-log name
+(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`), else exit 2 before the replica is
+touched. The ssh calls are not atomic together; `receive` re-verifies what it is
+given and fails closed. `ANDENKEN_REPLICA_ARCHIVE_HELPER` and
+`ANDENKEN_REPLICA_ANNEX_BIN` (absolute; it must exist on the replica, else the
+replica's preflight exits 2 before the rsync) override the replica side.
+
+| entry | archive mode |
+|---|---|
+| `sync:sessions` (`--local` / `--global`), `rebuild:sessions` | supported: custody, preflight, `node --import tsx` indexer; `--global` and a full rebuild also commit; `--global` replicates the archive |
+| `corpus:gather`, `corpus:manifest update`, `corpus:replicate` | supported: custody (taken, or re-entered under a wrapper); no commit |
+| `index:sessions`, `index:durable`, `corpus:durable-admit` via `./run.sh` | supported: `run.sh` takes custody, runs preflight + form, then launches one `node --import tsx` |
+| `corpus:manifest form` / `verify`, `estimate:sessions`, `index:durable --dry-run`, `status`, `verify` | read-only: no custody |
+| direct `pnpm exec tsx indexer.ts sessions` / `durable`, `cli.ts reindex`, pi `/memory reindex`, direct `durable-admit.ts` | refused, exit 75 (`corpus-custody custody-absent` / `custody-fd-lost`), API 0 |
 
 ## Why the name
 

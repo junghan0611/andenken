@@ -30,6 +30,15 @@
 #   ./scripts/sync-sessions-legacy-4b.sh --backend gpu1i
 set -euo pipefail
 
+# Retired (issue #18): this path ships sessions.lance and its manifest without
+# the files that now travel with them (durable-manifest, session-policy pin,
+# S0 ledger), takes neither the sessions writer lock nor corpus custody, and
+# reads no selection pin. Rather than teach a deprecated 2560d path all of that,
+# it refuses before doing anything. Use scripts/sync-sessions.sh.
+echo "REFUSED sync-sessions-legacy-4b retired: unpaired publish, no writer lock, no custody, no policy pin." >&2
+echo "  Use ./run.sh sync:sessions (scripts/sync-sessions.sh). Nothing was done." >&2
+exit 2
+
 cd "$(dirname "$0")/.."   # repo root
 
 # --- args ---

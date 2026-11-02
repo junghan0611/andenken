@@ -25,13 +25,29 @@ import {
 } from "./embedding-provider.js";
 import { VectorStore, getSessionsDbPath, getOrgDbPath, getMdDbPath, getOpenclawDbPath, getDataDir } from "./store.js";
 import { stagingState } from "./openclaw-importer.js";
-import { findSessionFiles, extractSessionChunks } from "./session-indexer.js";
+import { findSessionFiles } from "./session-indexer.js";
 import { findOrgFiles, chunkOrgFile, shouldIndexOrgFile } from "./org-chunker.js";
 import { findMdFiles, chunkMdFile, mdChunkToStoreRow } from "./md-chunker.js";
 import { WriteBuffer } from "./write-buffer.js";
 import { durableCorpusRoot } from "./durable-source.js";
+import { assertCorpusCustody, CorpusCustodyRefused } from "./corpus-custody.js";
 import { forgetDurableFiles, invalidateDurableManifest, renderDurableIndexReport, runDurableIndex } from "./durable-index.js";
 import { SessionsLockRefused, withSessionsLock } from "./sessions-lock.js";
+import {
+  extractForPolicy,
+  freshPaidRefusal,
+  indexAuthorityRefusal,
+  ledgerId,
+  loadS0Ledger,
+  pinSessionsPolicy,
+  readSessionsPolicy,
+  replaceLedgerFile,
+  saveS0Ledger,
+  SessionsPolicyRefused,
+  type SessionsPolicy,
+} from "./session-policy.js";
+import { partitionMessagesForEmbedding } from "./session-selection.js";
+import type { DurableExtraction } from "./durable-source.js";
 import { countDataFiles, formatOptimizeStats, formatShape, readLogicalShape } from "./table-shape.js";
 
 // --- dictcli stem integration (Layer 3 → Layer 1 bridge) ---
@@ -503,7 +519,24 @@ class Progress {
 // --- Session Indexing ---
 
 async function indexSessions(force: boolean) {
+  // Policy pin first (session-policy.ts): a malformed pin refuses before any
+  // provider, store or corpus work; a pinned dir refuses --force, because the
+  // only full writer of a control-v1 index is the candidate builder.
+  const policy = readSessionsPolicy();
+  if (force && policy.pinned) {
+    throw new SessionsPolicyRefused(
+      "pinned-force-refused",
+      "this data dir is pinned to control-v1; a --force rebuild here would write legacy selection. Build a candidate instead",
+    );
+  }
+  const notAuthority = indexAuthorityRefusal("index:sessions");
+  if (notAuthority) throw new Error(notAuthority);
+  // Pinned: the S0 ledger is read (and validated) before the provider, the store
+  // or any extraction — a ledger this writer cannot vouch for refuses the run
+  // with zero requests instead of being re-saved later.
+  const ledgerAtStart = policy.pinned ? loadS0Ledger() : null;
   const provider = getSessionsProvider();
+  const paid = (provider as { isPaidRemote?: boolean }).isPaidRemote === true;
 
   // PR-B paidRemote guard. Prevents accidental
   //   pnpm exec tsx indexer.ts sessions --force
@@ -521,6 +554,13 @@ async function indexSessions(force: boolean) {
         "reviewed the cost estimate.",
       );
     }
+  }
+
+  // Fresh paid guard, DB-absent half: checked before the store is opened, so a
+  // refused run does not leave an empty sessions.lance where a restore goes.
+  if (!force && paid && !fs.existsSync(getSessionsDbPath())) {
+    const refusal = freshPaidRefusal({ paid, indexedFiles: 0, toIndex: findSessionFiles().length });
+    if (refusal) throw new Error(refusal);
   }
 
   const store = new VectorStore(undefined, provider.dimensions || 2560);
@@ -553,6 +593,16 @@ async function indexSessions(force: boolean) {
     : getStaleFiles(files, indexed, manifest);
   const toIndex = [...newFiles, ...staleFiles];
 
+  // Fresh paid guard, existing-table half (empty, or pi-durable rows only):
+  // before the baseline write and any API call.
+  if (!force && paid) {
+    const refusal = freshPaidRefusal({ paid, indexedFiles: files.filter((f) => indexed.has(f)).length, toIndex: toIndex.length });
+    if (refusal) {
+      await store.close();
+      throw new Error(refusal);
+    }
+  }
+
   // First run without manifest: record current mtime/size as baseline so future
   // appends are detectable. Only files already in the indexed set are baselined —
   // baselining non-indexed files would let an embed-time failure get silently
@@ -574,7 +624,8 @@ async function indexSessions(force: boolean) {
   }
 
   console.log(
-    `Sessions: ${files.length} | indexed: ${indexed.size} | new: ${newFiles.length} | stale: ${staleFiles.length} | concurrency: ${CONCURRENCY}`,
+    `Sessions: ${files.length} | indexed: ${indexed.size} | new: ${newFiles.length} | stale: ${staleFiles.length} | concurrency: ${CONCURRENCY}` +
+      (policy.pinned ? ` | policy: ${policy.selection} + S0 ${policy.s0}` : ""),
   );
   if (toIndex.length === 0) {
     console.log("✅ All sessions indexed and up-to-date.");
@@ -598,16 +649,35 @@ async function indexSessions(force: boolean) {
   //   Concrete shape: every checkpoint awaits wb.flush() before saveSessionManifest().
   //   wb.flush() is enqueued through WriteBuffer's serial tail, so concurrent
   //   tasks can only re-enter the embedding stage after the flush completes.
+  // Pinned only: the S0 ledger. Each processed file replaces its own rows; the
+  // ledger is saved right after the flush and BEFORE the manifest, so a crash in
+  // between re-processes the file (and replaces its rows again) on the next run.
+  // A file's ledger rows are replaced at the same point as its manifest entry —
+  // after its rows were handed to the write buffer — never at extraction: a file
+  // whose embed fails, or that is still waiting on the provider when another
+  // file's checkpoint persists, must not advance the ledger past its DB rows.
+  const corpus = durableCorpusRoot();
+  let ledger = ledgerAtStart;
+  let heldThisRun = 0;
+  const persist = () => {
+    if (ledger) saveS0Ledger(ledger);
+    saveSessionManifest(manifest);
+  };
   const checkpointIfNeeded = async () => {
     if (filesProcessed % CHECKPOINT_INTERVAL !== 0) return;
     await wb.flush();
-    saveSessionManifest(manifest);
+    persist();
     console.log(`  📌 Manifest checkpoint at ${filesProcessed}/${toIndex.length} files`);
   };
 
   const tasks = toIndex.map((file) => async () => {
     try {
-      const chunks = await extractSessionChunks(file);
+      const { send: chunks, held } = await extractForPolicy(file, policy, corpus);
+      const commitLedger = () => {
+        if (!ledger) return;
+        ledger = replaceLedgerFile(ledger, ledgerId(file, corpus), held);
+        heldThisRun += held.length;
+      };
 
       // Capture mtime/size at index time for next staleness check
       let manifestEntry: { mtimeMs: number; size: number; chunks: number } | undefined;
@@ -621,6 +691,7 @@ async function indexSessions(force: boolean) {
         // markFile only enqueues a delete; it doesn't move buffered rows — checkpoint
         // still flushes any unrelated buffered records before saving the manifest.
         await wb.markFile(file);
+        commitLedger();
         if (manifestEntry) manifest.files[file] = manifestEntry;
         filesProcessed++;
         progress.tick(0);
@@ -634,6 +705,7 @@ async function indexSessions(force: boolean) {
       // wb.add() auto-deletes existing rows for this file before re-inserting,
       // so stale chunks never linger when an active session is re-indexed.
       await wb.add(chunks.map((c, j) => ({ ...c, vector: vectors[j] })));
+      commitLedger();
       if (manifestEntry) manifest.files[file] = manifestEntry;
       filesProcessed++;
       progress.tick(chunks.length);
@@ -648,7 +720,8 @@ async function indexSessions(force: boolean) {
 
   const { errors: sessionErrors } = await runWithConcurrency(tasks, CONCURRENCY);
   await wb.flush(); // final flush
-  saveSessionManifest(manifest); // final persist
+  persist(); // final persist (ledger, then manifest)
+  if (ledger) console.log(`🛡 S0 held this run: ${heldThisRun} chunks (ledger total ${ledger.count}; ids and kinds only)`);
   if (sessionErrors > 0) {
     throw new Error(`Session indexing failed for ${sessionErrors} files`);
   }
@@ -669,27 +742,43 @@ async function indexSessions(force: boolean) {
 // Corpus snapshots only (durable-source.ts admits them); rows land in
 // sessions.lance under source "pi-durable", tracked by data/durable-manifest.json.
 // --dry-run builds no provider and opens no store.
+/**
+ * index:durable's S0 rule in a pinned data dir: a snapshot whose B.1 rows hold
+ * any S0 match stops the run before that snapshot's delete/embed/checkpoint —
+ * the same rule the candidate build enforced. Snapshots already checkpointed
+ * earlier in the run stay; the refusal names kinds and counts only. --dry-run
+ * stops the same way, so it never reports a plan the real run would refuse.
+ * Undefined for legacy (no inspection, unchanged behaviour).
+ */
+export function durableS0Inspector(policy: SessionsPolicy): ((file: string, x: Readonly<DurableExtraction>) => void) | undefined {
+  if (!policy.pinned) return undefined;
+  return (_file, x) => {
+    const held = partitionMessagesForEmbedding(x.groups).held;
+    if (held.length > 0) {
+      const kinds = [...new Set(held.flatMap((h) => h.kinds))].join(",");
+      throw new SessionsPolicyRefused("durable-s0-held", `${held.length} message(s), kinds ${kinds}`);
+    }
+  };
+}
+
 async function indexDurable(dryRun: boolean, json: boolean) {
   const corpus = durableCorpusRoot();
   if (!corpus) throw new Error("index:durable reads corpus snapshots only — set ANDENKEN_SESSION_CORPUS");
+  const policy = readSessionsPolicy();
   const deps = {
     corpus,
     manifestPath: path.join(getDataDir(), "durable-manifest.json"),
     dryRun,
+    inspectExtraction: durableS0Inspector(policy),
   };
   if (dryRun) {
     const report = await runDurableIndex(deps);
     console.log(json ? JSON.stringify(report, null, 2) : renderDurableIndexReport(report));
     return;
   }
-  // Same authority rule as scripts/sync-sessions.sh: only the index authority writes.
-  const device = (fs.existsSync(path.join(process.env.HOME ?? "", ".current-device"))
-    ? fs.readFileSync(path.join(process.env.HOME ?? "", ".current-device"), "utf-8")
-    : "").trim();
-  const authority = process.env.ANDENKEN_INDEX_AUTHORITY ?? "thinkpad";
-  if (device !== authority && process.env.ANDENKEN_ALLOW_REPLICA_INDEX !== "1") {
-    throw new Error(`index:durable writes only on the index authority (${authority}); this device is ${device || "unknown"}`);
-  }
+  // Same authority rule as every sessions writer (session-policy.ts indexAuthorityRefusal).
+  const notAuthority = indexAuthorityRefusal("index:durable");
+  if (notAuthority) throw new Error(notAuthority);
   // getSessionsProvider() announces itself on stdout; --json keeps stdout to the report.
   const provider = json ? createSessionProviderFromEnv() : getSessionsProvider();
   if (!provider) throw new Error("No sessions embedding provider available (ANDENKEN_SESSION_*)");
@@ -1962,6 +2051,11 @@ async function estimate(target: string) {
   }
 
   const fullMode = process.argv.includes("--full");
+  const policy = readSessionsPolicy();
+  if (fullMode && policy.pinned) {
+    throw new SessionsPolicyRefused("pinned-force-refused", "estimate --full prices a legacy --force rebuild, which a pinned data dir refuses");
+  }
+  const corpus = durableCorpusRoot();
   const allFiles = findSessionFiles();
 
   // INCREMENTAL: subtract files already in manifest with current mtime/size.
@@ -1995,14 +2089,22 @@ async function estimate(target: string) {
   // so the chunk count matches what would be embedded.
   let totalChunks = 0;
   let totalChars = 0;
+  let heldChunks = 0;
+  let heldChars = 0;
+  let conflictFiles = 0;
   for (const f of filesToEstimate) {
     try {
-      const chunks = await extractSessionChunks(f);
+      // Same per-policy extractor indexSessions sends from; legacy is unchanged.
+      const { send: chunks, held } = await extractForPolicy(f, policy, corpus);
       totalChunks += chunks.length;
       for (const c of chunks) totalChars += c.text.length;
-    } catch {
-      // Skip unreadable files; mirrors indexer behavior of just counting errors
-      // separately. Estimate is approximate by design.
+      heldChunks += held.length;
+      for (const h of held) heldChars += h.chars;
+    } catch (e) {
+      // A file the real run would refuse is counted, not silently dropped.
+      if (e instanceof SessionsPolicyRefused && e.code === "held-sanitize-conflict") conflictFiles++;
+      // Otherwise skip unreadable files; mirrors indexer behavior of just counting
+      // errors separately. Estimate is approximate by design.
     }
   }
 
@@ -2024,6 +2126,7 @@ async function estimate(target: string) {
 
   const header = fullMode ? "Sessions estimate (FULL REBUILD)" : "Sessions estimate (INCREMENTAL)";
   console.log(header);
+  if (policy.pinned) console.log(`  policy: ${policy.selection} + S0 ${policy.s0} (pinned data dir)`);
   if (fullMode) {
     console.log(`  files: ${allFiles.length}`);
   } else {
@@ -2031,6 +2134,10 @@ async function estimate(target: string) {
     console.log(`  files to index: ${filesToEstimate.length}` + (skipped > 0 ? ` (${skipped} already indexed → skipped)` : ""));
   }
   console.log(`  chunks (estimated): ~${totalChunks}`);
+  if (policy.pinned) console.log(`  S0-held (never sent, not priced): ${heldChunks} chunks, ${heldChars.toLocaleString()} chars`);
+  if (conflictFiles > 0) {
+    console.log(`  ⚠ held-sanitize-conflict: ${conflictFiles} file(s) would be refused (not priced; the run fails, their rows and manifest entries stay)`);
+  }
   console.log(`  chars: ~${totalChars.toLocaleString()}`);
   console.log(`  estimated tokens: ~${tokens.toLocaleString()} (chars/2.5)`);
   console.log(`  configured price: $${price}/M tokens`);
@@ -2197,6 +2304,32 @@ async function estimateMd() {
   console.log(`  ↳ no API call was made for this estimate`);
 }
 
+// --- Sessions policy pin (session-policy.ts) ---
+//
+//   policy                     read-only: print the pin of ANDENKEN_DATA (or data/)
+//                              as one JSON line; exit 2 when it is malformed/one-sided.
+//   policy --pin --data <abs>  write the control-v1 pin into <abs> (manifest field,
+//                              then session-policy.json) under that dir's writer lock.
+//                              API 0. Refuses a dir that is already pinned, has no
+//                              sessions.lance or no session-manifest.json.
+async function sessionsPolicyCommand(argv: string[]) {
+  if (argv.length === 0) {
+    const dataDir = getDataDir();
+    const p = readSessionsPolicy(dataDir);
+    console.log(JSON.stringify({ dataDir, ...p }));
+    return;
+  }
+  const i = argv.indexOf("--data");
+  const dir = i >= 0 ? argv[i + 1] : undefined;
+  if (argv[0] !== "--pin" || argv.length !== 3 || !dir || !path.isAbsolute(dir) || path.resolve(dir) !== dir) {
+    throw new SessionsPolicyRefused("usage", "indexer.ts policy | indexer.ts policy --pin --data <absolute normalized dir>");
+  }
+  await withSessionsLock("policy --pin", async () => {
+    pinSessionsPolicy(dir);
+  }, { dataDir: dir });
+  console.log(JSON.stringify({ dataDir: dir, ...readSessionsPolicy(dir) }));
+}
+
 // --- Main ---
 //
 // Guard against side-effect execution when this module is imported (e.g.
@@ -2213,10 +2346,29 @@ if (isDirectInvocation) {
   const dryRun = args.includes("--dry-run");
   // Every write to sessions.lance (or its manifests) holds the shared writer lock.
   const touchesSessions = (target: string) => target === "sessions" || target === "all";
+  // Maintenance writers on sessions.lance read the pin and the authority under
+  // the lock, before any mutation: a malformed / one-sided pin refuses (exit 2)
+  // instead of being carried into a new table generation. Cleanup deletes
+  // "orphan" rows whose source file is not on disk; under a pinned index (whose
+  // corpus may live in an archive, not materialized) that is refused outright.
+  // A cleanup --dry-run is read-only and does not pass through here.
+  const sessionsMaintenanceGate = (op: "compact" | "cleanup") => {
+    const policy = readSessionsPolicy();
+    const notAuthority = indexAuthorityRefusal(`${op} sessions`);
+    if (notAuthority) throw new Error(notAuthority);
+    if (op === "cleanup" && policy.pinned) {
+      throw new SessionsPolicyRefused(
+        "pinned-cleanup-unsupported",
+        "cleanup removes rows whose source file is absent; on a pinned index that is not decided here (no archive form / lease). Use cleanup sessions --dry-run to read",
+      );
+    }
+  };
 
   try {
   switch (cmd) {
     case "sessions":
+      // Archive-mode corpus: custody (inherited FD) first, then the writer lock.
+      assertCorpusCustody("index:sessions");
       await withSessionsLock("index:sessions", () => indexSessions(force));
       break;
     case "md":
@@ -2224,17 +2376,30 @@ if (isDirectInvocation) {
       break;
     case "durable":
       if (dryRun) await indexDurable(true, args.includes("--json"));
-      else await withSessionsLock("index:durable", () => indexDurable(false, args.includes("--json")));
+      else {
+        assertCorpusCustody("index:durable");
+        await withSessionsLock("index:durable", () => indexDurable(false, args.includes("--json")));
+      }
       break;
     case "org":
       await indexOrg(force);
       break;
     case "compact":
-      if (touchesSessions(args[1] ?? "all")) await withSessionsLock(`compact ${args[1] ?? "all"}`, () => compact(args[1] ?? "all"));
+      if (touchesSessions(args[1] ?? "all")) {
+        await withSessionsLock(`compact ${args[1] ?? "all"}`, () => {
+          sessionsMaintenanceGate("compact");
+          return compact(args[1] ?? "all");
+        });
+      }
       else await compact(args[1] ?? "all");
       break;
     case "cleanup":
-      if (touchesSessions(args[1] ?? "org") && !dryRun) await withSessionsLock(`cleanup ${args[1]}`, () => cleanup(args[1] ?? "org"));
+      if (touchesSessions(args[1] ?? "org") && !dryRun) {
+        await withSessionsLock(`cleanup ${args[1]}`, () => {
+          sessionsMaintenanceGate("cleanup");
+          return cleanup(args[1] ?? "org");
+        });
+      }
       else await cleanup(args[1] ?? "org");
       break;
     case "verify":
@@ -2245,6 +2410,9 @@ if (isDirectInvocation) {
       break;
     case "estimate":
       await estimate(args[1] ?? "sessions");
+      break;
+    case "policy":
+      await sessionsPolicyCommand(args.slice(1));
       break;
     default:
       console.log("Usage: npx tsx indexer.ts <sessions|md|org|compact|cleanup|verify|status|estimate> [...]");
@@ -2257,9 +2425,13 @@ if (isDirectInvocation) {
       console.log("  npx tsx indexer.ts estimate md     # API-0 dry-run cost estimate");
   }
   } catch (err) {
-    if (err instanceof SessionsLockRefused) {
+    if (err instanceof SessionsLockRefused || err instanceof CorpusCustodyRefused) {
       console.error(`REFUSED ${err.message}`);
       process.exit(err.exitCode);
+    }
+    if (err instanceof SessionsPolicyRefused) {
+      console.error(`REFUSED ${err.message}`);
+      process.exit(2);
     }
     throw err;
   }

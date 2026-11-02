@@ -338,5 +338,59 @@ console.log("\n=== CLI / run.sh — static guards ===");
 	ok("a standalone publish takes the same lock", /flock -n 8/.test(pub) && /ANDENKEN_OPENCLAW_LOCK_HELD/.test(pub));
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+console.log("\n=== CLI authority — the sessions writers' judgement, before any store open ===");
+{
+	// Synthetic only: a temp HOME and a temp, empty data dir. The CLI must refuse
+	// before it reads a staged run, opens openclaw.lance or plans a delete.
+	const tsx = new URL("./node_modules/.bin/tsx", import.meta.url).pathname;
+	const cli = new URL("./openclaw-prune.ts", import.meta.url).pathname;
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "andenken-prune-auth-"));
+	try {
+		const homes: Record<string, string> = {};
+		for (const [name, body] of [["missing", null], ["empty", ""], ["blank", "  \n"], ["thinkpad", "thinkpad\n"]] as const) {
+			const h = path.join(tmp, `home-${name}`);
+			fs.mkdirSync(h, { recursive: true });
+			if (body !== null) fs.writeFileSync(path.join(h, ".current-device"), body);
+			homes[name] = h;
+		}
+		const data = path.join(tmp, "data");
+		fs.mkdirSync(data);
+		const prune = (home: string, args: string[], over: Record<string, string | undefined>) => {
+			const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: home, ANDENKEN_DATA: data, ANDENKEN_DISABLE_RECALL_TRACKING: "1", ...over };
+			for (const [k, v] of Object.entries(env)) if (v === undefined) delete env[k];
+			const r = spawnSync(tsx, [cli, ...args], { env, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] });
+			return { status: r.status, out: r.stdout + r.stderr };
+		};
+		let refusedAll = true;
+		const seen: string[] = [];
+		for (const dev of ["missing", "empty", "blank"]) {
+			for (const auth of [undefined, "", "thinkpad"]) {
+				for (const args of [[], ["--apply"], ["--restore", path.join(tmp, "nope")]]) {
+					const r = prune(homes[dev], args, { HOSTNAME: "thinkpad", ANDENKEN_INDEX_AUTHORITY: auth });
+					const refused = r.status === 1 && r.out.includes("this device is unknown") && r.out.includes("prunes openclaw.lance");
+					if (!refused) seen.push(`${dev}/${JSON.stringify(auth)}/${args.join(" ")}: rc ${r.status} ${r.out.slice(0, 200)}`);
+					refusedAll &&= refused;
+				}
+			}
+		}
+		ok(`unknown device (missing / empty / blank file) with HOSTNAME=thinkpad, authority unset / '' / thinkpad, plan / --apply / --restore → refused as unknown${seen.length ? `\n${seen.join("\n")}` : ""}`, refusedAll);
+		ok("…and nothing was created in the data dir (no store opened, no prune dir)", fs.readdirSync(data).length === 0);
+		const allow = prune(homes.missing, [], { HOSTNAME: "thinkpad", ANDENKEN_INDEX_AUTHORITY: "", ANDENKEN_ALLOW_REPLICA_INDEX: "1" });
+		ok("ANDENKEN_ALLOW_REPLICA_INDEX=1 is the one override: past the authority, stopped by the absent staged run", allow.status === 1 && !allow.out.includes("index authority") && allow.out.includes("refused:"));
+		const notOne = prune(homes.missing, [], { HOSTNAME: "thinkpad", ANDENKEN_INDEX_AUTHORITY: "", ANDENKEN_ALLOW_REPLICA_INDEX: "true" });
+		ok("…other values are not an override", notOne.status === 1 && notOne.out.includes("this device is unknown"));
+		const authority = prune(homes.thinkpad, [], { HOSTNAME: "elsewhere", ANDENKEN_INDEX_AUTHORITY: "" });
+		ok("device file thinkpad + authority '' (→ thinkpad): passes the authority, stopped by the absent staged run", authority.status === 1 && !authority.out.includes("index authority") && authority.out.includes("refused:"));
+		ok("…the data dir is still empty", fs.readdirSync(data).length === 0);
+	} finally {
+		fs.rmSync(tmp, { recursive: true, force: true });
+	}
+	const src = fs.readFileSync(new URL("./openclaw-prune.ts", import.meta.url), "utf-8");
+	const mainSrc = src.slice(src.indexOf("async function main"));
+	ok("source: assertAuthority() is main's first call, before any store / staged read", mainSrc.indexOf("assertAuthority()") >= 0 && mainSrc.indexOf("assertAuthority()") < Math.min(mainSrc.indexOf("new VectorStore"), mainSrc.indexOf("loadStagedReport")));
+	ok("source: the judgement is session-policy's indexAuthorityRefusal (no HOSTNAME fallback)", /indexAuthorityRefusal\("prune:openclaw"\)/.test(src) && !/process\.env\.HOSTNAME/.test(src));
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

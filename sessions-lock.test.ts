@@ -171,13 +171,21 @@ console.log("\n# real writers race the lock (subprocess)");
   // Run byte-identical copies from a temp tree; the repo's own flock file is
   // only ever stat'ed, before and after.
   const tree = path.join(tmp, "sync-tree");
-  const copied = ["scripts/sync-sessions.sh", "scripts/lib/sessions-lock.sh"];
+  const copied = ["scripts/sync-sessions.sh", "scripts/lib/sessions-lock.sh", "scripts/lib/sessions-policy.sh", "scripts/lib/corpus-custody.sh"];
   for (const rel of copied) {
     fs.mkdirSync(path.dirname(path.join(tree, rel)), { recursive: true });
     fs.copyFileSync(path.join(repo, rel), path.join(tree, rel));
   }
-  fs.mkdirSync(path.join(tree, "data"));
-  eq(copied.map((rel) => fs.readFileSync(path.join(tree, rel)).equals(fs.readFileSync(path.join(repo, rel)))), [true, true], "the sync script runs from byte-identical copies in a temp tree");
+  // The policy gate (issue #18) requires the tree's data/ to BE the indexer's
+  // ANDENKEN_DATA, and reads the pin with `pnpm exec tsx indexer.ts policy` from
+  // the tree: a PATH shim answers that one call with the repo's real reader and
+  // hands every other pnpm call to the real pnpm.
+  fs.symlinkSync(data, path.join(tree, "data"));
+  const shim = path.join(tmp, "shim-bin");
+  fs.mkdirSync(shim);
+  const realPnpm = spawnSync("bash", ["-c", "command -v pnpm"], { encoding: "utf-8" }).stdout.trim();
+  fs.writeFileSync(path.join(shim, "pnpm"), `#!/usr/bin/env bash\nif [ "$*" = "exec tsx indexer.ts policy" ]; then exec "${TSX}" "${path.join(repo, "indexer.ts")}" policy; fi\nexec "${realPnpm}" "$@"\n`, { mode: 0o755 });
+  eq(copied.map((rel) => fs.readFileSync(path.join(tree, rel)).equals(fs.readFileSync(path.join(repo, rel)))), copied.map(() => true), "the sync script runs from byte-identical copies in a temp tree");
   const repoFlock = path.join(repo, "data", ".sync-sessions.lock");
   const flockStat = () => {
     try {
@@ -188,7 +196,7 @@ console.log("\n# real writers race the lock (subprocess)");
     }
   };
   const flockBefore = flockStat();
-  const sync = spawnSync("bash", [path.join(tree, "scripts", "sync-sessions.sh")], { cwd: tree, env, encoding: "utf-8" });
+  const sync = spawnSync("bash", [path.join(tree, "scripts", "sync-sessions.sh")], { cwd: tree, env: { ...env, PATH: `${shim}:${process.env.PATH}` }, encoding: "utf-8" });
   eq([sync.status, sync.stderr.includes("sessions-writer-busy")], [75, true], "sync-sessions.sh (the warm path) loses the same way");
   truthy(fs.existsSync(path.join(tree, "data", ".sync-sessions.lock")), "the copy's flock file lands in the temp tree, not the repo root");
   eq(flockStat(), flockBefore, "the repo's own data/.sync-sessions.lock is untouched (stat only)");

@@ -15,6 +15,7 @@ import * as path from "node:path";
 import { DurableReadRefused } from "../durable-reader.ts";
 import { admitDurableSnapshot, DurableAdmitRefused } from "../durable-source.ts";
 import { SessionsLockRefused, withSessionsLock } from "../sessions-lock.ts";
+import { assertCorpusCustody, CorpusCustodyRefused } from "../corpus-custody.ts";
 
 const USAGE = [
   "usage: corpus:durable-admit <closed snapshot> --device <roster id> [--bucket <24hex>] [--session <13digits-uuid>] [--json]",
@@ -52,6 +53,8 @@ async function main(): Promise<number> {
     console.error(USAGE);
     return 2;
   }
+  // An archive-mode corpus is written only under the wrapper's custody (FD 8).
+  assertCorpusCustody("corpus:durable-admit");
   // A corpus replacement must not overlap an index:durable reading that copy.
   const report = await withSessionsLock("corpus:durable-admit", () =>
     admitDurableSnapshot({
@@ -75,7 +78,7 @@ async function main(): Promise<number> {
 main().then(
   (code) => process.exit(code),
   (err) => {
-    if (err instanceof SessionsLockRefused) {
+    if (err instanceof SessionsLockRefused || err instanceof CorpusCustodyRefused) {
       console.error(`REFUSED ${err.message}`);
       process.exit(err.exitCode);
     }

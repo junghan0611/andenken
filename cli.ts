@@ -35,6 +35,10 @@ import {
 // `ANDENKEN_DISABLE_RECALL_TRACKING` guard cannot drift between the two search
 // entry points. See recall-log.ts for why that guard exists.
 import { recordRecall } from "./recall-log.js";
+import { freshPaidRefusal, indexAuthorityRefusal, readSessionsPolicy, refuseIfPinned, SessionsPolicyRefused } from "./session-policy.js";
+import { SessionsLockRefused, withSessionsLock } from "./sessions-lock.js";
+import { assertCorpusCustody, CorpusCustodyRefused } from "./corpus-custody.js";
+import { invalidateDurableManifest } from "./durable-index.js";
 import { FtsDiagnosticsCollector, ftsRequestReport } from "./fts-diagnostics.js";
 
 // --- Config ---
@@ -596,18 +600,53 @@ async function status(): Promise<void> {
 }
 
 async function reindex(force: boolean): Promise<void> {
+  // Legacy-only writer: a pinned (control-v1) data dir is refused before any
+  // provider, lock or store work — the manifest-driven `./run.sh sync:sessions`
+  // is its writer. A malformed pin refuses here too.
+  refuseIfPinned(readSessionsPolicy(), "cli.ts reindex");
+  const notAuthority = indexAuthorityRefusal("cli.ts reindex");
+  if (notAuthority) throw new Error(notAuthority);
   const provider = getProvider();
+  const paid = (provider as { isPaidRemote?: boolean }).isPaidRemote === true;
+  if (force && paid && process.env.ANDENKEN_ALLOW_PAID_FULL_REBUILD !== "1") {
+    throw new Error(
+      "cli.ts reindex --force against a paid endpoint is gated: use scripts/rebuild-sessions-full.sh, " +
+        "or set ANDENKEN_ALLOW_PAID_FULL_REBUILD=1 after reviewing ./run.sh estimate:sessions (no API call was made)",
+    );
+  }
+  if (!force && paid && !fs.existsSync(sessionDbPath)) {
+    const refusal = freshPaidRefusal({ paid, indexedFiles: 0, toIndex: findSessionFiles().length });
+    if (refusal) throw new Error(refusal);
+  }
+  // The same single-writer lock every other sessions.lance writer takes (exit 75).
+  assertCorpusCustody("cli.ts reindex");
+  await withSessionsLock("cli.ts reindex", () => reindexLocked(provider, paid, force));
+}
+
+async function reindexLocked(provider: EmbeddingProvider, paid: boolean, force: boolean): Promise<void> {
   const dim = provider.dimensions || 2560;
 
   const store = new VectorStore(sessionDbPath, dim);
   await store.init();
 
-  if (force) await store.reset();
+  if (force) {
+    // The reset takes the pi-durable rows too, so their checkpoint goes first
+    // (same order as indexer.ts sessions --force).
+    invalidateDurableManifest(path.join(getDataDir(), "durable-manifest.json"));
+    await store.reset();
+  }
   await store.ensureTable();
 
   const files = findSessionFiles();
   const indexed = force ? new Set<string>() : await store.getIndexedFiles();
   const toIndex = files.filter((f) => !indexed.has(f));
+  if (!force) {
+    const refusal = freshPaidRefusal({ paid, indexedFiles: files.filter((f) => indexed.has(f)).length, toIndex: toIndex.length });
+    if (refusal) {
+      await store.close();
+      throw new Error(refusal);
+    }
+  }
 
   if (toIndex.length === 0) {
     console.log(JSON.stringify({ message: "All sessions already indexed", total: await store.getCount() }));
@@ -910,5 +949,6 @@ async function main() {
 
 main().catch((err) => {
   console.error(JSON.stringify({ error: String(err) }));
-  process.exit(1);
+  // A writer refusal keeps its own exit code (75 = sessions writer busy/stale).
+  process.exit(err instanceof SessionsLockRefused || err instanceof CorpusCustodyRefused ? err.exitCode : err instanceof SessionsPolicyRefused ? 2 : 1);
 });

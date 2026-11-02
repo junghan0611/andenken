@@ -58,6 +58,32 @@ export ANDENKEN_SESSION_PRICE_PER_M_TOKENS="${ANDENKEN_SESSION_PRICE_PER_M_TOKEN
 DRY_RUN=0
 [ "${1:-}" = "--dry-run" ] && DRY_RUN=1
 
+# --- Index authority + selection-policy pin (issue #18; API 0) — before gather, estimate, preflight, destroy ---
+# Authority (INVARIANT 7.1): the indexer's own check would fire only at Step 6,
+# after Step 5 had destroyed the index; a full rebuild on a replica is refused here.
+# This wrapper destroys data/ and rebuilds it with LEGACY selection. A data dir
+# pinned to control-v1 (or one whose pin is malformed / one-sided) is refused
+# here, before anything is gathered, probed or removed: the indexer's own
+# `--force` refusal would come only after Step 5 had already deleted the index.
+# shellcheck source=lib/sessions-policy.sh
+. scripts/lib/sessions-policy.sh
+sessions_authority_require
+sessions_policy_require legacy-only
+
+# --- Archive mode: a full rebuild needs its gather (API 0) ---
+# In a managed archive the explicit full rebuild gathers, refreshes the ledger and
+# checkpoints it once. SKIP_GATHER=1 would rebuild from a ledger the archive never
+# committed, so it is refused here — after the pin / authority refusals above,
+# before the lock, custody, estimate, preflight or destroy. --dry-run (which
+# gathers nothing anyway) and a legacy corpus are unchanged.
+# shellcheck source=lib/corpus-custody.sh
+. scripts/lib/corpus-custody.sh
+if [ "${DRY_RUN:-0}" != "1" ] && [ "${SKIP_GATHER:-0}" = "1" ] && [ -n "${ANDENKEN_SESSION_CORPUS:-}" ] \
+    && corpus_archive_mode "$ANDENKEN_SESSION_CORPUS"; then
+  echo "REFUSED archive-skip-gather-refused: a full rebuild on an archive-mode corpus needs its gather (ledger + checkpoint); SKIP_GATHER=1 is not allowed here. Nothing was done (API 0)." >&2
+  exit 2
+fi
+
 # --- Single-writer lock (flock) ---
 # The sessions index is a single-writer LanceDB store, and a full rebuild holds
 # the writer for hours. sync-sessions.sh takes this same lock; without it here,
@@ -73,6 +99,18 @@ if command -v flock >/dev/null 2>&1; then
   fi
 fi
 
+# --- Corpus custody (archive mode, not under --dry-run) ---
+# Held on FD 8 from here through the rebuild, as sync-sessions.sh does: gather
+# runs its preflight under it and the Step 6 indexer (`node --import tsx`)
+# inherits it. An explicit human full rebuild commits the archive once: gather
+# runs with --checkpoint (after the copy and the ledger refresh, authority only),
+# as sync --global does. The pin / authority refusals above come first, so a
+# refused rebuild gathers and commits nothing; --dry-run gathers, commits and
+# publishes nothing; SKIP_GATHER=1 is refused above in archive mode.
+if [ -n "${ANDENKEN_SESSION_CORPUS:-}" ] && [ "${DRY_RUN:-0}" != "1" ]; then
+  corpus_custody_acquire "$ANDENKEN_SESSION_CORPUS" "rebuild-sessions-full"
+fi
+
 # --- Step 0: gather the corpus (API 0) ---
 # Before the estimate, not after: a rebuild is the one moment the whole corpus is
 # read, so it must be the whole corpus. Gathering here also means the estimate
@@ -83,10 +121,12 @@ fi
 # there is explicitly about the corpus as it stands, and the output says so.
 if [ -n "${ANDENKEN_SESSION_CORPUS:-}" ] && [ "${SKIP_GATHER:-0}" != "1" ] && [ "${DRY_RUN:-0}" != "1" ]; then
   echo "== Step 0: gather corpus: $ANDENKEN_SESSION_CORPUS =="
-  if ! ./scripts/gather-corpus.sh > "$LOCKFILE.gather" 2>&1; then
-    echo "❌ gather-corpus failed — refusing to destroy an index for a corpus of unknown freshness"
+  GATHER_RC=0
+  ./scripts/gather-corpus.sh --checkpoint > "$LOCKFILE.gather" 2>&1 || GATHER_RC=$?
+  if [ "$GATHER_RC" != "0" ]; then
+    echo "❌ gather-corpus failed (rc $GATHER_RC) — refusing to destroy an index for a corpus of unknown freshness"
     tail -20 "$LOCKFILE.gather"
-    exit 1
+    exit "$GATHER_RC"
   fi
   grep -E '^(==|⚠|corpus:)' "$LOCKFILE.gather" || true
 fi
@@ -151,7 +191,8 @@ rm -rf data/durable-manifest.json data/session-manifest.json data/sessions.lance
 # this env at runtime; with it set, force-rebuild against a paid provider
 # proceeds.
 echo "== Step 6/6: force rebuild + verify =="
-ANDENKEN_ALLOW_PAID_FULL_REBUILD=1 pnpm exec tsx indexer.ts sessions --force
+# `node --import tsx` keeps the custody descriptor (FD 8); `pnpm exec tsx` drops it.
+ANDENKEN_ALLOW_PAID_FULL_REBUILD=1 node --import tsx indexer.ts sessions --force
 ANDENKEN_ALLOW_PAID_FULL_REBUILD=1 pnpm exec tsx indexer.ts verify sessions
 
 echo "== $(date --iso-8601=seconds) full rebuild done =="

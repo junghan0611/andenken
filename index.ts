@@ -38,7 +38,9 @@ import {
 } from "./md-search.js";
 import { readHitExcerpt, isHitExcerpt, type HitExcerpt, type HitUnsupported } from "./session-excerpt-dispatch.js";
 import { acquireSessionsLock, SessionsLockRefused, type SessionsLockHandle } from "./sessions-lock.js";
+import { assertCorpusCustody } from "./corpus-custody.js";
 import { invalidateDurableManifest } from "./durable-index.js";
+import { freshPaidRefusal, indexAuthorityRefusal, readSessionsPolicy, refuseIfPinned } from "./session-policy.js";
 import { recordRecall } from "./recall-log.js";
 import { FtsDiagnosticsCollector, attachFtsReport, ftsRequestReport, type FtsRequestDiagnostic } from "./fts-diagnostics.js";
 
@@ -855,6 +857,28 @@ export default function (pi: ExtensionAPI) {
             ctx.ui.notify("Session memory not initialized.", "warning");
             return;
           }
+          // Legacy-only writer: a pinned (control-v1) or malformed-pin data dir is
+          // refused before the lock (session-policy.ts). Takes effect only in a pi
+          // process loaded from a dist/ built with this check.
+          try {
+            refuseIfPinned(readSessionsPolicy(), "pi /memory reindex");
+          } catch (err) {
+            ctx.ui.notify(`⏸ ${err instanceof Error ? err.message : String(err)}`, "warning");
+            return;
+          }
+          const notAuthority = indexAuthorityRefusal("pi /memory reindex");
+          if (notAuthority) {
+            ctx.ui.notify(`⏸ ${notAuthority}`, "warning");
+            return;
+          }
+          // Archive-mode corpus: a pi process never holds the wrapper's custody
+          // descriptor, so this refuses there (API 0); use ./run.sh sync:sessions.
+          try {
+            assertCorpusCustody("pi /memory reindex");
+          } catch (err) {
+            ctx.ui.notify(`⏸ ${err instanceof Error ? err.message : String(err)}`, "warning");
+            return;
+          }
           // Shared sessions writer lock (sessions-lock.ts). A long-lived pi never
           // re-enters by token (env: {}), and nothing here writes the token to process.env.
           let lock: SessionsLockHandle;
@@ -1051,6 +1075,12 @@ async function indexSessions(
   force: boolean = false,
 ): Promise<void> {
   const files = findSessionFiles();
+  const paid = (provider as { isPaidRemote?: boolean }).isPaidRemote === true;
+  if (force && paid && process.env.ANDENKEN_ALLOW_PAID_FULL_REBUILD !== "1") {
+    throw new Error(
+      "/memory reindex --force against a paid endpoint is gated: use scripts/rebuild-sessions-full.sh (no API call was made)",
+    );
+  }
   if (force) {
     // The reset takes the pi-durable rows too, so their checkpoint goes — FIRST.
     // A failure between the two then leaves rows without a checkpoint (the next
@@ -1066,6 +1096,11 @@ async function indexSessions(
 
   const indexed = force ? new Set<string>() : await store.getIndexedFiles();
   const toIndex = files.filter((f) => !indexed.has(f));
+  if (!force) {
+    // Empty index + paid = a full rebuild in all but name (session-policy.ts).
+    const refusal = freshPaidRefusal({ paid, indexedFiles: files.filter((f) => indexed.has(f)).length, toIndex: toIndex.length });
+    if (refusal) throw new Error(refusal);
+  }
 
   if (toIndex.length === 0) {
     ctx.ui.notify("All sessions already indexed.", "info");

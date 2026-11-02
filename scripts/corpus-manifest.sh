@@ -18,6 +18,16 @@
 #   update   Hash new/changed files only (size+mtime decide), rewrite both files.
 #   verify   Re-hash EVERY file and report mismatches, missing, and untracked.
 #   status   Print the census without touching anything.
+#   form     Read-only source-form check (exit 3 on a violation, below).
+#
+# Source form (issue #18 / agent-config #32). Every session file the walk selects
+# must be a REGULAR file holding its own bytes: no symlink (a locked git-annex
+# file, or any link) and no git-annex pointer file (a small regular file whose
+# content starts with `/annex/objects/`). `update`, `verify` and `form` refuse
+# with exit 3 and write nothing when any selected file breaks that — hashing a
+# pointer would record a pointer as the transcript, and rsync would ship it. The
+# walk prunes only the corpus ROOT `.git`; device directories (`<device>/.pi`,
+# `<device>/.claude`) are the corpus and are walked as before.
 #
 # `update` is incremental because a full re-hash of 2.9GB is wasted work when
 # the corpus is append-only: a file already recorded at the same size and mtime
@@ -35,10 +45,19 @@ CORPUS="${CORPUS/#\~/$HOME}"
 
 CMD="${1:-update}"
 case "$CMD" in
-  update|verify|status) ;;
-  --help|-h) sed -n '2,30p' "$0"; exit 0 ;;
-  *) echo "unknown command: $CMD (update|verify|status)" >&2; exit 2 ;;
+  update|verify|status|form) ;;
+  --help|-h) sed -n "2,$(($(grep -n '^set -euo pipefail' "$0" | head -1 | cut -d: -f1) - 1))p" "$0"; exit 0 ;;
+  *) echo "unknown command: $CMD (update|verify|status|form)" >&2; exit 2 ;;
 esac
+
+# Archive mode: `update` rewrites the ledger the owner's checkpoint reads, so it
+# runs under the custody lock (inherited from gather/replicate, or taken here).
+# The read-only commands take nothing.
+if [ "$CMD" = "update" ]; then
+  # shellcheck source=lib/corpus-custody.sh
+  . scripts/lib/corpus-custody.sh
+  corpus_custody_acquire "$CORPUS" "corpus-manifest update" >&2
+fi
 
 CORPUS="$CORPUS" python3 - "$CMD" <<'PY'
 import hashlib
@@ -61,6 +80,10 @@ def walk():
 	"""Every .jsonl, plus pi-durable snapshots in their corpus grammar (issue #15), as $CORPUS-relative paths, sorted."""
 	out = []
 	for dirpath, dirnames, filenames in os.walk(corpus):
+		if dirpath == corpus and ".git" in dirnames:
+			# The corpus root's own Git/annex store is not corpus content. Only the
+			# root one: a `.git` deeper down would be inside a device's tree.
+			dirnames.remove(".git")
 		dirnames.sort()
 		for name in sorted(filenames):
 			full = os.path.join(dirpath, name)
@@ -117,7 +140,39 @@ def write(entries, files):
 	return doc
 
 
+ANNEX_POINTER = b"/annex/objects/"
+
+
+def form_violations(files):
+	"""Selected files that are not regular files holding their own bytes. Never reads past a pointer's first bytes."""
+	bad = []
+	for rel in files:
+		full = os.path.join(corpus, rel)
+		st = os.lstat(full)
+		if os.path.islink(full):
+			bad.append((rel, "symlink"))
+			continue
+		if st.st_size < 1024:
+			with open(full, "rb") as f:
+				if f.read(len(ANNEX_POINTER)) == ANNEX_POINTER:
+					bad.append((rel, "annex-pointer"))
+	return bad
+
+
 files = walk()
+
+if cmd in ("update", "verify", "form"):
+	bad_form = form_violations(files)
+	if bad_form:
+		print(f"❌ source form: {len(bad_form)} selected file(s) are not regular files with their own bytes — nothing written", file=sys.stderr)
+		for rel, why in bad_form[:20]:
+			print(f"    {why}  {rel}", file=sys.stderr)
+		print("   The corpus contract is regular/unlocked content. Materialize through the corpus owner;", file=sys.stderr)
+		print("   this script does not get, unlock or rewrite files.", file=sys.stderr)
+		sys.exit(3)
+	if cmd == "form":
+		print(f"source form: {len(files)} selected files, all regular")
+		sys.exit(0)
 
 if cmd == "status":
 	if not os.path.exists(json_path):

@@ -16,6 +16,25 @@ load_env() {
   fi
 }
 
+# A Node writer that reads or writes the session corpus. When the corpus root has
+# a .git (archive mode), the custody lock is taken on FD 8 first and Node is
+# launched with `node --import tsx`, which keeps that descriptor (`pnpm exec tsx`
+# drops it, and the writer then refuses with exit 75). Without a .git this is a
+# plain `node --import tsx` run. Run from $SCRIPT_DIR.
+run_corpus_writer() {
+  local label="$1"
+  shift
+  # shellcheck source=scripts/lib/corpus-custody.sh
+  . scripts/lib/corpus-custody.sh
+  if [ -n "${ANDENKEN_SESSION_CORPUS:-}" ]; then
+    corpus_custody_acquire "$ANDENKEN_SESSION_CORPUS" "$label"
+    # No gather ran here: the owner's preflight and the read-only source form
+    # must pass before the writer starts (archive mode only).
+    corpus_archive_ready "$ANDENKEN_SESSION_CORPUS" "$label" || return $?
+  fi
+  node --import tsx "$@"
+}
+
 # LanceDB `table.optimize()` (compact/cleanup) hands the whole host to its Rust
 # rayon/tokio pools — on a 16-core box that pins every core to 100%. rayon/tokio
 # size their default pools from available_parallelism() (sched_getaffinity), so
@@ -51,7 +70,13 @@ Usage: ./run.sh <command> [args]
                               non-blocking lock, data/.sessions-write.lock;
                               held → exit 75 sessions-writer-busy|-stale-lock, never
                               waited on or reclaimed. Dry-runs take no lock.
-                              --force also drops data/durable-manifest.json
+                              --force also drops data/durable-manifest.json.
+                              Pinned data dir (policy:sessions): control-v1 + S0,
+                              held ids → data/s0-held.json; --force refused. Any
+                              policy: index authority only (INVARIANT 7.1), and an
+                              index holding none of the discovered sessions + paid
+                              endpoint is refused without
+                              ANDENKEN_ALLOW_PAID_FULL_REBUILD=1
   index:md [--force]          Index public garden Markdown (issue #8)
   index:org [--force]         Index org-mode KB (disabled in production — upstream R&D)
   sync:md                     md incremental (alias for index:md without --force)
@@ -69,6 +94,15 @@ Usage: ./run.sh <command> [args]
   status:json                 Show index statistics (machine-readable JSON)
   estimate [sessions|md|org|all] Dry-run cost estimate (Gemini-priced, legacy)
   estimate:sessions [--full]  PR-B: sessions OpenRouter 8B estimate (API 0)
+                              Pinned data dir: control-v1 send set, S0-held reported
+                              separately; --full refused
+  policy:sessions             Read-only: the selection pin of the sessions data dir
+                              (session-policy.json + session-manifest.json copy) as
+                              JSON; exit 2 when malformed or one-sided (issue #18)
+  policy:sessions:pin --data <abs dir>
+                              Pin <abs dir> to control-v1 (manifest field, then
+                              session-policy.json), under its writer lock. API 0.
+                              Refuses an already pinned dir. Cutover step only.
                               default = INCREMENTAL (manifest-driven)
                               --full  = whole corpus
                               price: ANDENKEN_SESSION_PRICE_PER_M_TOKENS
@@ -150,11 +184,26 @@ Usage: ./run.sh <command> [args]
                               synthetic temp LanceDB, no optimize is run)
 
 === Session corpus (~/repos/gh/session) ===
-  corpus:gather [--dry-run] [--strict]
+  corpus:gather [--dry-run] [--strict] [--checkpoint]
                               Collect admitted sessions from every device
-  corpus:manifest [update|verify|status]
-                              Inventory + sha256 integrity (git replacement)
-  corpus:replicate [--to X]   Push the corpus to devices that cannot be pulled
+                              (refuses a corpus failing the source form, exit 3).
+                              Archive mode (corpus root has a .git): custody on
+                              FD 8 + owner preflight; --checkpoint (sync --global
+                              only) commits on the authority after a full gather
+  corpus:manifest [update|verify|status|form]
+                              Inventory + sha256 integrity (git replacement).
+                              Skips only the corpus root .git. form (read-only) and
+                              update/verify exit 3, writing nothing, on a symlinked
+                              or git-annex pointer session file
+  corpus:replicate [--to X] [--strict] [--dry-run]
+                              Push the corpus to devices that cannot be pulled.
+                              Source form checked first; root .git never shipped;
+                              --strict: an unreachable target fails (publish uses it).
+                              Archive mode: per replica preflight → rsync (replica
+                              lock held) → bundle (sha256) → job dir on the replica
+                              → receive → location log back (merge-log --from
+                              <roster id>) → cleanup; any failure exits with its
+                              code (19 = restore failed, operator needed)
 
 === Acceptance (user-facing quality — layers 1/2/3) ===
   accept [flags]              Acceptance report. DEFAULT IS API 0: index health +
@@ -284,6 +333,16 @@ Usage: ./run.sh <command> [args]
                               parts), candidate DB rows/dim/FTS/unique ids/S0,
                               manifest↔DB pairs; production sessions.lance by
                               directory metadata only (never opened). API 0.
+  test:policy                 Type fence (tsconfig.policy.json) + selection-pin suite
+                              (every sessions writer under legacy / pinned / malformed
+                              pins, fresh paid guard, wrapper refusals, corpus source
+                              form) + publish-order suite + corpus archive glue suite
+                              (fake owner helper, custody FD 8). API 0, CPUs 0-7
+  test:archive-real           The same glue against the REAL owner helper (pinned
+                              SHA-256, private copy), synthetic temp corpus + replica:
+                              readiness, global checkpoint → receive → merge-log,
+                              lost FD (75), restore failure (19). API 0. Needs
+                              git-annex (else SKIPPED, exit 77)
   test:candidate-build        Type fence (tsconfig.candidate.json) + synthetic suite
                               under taskset -c 0-7 (mock provider, temp LanceDB,
                               temp locks, virtual retry clock; API 0)
@@ -321,7 +380,7 @@ case "${1:-help}" in
       echo "  For the normal 'embed my sessions' path use:  ./run.sh sync:sessions"
       echo "  Continuing in 3s (Ctrl-C to stop)…" && sleep 3
     fi
-    pnpm exec tsx indexer.ts sessions "$@" ;;
+    run_corpus_writer "index:sessions" indexer.ts sessions "$@" ;;
   index:md)
     shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts md "$@" ;;
   sync:md)
@@ -446,6 +505,10 @@ case "${1:-help}" in
     shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx estimate.ts "${1:-all}" ;;
   estimate:sessions)
     shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts estimate sessions "$@" ;;
+  policy:sessions)
+    shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts policy ;;
+  policy:sessions:pin)
+    shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts policy --pin "$@" ;;
   estimate:md)
     shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts estimate md "$@" ;;
   sync:md:oracle)
@@ -472,9 +535,13 @@ case "${1:-help}" in
   durable:plan)
     shift; export DURABLE_CALLER_CWD="$PWD"; cd "$SCRIPT_DIR" && pnpm exec tsx scripts/durable-plan.ts "$@" ;;
   corpus:durable-admit)
-    shift; load_env; export DURABLE_CALLER_CWD="$PWD"; cd "$SCRIPT_DIR" && pnpm exec tsx scripts/durable-admit.ts "$@" ;;
+    shift; load_env; export DURABLE_CALLER_CWD="$PWD"; cd "$SCRIPT_DIR" && run_corpus_writer "corpus:durable-admit" scripts/durable-admit.ts "$@" ;;
   index:durable)
-    shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts durable "$@" ;;
+    shift; load_env; cd "$SCRIPT_DIR"
+    case " $* " in
+      *" --dry-run "*) pnpm exec tsx indexer.ts durable "$@" ;;   # read-only: no custody
+      *) run_corpus_writer "index:durable" indexer.ts durable "$@" ;;
+    esac ;;
   test:durable)
     # Type fence first (reader + CLI + test), then the fixtures.
     cd "$SCRIPT_DIR" && pnpm exec tsc -p tsconfig.durable.json \
@@ -508,6 +575,23 @@ case "${1:-help}" in
   test:candidate-build)
     cd "$SCRIPT_DIR" && pnpm exec tsc -p tsconfig.candidate.json \
       && taskset -c 0-7 pnpm exec tsx candidate-build.test.ts ;;
+  test:archive-real)
+    # The archive glue against the REAL owner helper, pinned by SHA-256 (the suite
+    # refuses a different helper before running it and runs a private copy).
+    # Synthetic only: temp HOME / corpus / replica, stubbed provider and indexer,
+    # no real corpus, DB, replica or network. Needs git, git-annex, flock, rsync;
+    # otherwise SKIPPED (exit 77). API 0.
+    cd "$SCRIPT_DIR" && pnpm exec tsc -p tsconfig.policy.json \
+      && taskset -c 0-7 pnpm exec tsx corpus-archive-real.test.ts ;;
+  test:policy)
+    # Type fence, then the selection-pin suite (temp HOME/data/corpus, 127.0.0.1
+    # mock provider, PATH-stubbed wrappers), the publish-order suite and the
+    # corpus archive glue suite (fake owner helper, custody FD, replica commands
+    # run locally against a temp replica HOME). API 0.
+    cd "$SCRIPT_DIR" && pnpm exec tsc -p tsconfig.policy.json \
+      && taskset -c 0-7 pnpm exec tsx session-policy.test.ts \
+      && pnpm exec tsx sync-publish.test.ts \
+      && taskset -c 0-7 pnpm exec tsx corpus-archive-glue.test.ts ;;
 
   # === PR-B sessions sync / rebuild ===
   rebuild:sessions)

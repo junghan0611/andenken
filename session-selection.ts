@@ -191,6 +191,9 @@ const SAFETY_PATTERNS: ReadonlyArray<readonly [SafetyKind, RegExp]> = [
   ["telegram-bot-token", /\b\d{8,10}:AA[A-Za-z0-9_-]{33}\b/],
 ];
 
+/** Every SafetyKind, in the canonical order the partition reports them. */
+export const SAFETY_KINDS: readonly SafetyKind[] = Object.freeze(SAFETY_PATTERNS.map(([k]) => k));
+
 /** Kinds of high-signal secrets present in `text`. Never the values. */
 export function scanHighSignal(text: string): SafetyKind[] {
   const kinds: SafetyKind[] = [];

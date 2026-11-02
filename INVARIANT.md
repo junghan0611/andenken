@@ -250,8 +250,23 @@ operator is trusted to run in order.
 `sessions.lance`, so `data/durable-manifest.json` is a second manifest of the same
 DB and publishes with it. Its **absence** publishes too: when the authority has
 none (a full rebuild, `index:sessions --force`), `--global` removes exactly that
-one file on the replica. A failed rsync or ssh removal fails the publish and
-stops it before the corpus step; nothing else on the remote is deleted.
+one file on the replica. A failed rsync or ssh removal fails the publish; nothing
+else on the remote is deleted.
+
+**Extended 2026-11-02 (issue #18): order, the policy pin and its ledger.** The
+corpus now ships FIRST (`replicate-corpus.sh --strict`, after its source-form
+check; for an archive-mode corpus that step also carries the archive — replica
+preflight, corpus rsync under the replica's custody lock, bundle, receive, and
+the replica's location log merged back into the canonical archive), then
+the index. A failure before
+the index step therefore leaves the replica's previous index in place instead of
+a new index pointing at sources the replica does not have. `session-policy.json`
+and `s0-held.json` join `durable-manifest.json` as paired files of the same DB:
+each ships when present and is removed on the replica, in one ssh, when absent.
+A 0-row local index is never published. In archive mode the archive is committed only by an
+explicit `--global` (gather `--checkpoint`, on the authority, after a complete
+gather); a local or standalone run never commits. Not atomic across hosts:
+`receive` re-verifies and fails closed, and the index waits for it.
 
 `set -euo pipefail` alone did not give that. `publish_replica` calls
 `push_replica || return 1`, a condition context in which bash suppresses

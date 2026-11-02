@@ -49,6 +49,15 @@
 #   ./scripts/gather-corpus.sh --dry-run        # plan only, copy nothing
 #   ./scripts/gather-corpus.sh --only oracle    # one device
 #   ./scripts/gather-corpus.sh --strict         # an unreachable active device FAILS
+#   ./scripts/gather-corpus.sh --strict --checkpoint   # archive mode: commit the ledger
+#
+# Archive mode (the corpus root has a .git; scripts/lib/corpus-custody.sh): every
+# non-dry gather holds custody and runs the owner's `preflight` (safety and form
+# readiness) before it copies. Only `--checkpoint` commits — passed by an explicit
+# `sync-sessions.sh --global` and by an explicit human full rebuild
+# (rebuild-sessions-full.sh), and honoured only on the index authority
+# (~/.current-device) after a complete gather. A local/warm or standalone gather
+# never commits: the corpus may then be ahead of the archive HEAD, by design.
 #
 # --strict inverts the leniency below for callers that need a complete corpus.
 # The default stays lenient on purpose (a laptop off the network must keep
@@ -71,11 +80,13 @@ ROSTER="$CORPUS/DEVICES.json"
 DRY=0
 ONLY=""
 STRICT=0
+CHECKPOINT=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run|-n) DRY=1; shift ;;
     --only) ONLY="${2:?--only needs a device name}"; shift 2 ;;
     --strict) STRICT=1; shift ;;
+    --checkpoint) CHECKPOINT=1; shift ;;
     # Print the whole header, Usage block included. It used to stop at line 32,
     # which cut off exactly the part a caller asks --help FOR — the flags. A help
     # range pinned to a line number drifts every time the header grows; this one
@@ -93,6 +104,29 @@ LOCAL_DEVICE="${LOCAL_DEVICE//[[:space:]]/}"
 
 LISTDIR="$(mktemp -d)"
 trap 'rm -rf "$LISTDIR"' EXIT
+
+# Archive mode (corpus root has a .git; scripts/lib/corpus-custody.sh): custody
+# on FD 8 — inherited from sync/rebuild, or taken here so `./run.sh corpus:gather`
+# stays a supported entry — then the owner's read-only preflight, BEFORE any copy.
+# A missing hook or a failed preflight refuses with nothing copied. --dry-run
+# copies nothing and skips the archive steps.
+# shellcheck source=lib/corpus-custody.sh
+. scripts/lib/corpus-custody.sh
+ARCHIVE=0
+# The marker is classified first, also on --dry-run: a wrong-shaped .git exits 10.
+if corpus_archive_mode "$CORPUS" && [ "$DRY" = "0" ]; then
+  ARCHIVE=1
+  corpus_custody_acquire "$CORPUS" "gather"
+  corpus_archive_phase "$CORPUS" preflight || { rc=$?; echo "❌ gather refused: corpus archive preflight (rc $rc) — nothing copied" >&2; exit "$rc"; }
+fi
+
+# Source form before any copy (issue #18; read-only). rsync would replace a
+# locked-annex symlink or overwrite a pointer file with live bytes — a silent
+# change of the corpus form that only its owner may make. Refused (exit 3) with
+# nothing copied. A corpus that does not exist yet has nothing to check.
+if [ -d "$CORPUS" ]; then
+  ./scripts/corpus-manifest.sh form || { rc=$?; echo "❌ gather refused: corpus source form (rc $rc) — nothing copied" >&2; exit "$rc"; }
+fi
 
 # rsync flags shared by every device. -a keeps mtime, which is what makes the
 # corpus comparable to the live store. --delete is absent on purpose (rule 1).
@@ -192,6 +226,28 @@ if [ "$STRICT" = "1" ] && [ ${#UNREACHABLE[@]} -gt 0 ]; then
   echo "❌ --strict: active device(s) not gathered: ${UNREACHABLE[*]}"
   echo "   The corpus is now incomplete for this run, so any claim that every"
   echo "   device is represented would be false. Reachable devices WERE gathered."
+  [ "$CHECKPOINT" = "1" ] && echo "   (no archive checkpoint: an incomplete gather is not committed)"
   exit 1
+fi
+
+# Archive checkpoint (agent-config #32): explicit (--checkpoint: sync --global, or
+# a human full rebuild) only, after the ledger refresh and a complete gather, still under custody. Only
+# the index authority commits — the canonical history is the authority's; a
+# replica's own gathered files reach it as source on the authority's next gather
+# and come back through `receive`. A failed checkpoint fails the gather, which
+# sync-sessions Step 0 turns into "refusing to index a corpus of unknown
+# freshness". Without --checkpoint nothing is committed (local/warm, standalone).
+if [ "$ARCHIVE" = "1" ] && [ "$CHECKPOINT" = "1" ]; then
+  # Authority by ~/.current-device only, as every sessions writer decides it —
+  # never the hostname fallback LOCAL_DEVICE may carry for gathering.
+  AUTH_DEVICE="$(cat "$HOME/.current-device" 2>/dev/null || true)"
+  AUTH_DEVICE="${AUTH_DEVICE//[[:space:]]/}"
+  if [ -n "$AUTH_DEVICE" ] && [ "$AUTH_DEVICE" = "${ANDENKEN_INDEX_AUTHORITY:-thinkpad}" ]; then
+    corpus_archive_phase "$CORPUS" checkpoint || { rc=$?; echo "❌ corpus archive checkpoint failed (rc $rc)" >&2; exit "$rc"; }
+  else
+    echo "corpus archive: ${AUTH_DEVICE:-unknown} is not the index authority — no checkpoint here (canonical commits only on ${ANDENKEN_INDEX_AUTHORITY:-thinkpad})"
+  fi
+elif [ "$ARCHIVE" = "1" ]; then
+  echo "corpus archive: no checkpoint (local / standalone gather; commits only with --checkpoint from sync --global or a full rebuild)"
 fi
 exit 0

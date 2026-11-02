@@ -40,10 +40,12 @@
 #           (An unreachable peer was already only a warning, so availability was
 #           never the difference; latency and determinism are.)
 #   global  is the tier you call when the answer has to be "both machines agree".
-#           verify → push → replicate run as one act: splitting them is what left
-#           oracle holding an index whose source files it did not have
-#           (2026-09-03, both tracks). It publishes even when to_index=0, because
-#           the replica may be behind from earlier local runs.
+#           verify → corpus (+ archive, in archive mode) → index run as one act, in that
+#           order: splitting them is what left oracle holding an index whose
+#           source files it did not have (2026-09-03, both tracks), and shipping
+#           the corpus first means a failed corpus step leaves the replica's old
+#           index in place. It publishes even when to_index=0, because the
+#           replica may be behind from earlier local runs (never a 0-row index).
 set -euo pipefail
 cd "$(dirname "$0")/.."   # repo root
 
@@ -93,6 +95,31 @@ LOCAL_DEVICE="${LOCAL_DEVICE//[[:space:]]/}"
 [ -n "$LOCAL_DEVICE" ] || { echo "cannot determine local device name" >&2; exit 1; }
 echo "mode: $MODE (device=$LOCAL_DEVICE)"
 
+# --- Selection-policy pin (issue #18; API 0) — before gather, preflight and publish ---
+# Legacy and pinned (control-v1) data dirs are both indexed by `indexer.ts
+# sessions`, which reads the pin itself. What is refused here is a pin the
+# indexer cannot read (malformed, or only one of session-policy.json /
+# session-manifest.json carries it) and a data dir other than the `data/` this
+# wrapper publishes from.
+# shellcheck source=lib/sessions-policy.sh
+. scripts/lib/sessions-policy.sh
+sessions_policy_require any
+
+# --- Archive mode: --global needs its gather (API 0) ---
+# In a managed archive (corpus root has a .git) --global is the commit-and-ship
+# act: its gather refreshes the ledger and checkpoints it, and replicate ships
+# exactly that commit. SKIP_GATHER=1 would skip the checkpoint and publish a
+# ledger the archive never committed, so the combination is refused here, before
+# the lock, custody, any probe or index step. --local with SKIP_GATHER=1 and a
+# legacy corpus are unchanged.
+# shellcheck source=lib/corpus-custody.sh
+. scripts/lib/corpus-custody.sh
+if [ "$MODE" = "global" ] && [ "${SKIP_GATHER:-0}" = "1" ] && [ -n "${ANDENKEN_SESSION_CORPUS:-}" ] \
+    && corpus_archive_mode "$ANDENKEN_SESSION_CORPUS"; then
+  echo "REFUSED archive-skip-gather-refused: --global on an archive-mode corpus needs its gather (ledger + checkpoint); SKIP_GATHER=1 is not allowed here. Nothing was done (API 0)." >&2
+  exit 2
+fi
+
 # --- Single-writer lock (flock) ---
 # The sessions index is a single-writer LanceDB store. The hourly cron and a
 # manual memory-sync (or ./run.sh sync:sessions) can otherwise run at once and
@@ -111,6 +138,24 @@ if command -v flock >/dev/null 2>&1; then
   elif ! flock -n 9; then
     echo "⚠ another sync-sessions is already running (lock: $LOCKFILE) — local request coalesced"
     exit 0
+  fi
+fi
+
+# --- Corpus custody (archive mode only; scripts/lib/corpus-custody.sh) ---
+# When the corpus root has a .git, its archive custody lock is held on FD 8 from
+# here — after the sync lock (9), before gather and the sessions writer lock —
+# to the end of this run. gather (preflight + checkpoint), the indexer (Step 5,
+# launched with `node --import tsx` so FD 8 reaches it) and replicate (bundle +
+# receive) all re-enter on this one descriptor. Busy → exit 75; a missing owner
+# hook → exit 10, before anything is gathered. Without a .git: nothing here.
+# Only --global commits the archive (gather --checkpoint); --local never does.
+# (corpus-custody.sh was sourced above, at the --global / SKIP_GATHER check.)
+if [ -n "${ANDENKEN_SESSION_CORPUS:-}" ]; then
+  corpus_custody_acquire "$ANDENKEN_SESSION_CORPUS" "sync-sessions"
+  # SKIP_GATHER=1 (--local only in archive mode, see above) skips the gather that
+  # would run preflight + form: run them here.
+  if [ "${SKIP_GATHER:-0}" = "1" ]; then
+    corpus_archive_ready "$ANDENKEN_SESSION_CORPUS" "sync-sessions (SKIP_GATHER=1)" || exit $?
   fi
 fi
 
@@ -136,13 +181,19 @@ if [ -n "${ANDENKEN_SESSION_CORPUS:-}" ] && [ "${SKIP_GATHER:-0}" != "1" ]; then
     GATHER_ARGS=(--only "$LOCAL_DEVICE")
     echo "== gather corpus (local: $LOCAL_DEVICE): $ANDENKEN_SESSION_CORPUS =="
   else
-    GATHER_ARGS=(--strict)
+    # --checkpoint: the archive commit belongs to this explicit global batch only
+    # (a no-op without a root .git; authority-only inside gather).
+    GATHER_ARGS=(--strict --checkpoint)
     echo "== gather corpus (all devices, strict): $ANDENKEN_SESSION_CORPUS =="
   fi
-  if ! ./scripts/gather-corpus.sh "${GATHER_ARGS[@]}" > "$LOCKFILE.gather" 2>&1; then
-    echo "❌ gather-corpus failed — refusing to index a corpus of unknown freshness"
+  # The child's own exit code is kept (helper 10..19, 75 custody, 3 form, 1):
+  # a restore failure (19) or a lock refusal (75) must not read as a plain 1.
+  GATHER_RC=0
+  ./scripts/gather-corpus.sh "${GATHER_ARGS[@]}" > "$LOCKFILE.gather" 2>&1 || GATHER_RC=$?
+  if [ "$GATHER_RC" != "0" ]; then
+    echo "❌ gather-corpus failed (rc $GATHER_RC) — refusing to index a corpus of unknown freshness"
     tail -20 "$LOCKFILE.gather"
-    exit 1
+    exit "$GATHER_RC"
   fi
   grep -E '^(⚠|corpus:)' "$LOCKFILE.gather" || true
 fi
@@ -188,8 +239,13 @@ export ANDENKEN_SESSION_PRICE_PER_M_TOKENS="${ANDENKEN_SESSION_PRICE_PER_M_TOKEN
 # it does not mean this machine falls behind.
 # (INDEX_AUTHORITY / LOCAL_DEVICE are resolved in the args block above, because
 # Step 0 needs the device name to gather. Only the CHECK belongs here.)
-if [ "$LOCAL_DEVICE" != "$INDEX_AUTHORITY" ] && [ "${ANDENKEN_ALLOW_REPLICA_INDEX:-0}" != "1" ]; then
-  echo "❌ refused: this is '$LOCAL_DEVICE'; only the index authority '$INDEX_AUTHORITY' writes the index."
+# The authority test reads ~/.current-device only (sessions_authority_device):
+# LOCAL_DEVICE may have fallen back to the hostname for gathering, but a
+# hostname must not pass a gate the indexer then refuses as "unknown" after the
+# dimension probe was already paid.
+if [ "$(sessions_authority_device)" != "$INDEX_AUTHORITY" ] && [ "${ANDENKEN_ALLOW_REPLICA_INDEX:-0}" != "1" ]; then
+  AUTH_DEVICE="$(sessions_authority_device)"
+  echo "❌ refused: this is '${AUTH_DEVICE:-unknown}' (~/.current-device); only the index authority '$INDEX_AUTHORITY' writes the index."
   echo "   INVARIANT.md §7.1 — a replica that indexes its own sessions forks the corpus,"
   echo "   and no later push can reconcile the rows it invented."
   echo "   Not a no-op: the corpus gather above already ran, which is this machine's"
@@ -224,6 +280,12 @@ TO_INDEX=$(printf '%s' "$STATUS_JSON" | python3 -c '
 import sys, json
 d = json.loads(sys.stdin.read())
 print(d.get("sessions", {}).get("to_index", 0))
+')
+
+ROWS=$(printf '%s' "$STATUS_JSON" | python3 -c '
+import sys, json
+d = json.loads(sys.stdin.read())
+print(int(d.get("sessions", {}).get("count", 0) or 0))
 ')
 
 # --- Step 2: wrong-dim guard (API 0 abort) ---
@@ -277,43 +339,73 @@ push_replica() {
     oracle:/home/junghan/repos/gh/andenken/data/session-manifest.json \
     2>&1 | tail -3 || return $?
 
-  # pi-durable rows live in sessions.lance too (issue #15); their checkpoint
-  # manifest travels with the index for the same reason (INVARIANT 6.6).
-  if [ -f data/durable-manifest.json ]; then
-    echo "== rsync durable-manifest.json → oracle =="
-    rsync -az \
-      data/durable-manifest.json \
-      oracle:/home/junghan/repos/gh/andenken/data/durable-manifest.json \
-      2>&1 | tail -3 || return $?
-  else
-    # Absence travels too: a replica must not keep a checkpoint for rows the
-    # pushed index no longer has. Exactly this one file; a failure is a failure.
-    echo "== no local durable-manifest.json → remove the replica's copy =="
-    ssh -o BatchMode=yes oracle 'rm -f /home/junghan/repos/gh/andenken/data/durable-manifest.json' || return $?
+  # Index-paired files travel with the index (INVARIANT 6.6):
+  #   durable-manifest.json  pi-durable rows live in sessions.lance too (issue #15)
+  #   session-policy.json    the selection pin (issue #18; its copy is inside the
+  #                          session-manifest just shipped)
+  #   s0-held.json           ids/kinds of S0-held rows of a pinned index (issue #18)
+  # Absence travels too: a replica must not keep a checkpoint, pin or ledger the
+  # pushed index does not have. Exactly these files, one ssh; a failure is a failure.
+  local f absent=()
+  for f in durable-manifest.json session-policy.json s0-held.json; do
+    if [ -f "data/$f" ]; then
+      echo "== rsync $f → oracle =="
+      rsync -az \
+        "data/$f" \
+        "oracle:/home/junghan/repos/gh/andenken/data/$f" \
+        2>&1 | tail -3 || return $?
+    else
+      absent+=("/home/junghan/repos/gh/andenken/data/$f")
+    fi
+  done
+  if [ ${#absent[@]} -gt 0 ]; then
+    echo "== absent locally → remove the replica's copy: ${absent[*]##*/} =="
+    ssh -o BatchMode=yes oracle "rm -f ${absent[*]}" || return $?
   fi
 }
 
-# publish = verify, then ship the index AND the sources it points at, as one act.
+# publish = verify, ship the sources (and, in archive mode, the archive), THEN
+# ship the index — as one act, in that order.
 #
-# Two rules are folded in here rather than left to the caller, because both were
+# Three rules are folded in here rather than left to the caller, because each was
 # learned the same way — by a caller doing only half:
 #
 #   verify first   `push_replica` is `rsync --delete` onto the replica. Shipping
 #                  an index nobody checked replaces a good replica with a bad one.
 #                  API 0, so it costs nothing to make it unconditional.
-#   corpus too     the index stores absolute session paths and the replica's
-#                  `verify` calls existsSync on each. Pushing the index alone
-#                  produced orphans on oracle on 2026-09-03 — not a bad index,
-#                  a replica that did not yet have the sources.
+#   corpus before  the index stores absolute session paths and the replica's
+#   index          `verify` calls existsSync on each. Pushing the index alone
+#                  produced orphans on oracle on 2026-09-03. The corpus now goes
+#                  FIRST (--strict: an unreachable replica fails), so a failed
+#                  corpus step leaves the replica's previous index in place
+#                  instead of a new index pointing at sources it does not have.
+#   archive        in archive mode the canonical checkpoint already ran inside
+#                  Step 0's gather (under custody); replicate-corpus.sh then
+#                  carries it to the replica (preflight → rsync → bundle →
+#                  receive → location log merged back). Any failure there is
+#                  replicate's non-zero exit, returned unchanged (19 stays 19),
+#                  so the index does not ship.
 publish_replica() {
+  # A 0-row index is never published: `rsync --delete` would empty the replica.
+  # (A missing or emptied sessions.lance after a botched swap reads as to_index=0
+  # when the manifest survived, so Step 3 alone would publish it.)
+  if [ "${ROWS:-0}" = "0" ]; then
+    echo "❌ publish refused: the local sessions index has 0 rows — the replica keeps its index"
+    return 1
+  fi
   echo "== verify sessions before publish (API 0) =="
   if ! pnpm exec tsx indexer.ts verify sessions; then
     echo "❌ publish refused: verify failed — not overwriting the replica with this index"
     return 1
   fi
+  echo "== replicate corpus → replica (before the index) =="
+  local repl_rc=0
+  ./scripts/replicate-corpus.sh --strict || repl_rc=$?
+  if [ "$repl_rc" != "0" ]; then
+    echo "❌ publish stopped: corpus replication failed (rc $repl_rc) — the replica's index was NOT replaced"
+    return "$repl_rc"
+  fi
   push_replica || return 1
-  echo "== replicate corpus → replica =="
-  ./scripts/replicate-corpus.sh
 }
 
 # --- Step 3: no-work guard (API 0; --global still publishes) ---
@@ -326,6 +418,17 @@ if [ "$TO_INDEX" = "0" ]; then
     publish_replica
   fi
   exit 0
+fi
+
+# --- Step 3b: fresh paid guard (API 0) ---
+# An empty or missing sessions index with work to do is a full rebuild in all but
+# name; indexer.ts refuses it too, but only after this script's 1-call preflight.
+# Refuse here first. Same flag as the explicit rebuild path.
+if [ "$ROWS" = "0" ] && [ "${ANDENKEN_ALLOW_PAID_FULL_REBUILD:-0}" != "1" ]; then
+  echo "❌ refused: the sessions index has 0 rows (empty or missing) and to_index=$TO_INDEX."
+  echo "   That is a full rebuild — restore the index, or use scripts/rebuild-sessions-full.sh."
+  echo "   (no API call was made)"
+  exit 1
 fi
 
 # --- Step 4: preflight dim probe (API 1 — only when there is work) ---
@@ -350,13 +453,22 @@ echo "✅ preflight dim=4096"
 START=$(date --iso-8601=seconds)
 echo "== $START sync-sessions: incremental embedding (to_index=$TO_INDEX) =="
 INDEX_OK=0
-if pnpm exec tsx indexer.ts sessions; then
-  INDEX_OK=1
-fi
+INDEX_RC=0
+# `node --import tsx`, not `pnpm exec tsx`: the latter does not pass the inherited
+# custody descriptor (FD 8) through, and the indexer refuses an archive-mode
+# corpus without it (corpus-custody.ts). Same tsx, same entry point. Its exit
+# code is this script's on failure (2 policy, 75 lock / custody, 1 otherwise).
+node --import tsx indexer.ts sessions || INDEX_RC=$?
+[ "$INDEX_RC" = "0" ] && INDEX_OK=1
 
 # --- Step 6: publish (global only, and only on a clean index) ---
 if [ "$MODE" = "global" ]; then
   if [ "$INDEX_OK" = "1" ]; then
+    # Re-read the row count: publish judges the index it ships, not the pre-run one.
+    ROWS=$(pnpm exec tsx indexer.ts status --json 2>/dev/null | python3 -c '
+import sys, json
+print(int(json.loads(sys.stdin.read()).get("sessions", {}).get("count", 0) or 0))
+')
     publish_replica
   else
     echo "⚠ skipping publish: index step did not complete cleanly"
@@ -364,4 +476,4 @@ if [ "$MODE" = "global" ]; then
 fi
 
 echo "== $(date --iso-8601=seconds) done =="
-[ "$INDEX_OK" = "1" ]
+exit "$INDEX_RC"

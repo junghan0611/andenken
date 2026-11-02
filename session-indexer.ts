@@ -853,6 +853,13 @@ function minTailChars(target: number): number {
 }
 
 /**
+ * Longest chunk splitForEmbedding can emit at the default target: a part of at
+ * most CHUNK_TARGET_CHARS, plus "\n", plus a folded tail shorter than
+ * minTailChars. Readers of recorded chunk lengths (the S0 ledger) bound by it.
+ */
+export const MAX_CHUNK_CHARS = CHUNK_TARGET_CHARS + minTailChars(CHUNK_TARGET_CHARS);
+
+/**
  * Split a long turn into embedding-sized parts along the text's own boundaries.
  *
  * **Why this replaces head-truncation.** Until 2026-09-02 both user and

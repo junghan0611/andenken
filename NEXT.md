@@ -1,17 +1,33 @@
 # NEXT — andenken
 
-> `AGENTS.md`는 상시 기준선, 여기는 다음 한 걸음. 닫힌 이력은 커밋과 이슈에 있다.
+`AGENTS.md` is the standing baseline; this file names the next move. Closed results are in CHANGELOG and commits. Dated material below is parked context, not current execution authority.
 
-# RAIL — 현재 좌표
+# RAIL — Current position
 
-- [x] **1. 세션 코퍼스 통합** — 평생 폴더 + device roster (`v2026.9.3`, #10·#11 닫힘)
-- [x] **2. 2면 SSOT 동기화** — thinkpad↔oracle, 인덱스·매니페스트·코퍼스 한 묶음
-- [x] **3. OpenClaw 면 회수·사설 복제** ([#13](https://github.com/junghan0611/andenken/issues/13)) — authority harvest → Oracle private replica, 5,935 chunks / 1 fragment / API 0 검증 (`v2026.9.16`)
-- [ ] **4. 근본 정리** ← PAUSED: 10-02 GLG가 5를 먼저 잡았다. 재개할 자리는 아래 §근본 정리 (RAIL 4)
-- [ ] **5. 세션 축 입장 경계 — GLG↔에이전트 대화만 기억이 된다** ← CURRENT: 입장 규칙 코드화 + API 0 dry-run
-- [ ] **6. 회수 품질** ([#12](https://github.com/junghan0611/andenken/issues/12)) ← PAUSED: 골든 세션 분기 추출이 선행(백로그 4번)
+- [x] **1. Establish the memory axes and source corpus** — sessions, public MD and separate OpenClaw harvest; org stays disabled.
+- [x] **2. Build the selected sessions candidate** — control-v1 / whole-message S0, explicit resume, preserved originals and old DB; 114889 rows / about 1.905 GiB allocated.
+- [x] **3. Verify policy-safe writers and archive integration** — source-only joint gate closed on November 3; code publication is not production adoption.
+- [ ] **4. Complete the coordinated operational handoff** ← CURRENT: agent-config deploys its reviewed helper/consumer, admits originals, rechecks capacity, then routes a separate promotion GO and one normal incremental run.
+- [ ] **5. Judge retrieval usefulness** ← PAUSED: human verdict and Pi-native applicability remain unset; preserve the canonical-harvest ranking miss.
 
-현재 좌표: 3 완료(`v2026.9.16`) → 4 보류(MD 축 freshness 남음) → **5 진행** → 6 보류
+# NOW — #18 operational handoff
+
+- **Routing/next:** agent-config coordinator `20261007T104525-12d0ca` owns cross-lane gates and the sole final DM. After this code release, return to that coordinator for B main/Oracle deployment and initial archive admission. Only after fresh materialization/space receipts and separate joint GO: promote the existing candidate without a second full local DB copy, retain the old Oracle generation, then run the normal incremental workflow once. No second paid full rebuild.
+- **Freeze:** the coordinator holds the existing sync FD9 and shared writer lease through code publication and B bootstrap; this lane does not release it. An unborn corpus HEAD does not necessarily fail preflight, so archive readiness must not be mistaken for a universal warm-writer fence. Explicitly release owned locks before separately approved adoption/C.
+- **Data boundary:** the candidate was built separately; the code release does not activate it. Re-observe actual status before operating. Original source custody, adoption, replica publication and destructive retirement are different grants.
+- **Quality:** seven paired CLI probes preserved four expected-file ranks; two scenarios missed both stores. OpenClaw harvest's canonical files fell from old rank 3 to outside candidate top 10, despite surviving explanation text. All 140 top-hit addresses resolved, not every semantic judgment. Human usable and native-Pi parity remain unmeasured.
+- **Custody:** local warm/standalone indexing may use safe newer uncommitted originals under the existing custody/readiness/form/S0/policy checks, archive commit 0. Do not require source HEAD = embedding generation. Explicit global/full commits before indexing; managed global/full with `SKIP_GATHER=1` refuses. No implicit annex get or refused-pointer/symlink bypass.
+- **Runtime:** a source build does not refresh imported Pi functions or cached readers. Do not use old loaded `/memory reindex` before an explicit refresh. No unrelated session is automatically restarted; CLI proof is not cached-reader parity.
+- **Preserve:** original transcripts, closed durable snapshots, production/retained DBs, both candidate-attempt receipts/manifests, the fixed v3832 backup and all investigation/recovery archives. No forced `deleteUnverified`, automatic old-generation deletion, extra compaction/full FTS rewrite, live durable capture or unbudgeted full copy. Keep the freshly verified 5 GiB reserve.
+- **Failure/recovery:** after newer rows are accepted, never automatically restore an older generation over them. The controller attempts quarantine after mutation, but a quarantine I/O failure after metadata commit can leave a valid pin: `immediateOperatorIntervention=true` requires immediate manual handling and new warm writers are not guaranteed blocked. SIGKILL/power/cache recovery remains unproved; busy/stale locks are not reclaimed or retried automatically. Follow the adoption receipt, not the historical build directory as a later `--resume` target.
+
+## Parked work
+
+- #17's P0 consumer readback documentation closed; per-claim freshness/authority and later proposals remain unapproved. A resolved original is evidence, not current permission or semantic truth.
+- #12 remains real, dated recovery quality, not another brain platform. Strict whole-body deadlines, unattended crash restart, broader skill/peer/summary selection and contextual short-turn admission are separate follow-ups.
+- Keep the existing MD-freshness, corpus-species, durable and other unstarted items below. Their old rail numbers and October pauses/permissions are historical, not a resumption grant.
+
+# LEDGER — Dated context and parked follow-ups
 
 ## PAUSED — #18 storage investigation (2026-10-25, operator stop)
 
@@ -21,7 +37,7 @@
 - Evidence is preserved privately under the local state investigation archives; all original /tmp artifacts remain. Final pause batch `20261025T182000-paused` contains 999 payload files; the implementer reported 1,000 checksum checks passed and no running jobs. Its manifest SHA256 is `52189614e368a2e87fa3d68c119f269943961e0c905d69463037cde23100c9df`. Start from the private `andenken/PAUSE--20261025.md` state note and [issue #18's progress comment](https://github.com/junghan0611/andenken/issues/18#issuecomment-6395063721), not a stale approval in an old transcript.
 - Next, only when explicitly resumed: choose whether the bounded partial result is enough or whether to finish the synthetic fresh-file regression. Preserve the fixed v3832 backup, original stores, existing archives and unknown reader/external-authority protection. No actual cleanup, forced deletion, source-body access, re-embedding, remote data operation or production change is authorized. Documentation-only commit/push was separately requested; it does not resume the investigation.
 
-## CURRENT — #17 P0 consumer readback integration; no new engine implementation (2026-10-19 afternoon)
+## Parked — #17 P0 readback closed; later proposals not approved (2026-10-19 afternoon)
 
 - GLG asked agent-config to examine the bbot report and then directly told this coordinator to leave implementation to the reopened Opus. This designates the implementer, not an adopted design or immediate coding GO: agent-config relayed GLG's explicit implementation-later/discussion-now boundary at 13:23, and the Opus request was clarified as public-source reading and contract questions only. Public SSOT read completely: [andenken#17](https://github.com/junghan0611/andenken/issues/17) and [agent-config#31 thread, especially c4](https://github.com/junghan0611/agent-config/issues/31#issuecomment-6258910758). The 16/16 result includes git/grep/GitHub and prior published hints; it is not an isolated semantic-currentness benchmark. Search outcomes are inherited participant reports, not rerun here. Issue labels/state remain unchanged.
 - Only public code/artifacts were read. The export passes upstream `updated_at` to importer timestamp and CLI `updated_at`; this is not import, replica-publication or adoption/retraction time. In local public OpenClaw checkout `2b988ee`, chunk writes receive `Date.now()`, while source mtime is separate. Its default memory-file enumeration includes USER.md plus canonical memory/memory-directory and optional extraPaths; our importer has no injection-filename exclusion. Actual running upstream version/configuration and current stored coverage are unmeasured. A query miss cannot prove absence.
@@ -52,7 +68,7 @@
 - **Stop boundary:** GLG approved final documentation commit/push. No new tag/release, build/deployment, restart, data cleanup, new durable admission, paid indexing or compaction is implied. Existing dist is unchanged; loaded-Pi and human search usefulness remain separate from native/replica verification. OpenClaw FTS-index absence remains a separate observation, not a #16 blocker. GLG was watching agent-config's window, so no duplicate morning DM was sent.
 - **Parked source follow-up:** correct the stale Pi `session_search.mode` description (`index.ts`: 14-day decay although runtime passes `recencyHalfLifeDays: 0`) under a separate scope; README already describes no decay.
 
-# NOW — 세션 축 입장 경계 (2026-10-02 GLG)
+# Historical admission discussion (2026-10-02; superseded by the content-based #18 cut above)
 
 The #16 operational detour is complete. The stem below remains the next development direction, not an automatic continuation of the approved documentation publication. Wait for GLG's next scope/GO before code or data changes.
 
@@ -158,7 +174,7 @@ agent-config 코디네이터(`20261002T141212-423c18`)가 넘긴 인계를 재�
 - [ ] **`verify openclaw` 계열을 문서에 남기기** — 축이 없을 때 **다른 축의 답을 내는**
       모양은 09-06에 없앤 `count:0 exit 0`과 같은 계열이다. ROADMAP 유지보수 절에 한 줄.
 
-# RECENT
+# Historical receipts
 
 09-02~09-03에 닫힌 것(코퍼스·sync 두 모드·스킬 문서·#10/#11)은 `v2026.9.3`과
 `v2026.9.4`의 [CHANGELOG.md](./CHANGELOG.md)로 옮겼다. 여기는 다음 한 걸음만 둔다.

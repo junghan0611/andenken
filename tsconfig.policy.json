@@ -1,0 +1,25 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "allowImportingTsExtensions": true
+  },
+  "include": [
+    "session-policy.ts",
+    "session-policy.test.ts",
+    "indexer.ts",
+    "cli.ts",
+    "session-selection.ts",
+    "session-indexer.ts",
+    "durable-index.ts",
+    "sync-publish.test.ts",
+    "corpus-archive-fake.ts",
+    "corpus-custody.ts",
+    "estimate.ts",
+    "corpus-archive-glue.test.ts",
+    "corpus-archive-real.test.ts"
+  ],
+  "exclude": [
+    "node_modules"
+  ]
+}

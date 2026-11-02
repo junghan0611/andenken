@@ -15,6 +15,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { findOrgFiles, chunkOrgFile, shouldIndexOrgFile } from "./org-chunker.js";
 import { findSessionFiles, extractSessionChunks } from "./session-indexer.js";
+import { readSessionsPolicy, SessionsPolicyRefused } from "./session-policy.js";
 
 // --- Gemini Embedding Pricing (2026-03 확인) ---
 // Source: https://tokencost.app/blog/gemini-embedding-2-pricing
@@ -166,6 +167,22 @@ function printFormula() {
 // --- Main ---
 
 const target = process.argv[2] ?? "all";
+
+// This estimator counts legacy selection only. On a pinned (control-v1) data dir
+// that number is not what would be sent, and a malformed pin is no answer at
+// all: refuse (exit 2, API 0) and name the estimator that reads the pin.
+if (target === "sessions" || target === "all") {
+  try {
+    const policy = readSessionsPolicy();
+    if (policy.pinned) {
+      throw new SessionsPolicyRefused("pinned-estimator-unsupported", "estimate.ts counts legacy selection; this data dir is pinned to control-v1. Use ./run.sh estimate:sessions");
+    }
+  } catch (err) {
+    if (!(err instanceof SessionsPolicyRefused)) throw err;
+    console.error(`REFUSED ${err.message} (no API call was made)`);
+    process.exit(2);
+  }
+}
 
 if (target === "org" || target === "all") {
   const orgEst = estimateOrg();

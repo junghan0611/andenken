@@ -43,6 +43,7 @@ import * as path from "path";
 import * as zlib from "zlib";
 import { spawnSync } from "child_process";
 import { VectorStore, getOpenclawDbPath, getDataDir } from "./store.js";
+import { indexAuthorityRefusal } from "./session-policy.js";
 import {
 	DEFAULT_MAX_RATIO,
 	PRUNE_ELIGIBLE,
@@ -496,17 +497,15 @@ export function renderPlan(plan: PrunePlan, heldBack: string[], apply: boolean):
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
 
+// The sessions writers' judgement, reused as is (session-policy.ts): the device is
+// ~/.current-device only — missing / empty / unreadable is unknown and never the
+// authority, whatever HOSTNAME says; an empty or blank ANDENKEN_INDEX_AUTHORITY
+// means thinkpad; ANDENKEN_ALLOW_REPLICA_INDEX=1 is the one override. (Before: a
+// missing device file fell back to $HOSTNAME, '' when unset, and '' === '' passed
+// with ANDENKEN_INDEX_AUTHORITY=''.) Runs before any store open, plan or delete.
 function assertAuthority(): void {
-	const authority = process.env.ANDENKEN_INDEX_AUTHORITY ?? "thinkpad";
-	let device = "";
-	try {
-		device = fs.readFileSync(path.join(process.env.HOME ?? "", ".current-device"), "utf-8").trim();
-	} catch {
-		device = (process.env.HOSTNAME ?? "").trim();
-	}
-	if (device !== authority && process.env.ANDENKEN_ALLOW_REPLICA_INDEX !== "1") {
-		throw new Error(`refused: this is '${device}'; only the index authority '${authority}' prunes openclaw.lance (INVARIANT §7.3)`);
-	}
+	const refusal = indexAuthorityRefusal("prune:openclaw");
+	if (refusal) throw new Error(`refused: ${refusal} — only the index authority prunes openclaw.lance (INVARIANT §7.3)`);
 }
 
 async function main(): Promise<void> {
