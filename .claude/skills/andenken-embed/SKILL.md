@@ -6,6 +6,14 @@ user_invocable: true
 
 # andenken-embed — embedding maintenance workbench
 
+> **2026-11-03 — Managed-corpus correction (`v2026.11.3`).** This note takes precedence over the older present-tense lock/skip statements below; the September Git-retirement quotation remains historical context, not the current managed-archive contract.
+>
+> - A corpus with a root `.git` uses the agent-config archive helper and real custody on inherited FD 8. Invalid Git markers, missing/lost/foreign custody and unmaterialized sources refuse; no implicit annex get or automatic bootstrap. Ordering is sync FD 9 → corpus FD 8 → shared sessions writer. The old “no corpus lock yet” / “no whole-corpus snapshot lock” statements apply to the earlier/plain workflow, not this managed path. Custody serializes participating writers; it does not certify every live runtime or make multiple files one atomic filesystem snapshot.
+> - Local/warm and standalone indexing may use safe newer uncommitted regular originals after readiness/form/S0/policy checks, with archive **commit 0**. Do not require Git HEAD = embedding generation or checkpoint every local warm. Explicit global and supported human full-rebuild batches checkpoint after gather/ledger completion and before indexing; initial archive admission remains an explicit owner operation. Global publication completes corpus/archive receive and the reverse annex-log merge before publishing the sessions DB and paired manifests.
+> - Managed `--global` / full rebuild with `SKIP_GATHER=1` refuses with `archive-skip-gather-refused` (exit 2, API 0). Local skip still runs readiness/form; plain-corpus and supported dry-run behavior is unchanged. Existing authority/policy refusals still apply, including the pinned store's refusal of an in-place full rebuild.
+> - This Oracle operation uses the already installed, protected annex tool closure explicitly: `ANDENKEN_CORPUS_ANNEX_BIN="$HOME/.local/state/session-annex/gcroots/git-annex-10.20260421/bin"` for helper calls there. This is a dated operational tool-path exception, not a request to install, fetch or silently discover another binary. For authority-driven global publication, use `ANDENKEN_REPLICA_ANNEX_BIN` with that Oracle bin path; do not substitute the remote path for the authority's own tool configuration.
+> - The usual ask remains **2 → 3 → 4**, serially. Original transcripts, closed snapshots, old/retained DB generations and recovery archives are not deletion targets in the current preservation window. Tier 4's existing backed-up `dream` / `superseded-confirmed` prune scope is not expanded. Busy/stale locks stop; old loaded Pi functions/readers are not refreshed by a source build.
+
 Fixes the index-maintenance loop the steward repeats, so the commands aren't
 rediscovered each time (saves tokens) and any agent/pi can pick it up in this repo.
 
@@ -374,7 +382,9 @@ changed. Two rules hold it together:
 fails — an index must never be built on a corpus of unknown freshness. A remote
 device that is unreachable is a warning, not a failure, so a laptop off the
 network still indexes its own sessions. Call it directly only to inspect
-(`--dry-run`), or to gather without embedding. `SKIP_GATHER=1` opts out.
+(`--dry-run`), or to gather without embedding. `SKIP_GATHER=1` opts out — except on
+a managed archive corpus, where `--global` and a full rebuild refuse it (see the
+2026-11-03 note at the top).
 
 **`DEVICES.json` is the roster; `MANIFEST.json` is the inventory.** Keep them
 apart — using the corpus's directory listing as the roster makes the gather try
@@ -436,9 +446,11 @@ ANDENKEN_ALLOW_REPLICA_INDEX=1      # override once — this forks the corpus
 
 ### While a rebuild is baking
 
-- **Do not run `corpus:replicate` or `sync:sessions` from another shell.** There
-  is no corpus lock yet; rsync is atomic per file, never across 2,160 of them, so
-  the input snapshot is held by operating discipline alone.
+- **Do not run `corpus:replicate` or `sync:sessions` from another shell.** On a
+  plain corpus there is no corpus lock; rsync is atomic per file, never across
+  2,160 of them, so the input snapshot is held by operating discipline alone. (A
+  managed archive corpus has custody on FD 8 — see the 2026-11-03 note — which
+  serializes participating writers but is still not a whole-corpus snapshot.)
 - **Treat search on the replica as maintenance.** A full rebuild destroys the
   active `data/sessions.lance` and refills the same path, so the intermediate
   state looks like a healthy DB while being half of one.
@@ -695,7 +707,9 @@ and prints `✅ preflight dim=4096`. Copy what the probe said.
   from an old session during maintenance. External warm requests reach the locked
   sync script; a busy request may consume its warm cooldown. No unsolicited
   harness reload/restart is implied. Step 0 JSONL gather remains outside this lock;
-  there is no whole-corpus snapshot lock. md retains its own existing discipline.
+  there is no whole-corpus snapshot lock (on a managed archive corpus the custody
+  lock on FD 8, taken before this one, serializes participating writers — still
+  not an atomic snapshot). md retains its own existing discipline.
 - Check by hand with a self-match-safe pattern: `pgrep -af '[s]ync-sessions'`
   (a plain `pgrep -af sync-sessions` also matches its own command line).
 - Don't re-launch a background sync out of impatience. Wait for the completion signal.

@@ -34,7 +34,7 @@ import { deepStrictEqual, ok, strictEqual } from "node:assert";
 
 const REPO = import.meta.dirname;
 const TSX = path.join(REPO, "node_modules", ".bin", "tsx");
-const PINNED_SHA256 = process.env.ANDENKEN_ARCHIVE_HELPER_SHA256 ?? "e2a3718ca744ccd0bd09962b71fee7b5624cb82c5cd82932d63895566e96a795";
+const PINNED_SHA256 = process.env.ANDENKEN_ARCHIVE_HELPER_SHA256 ?? "3c1be9b283178a7539294c0cb793dea4be5e5a596bf8cb091bf6e122d19d9bbf";
 const HELPER_SOURCE = process.env.ANDENKEN_ARCHIVE_HELPER_SOURCE ?? path.join(os.homedir(), "repos", "gh", "agent-config", "skills", "memory-sync", "scripts", "corpus-archive.py");
 
 let passed = 0;
@@ -120,6 +120,7 @@ function initRepo(repo: string, name: string, dotfiles: "branch" | "local") {
   git(repo, "annex", "init", "-q", name);
   git(repo, "config", "gc.pruneExpire", "never");
   git(repo, "config", "gc.auto", "0");
+  git(repo, "config", "maintenance.auto", "false");
   if (dotfiles === "branch") git(repo, "annex", "config", "--set", "annex.dotfiles", "true");
   else git(repo, "config", "annex.dotfiles", "true");
 }
