@@ -32,6 +32,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as readline from "node:readline";
 import { sanitizeSessionChunkText } from "./session-sanitize.js";
+import { selectContent, type BlockDecision, type SelectionPolicy } from "./session-selection.js";
 
 export type SessionSource = "pi" | "claude";
 export type SourceFilter = SessionSource | "all";
@@ -458,11 +459,220 @@ export async function extractSessionChunks(
   return chunks;
 }
 
+// --- Opt-in selection path (issue #18, candidate index only) ---
+//
+// `extractSessionChunks` above is the production path and is NOT routed through
+// here. This function exists for the candidate plan/build: it reads ONE stream
+// and returns the legacy chunks (same parsePiLine/parseClaudeLine as production)
+// and the policy-selected chunks of the same bytes, plus per-message decisions
+// that carry coordinates and lengths, never text. Line groups hold each line's
+// whole pre-split text in memory for the S0 scan; callers must never emit it.
+
+export type SelectionOutcome =
+  /** Legacy-eligible; retained text embeds normally. */
+  | "reduced"
+  /** Legacy-eligible; retained text is at/below the 20/100 floor — kept (P1: the message was eligible). */
+  | "protected-short"
+  /** Legacy-eligible; retained text now matches a noise prefix — kept, flagged. */
+  | "protected-noise"
+  /** Every text block was selected: intended exclusion. */
+  | "selected-empty"
+  /** Legacy emitted nothing for this message; selection never admits it. */
+  | "legacy-ineligible"
+  /** Legacy-eligible, but the retained text fails sanitize: held, not embedded, not reverted. */
+  | "held-sanitize-conflict";
+
+export interface SelectionDecision {
+  lineNumber: number;
+  role: "user" | "assistant";
+  outcome: SelectionOutcome;
+  blocks: BlockDecision[];
+  legacyChunks: number;
+  legacyChars: number;
+  selectedChunks: number;
+  selectedChars: number;
+  /** Length of the retained text after sanitize (raw length when sanitize refused it). */
+  retainedChars: number;
+}
+
+/** Chunks split from one line's text, with that whole text (S0 scans it before split). */
+export interface LineGroup {
+  lineNumber: number;
+  text: string;
+  chunks: SessionChunk[];
+}
+
+export interface DetailedExtraction {
+  policy: SelectionPolicy;
+  lines: number;
+  /** Lines skipped silently by the production parser too: blank, and not valid JSON. */
+  blankLines: number;
+  invalidJsonLines: number;
+  legacy: SessionChunk[];
+  selected: SessionChunk[];
+  /** `legacy` / `selected` grouped by source line; the chunks concatenate to them in order. */
+  legacyGroups: LineGroup[];
+  selectedGroups: LineGroup[];
+  /** One entry per message in which at least one block was selected. */
+  decisions: SelectionDecision[];
+}
+
+export async function extractSessionChunksDetailed(
+  input: NodeJS.ReadableStream,
+  sessionFile: string,
+  policy: SelectionPolicy,
+): Promise<DetailedExtraction> {
+  const project = extractProjectName(sessionFile);
+  const source = detectSource(sessionFile);
+  const rl = readline.createInterface({ input, crlfDelay: Infinity });
+  const out: DetailedExtraction = {
+    policy,
+    lines: 0,
+    blankLines: 0,
+    invalidJsonLines: 0,
+    legacy: [],
+    selected: [],
+    legacyGroups: [],
+    selectedGroups: [],
+    decisions: [],
+  };
+  const keep = (group: LineGroup | null): void => {
+    if (!group) return;
+    out.selectedGroups.push(group);
+    for (const c of group.chunks) out.selected.push(c);
+  };
+
+  let lineNumber = 0;
+  for await (const line of rl) {
+    lineNumber++;
+    if (!line.trim()) {
+      out.blankLines++;
+      continue;
+    }
+
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      out.invalidJsonLines++;
+      continue;
+    }
+
+    const seen: { text: string | null } = { text: null };
+    const sink = (t: string): void => {
+      seen.text = t;
+    };
+    const legacy =
+      source === "claude"
+        ? parseClaudeLine(parsed as unknown as ClaudeJsonlMessage, sessionFile, project, lineNumber, sink)
+        : parsePiLine(parsed as unknown as PiJsonlMessage, sessionFile, project, lineNumber, sink);
+    let legacyGroup: LineGroup | null = null;
+    if (legacy.length > 0) {
+      // Every chunk-emitting branch of the legacy parser reports its text; fail closed if one stops.
+      if (seen.text === null) throw new Error(`legacy chunks without their text at line ${lineNumber}`);
+      legacyGroup = { lineNumber, text: seen.text, chunks: legacy };
+      out.legacyGroups.push(legacyGroup);
+      for (const c of legacy) out.legacy.push(c);
+    }
+
+    if (policy === "legacy") {
+      keep(legacyGroup);
+      continue;
+    }
+
+    const msg = selectionView(parsed, source);
+    if (!msg) {
+      keep(legacyGroup);
+      continue;
+    }
+    const sel = selectMessage(msg, policy, sessionFile, project, lineNumber, source, legacy);
+    if (!sel.decision) keep(legacyGroup);
+    else {
+      out.decisions.push(sel.decision);
+      if (sel.chunks.length > 0) keep({ lineNumber, text: sel.text!, chunks: sel.chunks });
+    }
+  }
+  out.lines = lineNumber;
+  return out;
+}
+
+interface SelectionView {
+  role: "user" | "assistant";
+  content: Array<{ type: string; text?: string }> | string;
+  api?: unknown;
+  timestamp: string;
+}
+
+/** The same message fields parsePiLine / parseClaudeLine read, plus pi's `api`. */
+function selectionView(parsed: Record<string, unknown>, source: SessionSource): SelectionView | null {
+  if (source === "claude") {
+    const p = parsed as unknown as ClaudeJsonlMessage;
+    if (p.type !== "user" && p.type !== "assistant") return null;
+    if (!p.message || !p.message.content) return null;
+    return { role: p.type, content: p.message.content, timestamp: p.timestamp ?? "" };
+  }
+  const p = parsed as unknown as PiJsonlMessage;
+  if (p.type !== "message" || !p.message) return null;
+  const { role, content } = p.message;
+  if (role !== "user" && role !== "assistant") return null;
+  if (!content) return null;
+  return {
+    role,
+    content,
+    api: (p.message as { api?: unknown }).api,
+    timestamp: p.timestamp ? new Date(p.timestamp).toISOString() : "",
+  };
+}
+
+function selectMessage(
+  msg: SelectionView,
+  policy: SelectionPolicy,
+  sessionFile: string,
+  project: string,
+  lineNumber: number,
+  source: SessionSource,
+  legacy: SessionChunk[],
+): { chunks: SessionChunk[]; decision: SelectionDecision | null; text: string | null } {
+  const sel = selectContent({ source, role: msg.role, api: msg.api, content: msg.content }, policy);
+  if (sel.decisions.length === 0) return { chunks: legacy, decision: null, text: null };
+
+  const base = {
+    lineNumber,
+    role: msg.role,
+    blocks: sel.decisions,
+    legacyChunks: legacy.length,
+    legacyChars: legacy.reduce((n, c) => n + c.text.length, 0),
+  };
+  const decide = (outcome: SelectionOutcome, chunks: SessionChunk[], retainedChars: number, text: string | null = null) => ({
+    chunks,
+    text,
+    decision: {
+      ...base,
+      outcome,
+      selectedChunks: chunks.length,
+      selectedChars: chunks.reduce((n, c) => n + c.text.length, 0),
+      retainedChars,
+    },
+  });
+
+  const retainedRaw = extractTextContent(sel.content as Array<{ type: string; text?: string }> | string);
+  if (!retainedRaw) return decide("selected-empty", [], 0);
+  if (legacy.length === 0) return decide("legacy-ineligible", [], retainedRaw.length);
+
+  const sanitized = sanitizeSessionChunkText(retainedRaw, msg.role, source);
+  if (!sanitized.ok) return decide("held-sanitize-conflict", [], retainedRaw.length);
+  const text = sanitized.text;
+  const floor = msg.role === "user" ? 20 : 100;
+  const outcome: SelectionOutcome = text.length <= floor ? "protected-short" : isNoise(text) ? "protected-noise" : "reduced";
+  return decide(outcome, buildMessageChunks(text, msg.role, sessionFile, project, lineNumber, msg.timestamp, source), text.length, text);
+}
+
 function parsePiLine(
   parsed: PiJsonlMessage,
   sessionFile: string,
   project: string,
   lineNumber: number,
+  onText?: (text: string) => void,
 ): SessionChunk[] {
   const timestamp = parsed.timestamp
     ? new Date(parsed.timestamp).toISOString()
@@ -473,6 +683,7 @@ function parsePiLine(
   // chars, so head-truncating it lost exactly the part worth keeping.
   if (parsed.type === "compaction" && parsed.compaction?.summary) {
     const parts = splitForEmbedding(parsed.compaction.summary);
+    onText?.(parsed.compaction.summary);
     return parts.map((part, i) => ({
       id: parts.length === 1
         ? `${sessionFile}:${lineNumber}`
@@ -501,6 +712,7 @@ function parsePiLine(
     lineNumber,
     timestamp,
     "pi",
+    onText,
   );
 }
 
@@ -509,6 +721,7 @@ function parseClaudeLine(
   sessionFile: string,
   project: string,
   lineNumber: number,
+  onText?: (text: string) => void,
 ): SessionChunk[] {
   const { type } = parsed;
 
@@ -527,6 +740,7 @@ function parseClaudeLine(
     lineNumber,
     timestamp,
     "claude",
+    onText,
   );
 }
 
@@ -538,6 +752,8 @@ function parseMessageContent(
   lineNumber: number,
   timestamp: string,
   source: SessionSource,
+  /** Opt-in (issue #18 selection path): receives the accepted text before split. */
+  onText?: (text: string) => void,
 ): SessionChunk[] {
   if (!content) return [];
   if (role !== "user" && role !== "assistant") return [];
@@ -561,6 +777,23 @@ function parseMessageContent(
   if (text.length <= minLength) return [];
   if (isNoise(text)) return [];
 
+  onText?.(text);
+  return buildMessageChunks(text, role, sessionFile, project, lineNumber, timestamp, source);
+}
+
+/**
+ * Split an accepted message text into chunks. Shared by the legacy path above
+ * and the opt-in selection path, so ids, roles and metadata cannot drift apart.
+ */
+function buildMessageChunks(
+  text: string,
+  role: "user" | "assistant",
+  sessionFile: string,
+  project: string,
+  lineNumber: number,
+  timestamp: string,
+  source: SessionSource,
+): SessionChunk[] {
   const parts = splitForEmbedding(text);
   const metaType = role === "user" ? "user_message" : "assistant_response";
 

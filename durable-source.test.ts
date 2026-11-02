@@ -241,6 +241,22 @@ let gateFile = "";
   const dry = await runDurableIndex(deps(corpus, data, { dryRun: true }));
   eq([dry.files[0].status, provider.calls, fs.existsSync(path.join(data, "durable-manifest.json"))], ["planned", 0, false], "dry-run: planned, no provider call, no manifest");
   eq(dry.files[0].held.length, 1, "dry-run lists the held entry");
+  const seen: number[] = [];
+  let groupsCover = true;
+  const dryInspected = await runDurableIndex(
+    deps(corpus, data, {
+      dryRun: true,
+      inspectExtraction: (_f, x) => {
+        seen.push(x.rows.length);
+        const flat = x.groups.flatMap((g) => g.chunks);
+        groupsCover &&= flat.length === x.rows.length && flat.every((r, i) => r === x.rows[i]);
+        groupsCover &&= x.groups.every((g) => g.chunks.length > 0 && g.chunks.every((r) => r.lineNumber === g.entryId && g.text.includes(r.text.slice(0, 40))));
+      },
+    }),
+  );
+  eq(JSON.stringify(dryInspected), JSON.stringify(dry), "inspectExtraction (issue #18 plan seam) leaves the dry-run report unchanged");
+  eq(seen.reduce((a, b) => a + b, 0), dry.files.reduce((n, f) => n + f.rows, 0), "inspectExtraction sees exactly the planned rows");
+  truthy(groupsCover, "extraction groups: rows in order, one group per entry, carrying the text the rows were split from");
 
   const r1 = await runDurableIndex(deps(corpus, data, { store, provider }));
   const m1 = loadDurableManifest(path.join(data, "durable-manifest.json")).files[file];

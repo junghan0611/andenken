@@ -345,6 +345,11 @@ export interface DurableExtraction {
   candidates: number;
   /** Entries the sanitizer dropped, by reason. */
   sanitizeDrops: Record<string, number>;
+  /**
+   * `rows` grouped by entry, with the whole text each entry's rows were split
+   * from (issue #18: S0 scans it before split). In memory only — never emitted.
+   */
+  groups: Array<{ entryId: number; text: string; chunks: DurableRow[] }>;
 }
 
 const SUMMARY_WRAPPER = /^The conversation history before this point was compacted into the following summary:\n\n<summary>\n([\s\S]*)\n<\/summary>$/;
@@ -364,7 +369,8 @@ export async function extractDurableRows(
   const picked = plan.candidates.filter((c) => c.B.decision === "include" && c.entryId > range.after && c.entryId <= range.upTo);
   const sanitizeDrops: Record<string, number> = {};
   const rows: DurableRow[] = [];
-  if (picked.length === 0) return { rows, candidates: 0, sanitizeDrops };
+  const groups: DurableExtraction["groups"] = [];
+  if (picked.length === 0) return { rows, candidates: 0, sanitizeDrops, groups };
 
   const views = new Map<number, DurableEntryView>();
   for (const conv of new Set(picked.map((c) => c.conversationId))) {
@@ -392,8 +398,10 @@ export async function extractDurableRows(
     }
     const parts = splitForEmbedding(text);
     const type = c.role === "user" ? "user_message" : c.role === "assistant" ? "assistant_response" : "compaction";
+    const group: DurableExtraction["groups"][number] = { entryId: e.entryId, text, chunks: [] };
+    groups.push(group);
     parts.forEach((part, i) => {
-      rows.push({
+      const row: DurableRow = {
         id: parts.length === 1 ? `${file}:e${e.entryId}` : `${file}:e${e.entryId}#${i}`,
         text: part,
         sessionFile: file,
@@ -414,8 +422,10 @@ export async function extractDurableRows(
           policy: DURABLE_POLICY,
           ...(parts.length > 1 ? { part: String(i), parts: String(parts.length) } : {}),
         },
-      });
+      };
+      rows.push(row);
+      group.chunks.push(row);
     });
   }
-  return { rows, candidates: picked.length, sanitizeDrops };
+  return { rows, candidates: picked.length, sanitizeDrops, groups };
 }

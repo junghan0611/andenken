@@ -41,6 +41,7 @@ import {
   witnessAt,
   witnessHolds,
   type DurableCorpusFile,
+  type DurableExtraction,
   type DurableRow,
   type DurableWitness,
 } from "./durable-source.js";
@@ -125,6 +126,13 @@ export interface DurableIndexDeps {
   batchSize?: number;
   /** Test seam for the manifest write; defaults to saveDurableManifest. */
   saveManifest?: (file: string, manifest: DurableManifest) => void;
+  /**
+   * Opt-in, read-only look at what a snapshot yields — rows and their per-entry
+   * groups with the pre-split text — before any provider call (issue #18
+   * candidate plan: S0 safety scan). Must not retain or emit text. Undefined —
+   * the default everywhere — changes nothing.
+   */
+  inspectExtraction?: (file: string, extraction: Readonly<DurableExtraction>) => void;
 }
 
 export interface DurableFileReport {
@@ -276,6 +284,7 @@ export async function runDurableIndex(deps: DurableIndexDeps): Promise<DurableIn
       r.sanitizeDrops = extraction.sanitizeDrops;
       r.chars = extraction.rows.reduce((n, x) => n + x.text.length, 0);
       r.estTokens = Math.ceil(r.chars / CHARS_PER_TOKEN);
+      deps.inspectExtraction?.(c.file, extraction);
 
       if (deps.dryRun) {
         r.status = upTo > after || r.rows > 0 ? "planned" : "up-to-date";

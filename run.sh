@@ -237,6 +237,25 @@ Usage: ./run.sh <command> [args]
                               propagation (API 0, temp corpus + temp LanceDB, stub
                               provider at 127.0.0.1:9, stub rsync/ssh)
 
+=== Selection candidate (issue #18, control-v1; plan only, no build) ===
+  candidate:sessions:plan --target <abs dir> --out <abs file>
+                              API 0, read-only. Reads every corpus JSONL once
+                              (inside the corpus, regular, no symlink on the path;
+                              others refused unread) and counts legacy vs control-v1
+                              chunks of the same bytes, the S0 high-signal hold (per
+                              whole message) and the to-send set; pins admitted
+                              pi-durable snapshots (size + sha256) and plans them as
+                              a dry run (B.1 as-is). Target must sit directly under
+                              ~/.local/state/andenken/candidates/ and must not
+                              exist — the plan creates nothing there. Output (wx,
+                              0600) holds counts, coordinates and fixed codes, never
+                              text. Requires ANDENKEN_SESSION_CORPUS. Exit 3 unless
+                              status=complete (refused / changed / error / empty;
+                              no retry).
+  test:selection              Type fence (tsconfig.selection.json) + synthetic
+                              fixtures for session-selection.ts, the detailed
+                              extractor and the plan (API 0, temp files only)
+
 === Utility ===
   env                         Show environment status
 EOF
@@ -430,6 +449,12 @@ case "${1:-help}" in
       && pnpm exec tsx durable-reader.test.ts && pnpm exec tsx durable-plan.test.ts \
       && pnpm exec tsx durable-source.test.ts && pnpm exec tsx sessions-lock.test.ts \
       && pnpm exec tsx sync-publish.test.ts ;;
+
+  # === Selection candidate (issue #18) — plan only ===
+  candidate:sessions:plan)
+    shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx scripts/candidate-plan.ts "$@" ;;
+  test:selection)
+    cd "$SCRIPT_DIR" && pnpm exec tsc -p tsconfig.selection.json && pnpm exec tsx session-selection.test.ts ;;
 
   # === PR-B sessions sync / rebuild ===
   rebuild:sessions)

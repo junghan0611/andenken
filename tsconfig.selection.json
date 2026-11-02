@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "allowImportingTsExtensions": true
+  },
+  "include": [
+    "session-selection.ts", "session-selection.test.ts", "scripts/candidate-plan.ts",
+    "session-indexer.ts", "durable-index.ts"
+  ],
+  "exclude": ["node_modules"]
+}
