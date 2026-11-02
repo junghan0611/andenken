@@ -255,6 +255,38 @@ Usage: ./run.sh <command> [args]
   test:selection              Type fence (tsconfig.selection.json) + synthetic
                               fixtures for session-selection.ts, the detailed
                               extractor and the plan (API 0, temp files only)
+  candidate:sessions:build --plan <abs> --plan-sha <hex> --target <abs> [--resume]
+                              PAID. Builds the planned candidate into a FRESH
+                              target only (never production data/manifests/corpus/
+                              backups). Holds data/.sync-sessions.lock (flock -n,
+                              exit 75 when busy) and the candidate writer lock;
+                              pinned by taskset to the first <= 8 allowed CPUs.
+                              API-0 refusals first (plan sha + six source hashes,
+                              authority, target, CPU, Qwen3-8B/4096 config, space,
+                              file set/pins), then ANDENKEN_ALLOW_PAID_FULL_REBUILD=1
+                              and an interactive TTY "yes" (no --yes). Per file:
+                              read once, sha/counts == plan, whole-message S0, then
+                              embed. Timeout/429/5xx/network: per-request retry with
+                              backoff+jitter behind one shared pause (<= 12 tries,
+                              <= 30 min); other failures stop new requests, files
+                              complete at that point are checkpointed, the partial
+                              target is kept. One progress line per minute.
+                              --resume continues THAT partial target: API-0
+                              reconciliation (manifest == DB ids + text hashes ==
+                              extraction; adopt complete orphans, delete incomplete
+                              ones in the candidate only), the same "yes", then
+                              only the remaining files. Each attempt is archived
+                              under <target>/attempts/. Set ANDENKEN_SESSION_TIMEOUT_MS
+                              for the per-request timeout. Exit 0 built / 4 partial /
+                              2 refused / 75 busy.
+  candidate:sessions:measure --target <abs> [--out <abs>]
+                              Read-only: target disk (allocated/apparent, table
+                              parts), candidate DB rows/dim/FTS/unique ids/S0,
+                              manifest↔DB pairs; production sessions.lance by
+                              directory metadata only (never opened). API 0.
+  test:candidate-build        Type fence (tsconfig.candidate.json) + synthetic suite
+                              under taskset -c 0-7 (mock provider, temp LanceDB,
+                              temp locks, virtual retry clock; API 0)
 
 === Utility ===
   env                         Show environment status
@@ -455,6 +487,27 @@ case "${1:-help}" in
     shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx scripts/candidate-plan.ts "$@" ;;
   test:selection)
     cd "$SCRIPT_DIR" && pnpm exec tsc -p tsconfig.selection.json && pnpm exec tsx session-selection.test.ts ;;
+  candidate:sessions:build)
+    # The production sync lock is held by `flock -n <file> <cmd>` so that
+    # /proc/locks attributes it to an ANCESTOR of the build (the build verifies
+    # that); `exec 9>…; flock -n 9` would attribute it to an exited helper.
+    shift; load_env; cd "$SCRIPT_DIR" || exit 1
+    command -v flock >/dev/null 2>&1 || { echo "❌ flock is required" >&2; exit 2; }
+    command -v taskset >/dev/null 2>&1 || { echo "❌ taskset is required" >&2; exit 2; }
+    [ -f data/.sync-sessions.lock ] || { echo "❌ data/.sync-sessions.lock is missing — not creating production files" >&2; exit 2; }
+    . scripts/lib/candidate-cpus.sh
+    CANDIDATE_CPUS="$(candidate_cpu_list 8)" || { echo "❌ cannot read this process's CPU affinity" >&2; exit 2; }
+    echo "candidate build: taskset -c $CANDIDATE_CPUS (inherited by every child); API concurrency ${INDEX_CONCURRENCY:-2} (max 4)"
+    flock -n -E 75 data/.sync-sessions.lock \
+      taskset -c "$CANDIDATE_CPUS" env RAYON_NUM_THREADS=8 pnpm exec tsx scripts/candidate-build.ts "$@"
+    rc=$?
+    [ "$rc" -eq 75 ] && echo "⚠ data/.sync-sessions.lock or the candidate writer lock is busy — refused" >&2
+    exit "$rc" ;;
+  candidate:sessions:measure)
+    shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx scripts/candidate-measure.ts "$@" ;;
+  test:candidate-build)
+    cd "$SCRIPT_DIR" && pnpm exec tsc -p tsconfig.candidate.json \
+      && taskset -c 0-7 pnpm exec tsx candidate-build.test.ts ;;
 
   # === PR-B sessions sync / rebuild ===
   rebuild:sessions)

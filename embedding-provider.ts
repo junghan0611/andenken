@@ -198,6 +198,21 @@ export interface VLLMProviderConfig {
 const VLLM_RETRY_ATTEMPTS = 3;
 const VLLM_RETRY_DELAY_MS = 1000;
 
+/** `Retry-After` as delay-seconds or an HTTP date → milliseconds (bounded to 1h); otherwise undefined. */
+export function parseRetryAfterMs(value: string | null, nowMs: number = Date.now()): number | undefined {
+  if (!value) return undefined;
+  const v = value.trim();
+  let ms: number;
+  if (/^\d+$/.test(v)) ms = Number(v) * 1000;
+  else {
+    const at = Date.parse(v);
+    if (!Number.isFinite(at)) return undefined;
+    ms = at - nowMs;
+  }
+  if (!Number.isFinite(ms) || ms < 0) return undefined;
+  return Math.min(ms, 3_600_000);
+}
+
 export class VLLMProvider implements EmbeddingProvider {
   readonly name: string;
   private _dimensions: number;
@@ -401,12 +416,15 @@ export class VLLMProvider implements EmbeddingProvider {
         if (!res.ok) {
           const errBody = await res.text();
           const errMsg = `vLLM embed (${res.status}): ${errBody.slice(0, 200)}`;
+          // Structured hints for callers that schedule their own retries (the
+          // candidate builder); this provider's own retry behaviour is unchanged.
+          const hints = { status: res.status, retryAfterMs: parseRetryAfterMs(res.headers.get("retry-after")) };
           // 4xx = client error, non-retryable (bad request, model not found, etc.)
           if (res.status >= 400 && res.status < 500) {
-            throw Object.assign(new Error(errMsg), { nonRetryable: true });
+            throw Object.assign(new Error(errMsg), { nonRetryable: true }, hints);
           }
           // 5xx = server error, retryable
-          throw new Error(errMsg);
+          throw Object.assign(new Error(errMsg), hints);
         }
 
         const data = (await res.json()) as {

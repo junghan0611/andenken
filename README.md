@@ -540,6 +540,80 @@ incremental). The legacy mixed-track `scripts/rebuild-incremental.sh` /
 indexing is currently disabled in production — do not invoke `index:org` outside
 upstream R&D.
 
+### Candidate build — unattended runs and resume (issue #18)
+
+`candidate:sessions:build` embeds a reviewed API-0 plan
+(`candidate:sessions:plan`) into a **separate** candidate directory under
+`~/.local/state/andenken/candidates/`. It never writes production `data/`,
+manifests, the corpus or backups, and there is no cutover. It holds the
+production `data/.sync-sessions.lock` (`flock -n`, exit 75 when busy) and its own
+candidate writer lock, and is pinned to at most 8 CPUs.
+
+```bash
+# fresh target (PAID; interactive "yes" required, no --yes)
+ANDENKEN_ALLOW_PAID_FULL_REBUILD=1 INDEX_CONCURRENCY=4 ANDENKEN_SESSION_TIMEOUT_MS=120000 \
+  ./run.sh candidate:sessions:build --plan <plan.json> --plan-sha <sha256> --target <candidates>/<name>
+# continue a partial target of the same plan (same human gate)
+ANDENKEN_ALLOW_PAID_FULL_REBUILD=1 INDEX_CONCURRENCY=4 ANDENKEN_SESSION_TIMEOUT_MS=120000 \
+  ./run.sh candidate:sessions:build --plan <plan.json> --plan-sha <sha256> --target <candidates>/<name> --resume
+./run.sh candidate:sessions:measure --target <candidates>/<name> --out <report.json>   # API 0
+```
+
+What keeps a long run going, and what stops it:
+
+- **Transient provider faults are absorbed in-process.** Timeout, 429, 5xx and
+  network failures are retried per request with exponential backoff and jitter
+  (2 s → 300 s, `Retry-After` as a floor), at most 12 attempts and 30 minutes
+  from the first attempt. One pause is shared by every worker, so a 429 or an
+  outage slows the whole run instead of letting other workers keep hammering.
+- **Everything else stops new requests at once**: other 4xx, wrong dimension,
+  an S0 hit in outbound text, the candidate 5 GiB cap / 8 GiB free-space reserve
+  (checked around each write, not a filesystem quota), or a source file that no
+  longer matches the plan. Files complete at that moment are checkpointed
+  (manifest written only after their rows are flushed), except after a space,
+  S0 or dimension stop. The receipt becomes `partial`; nothing is deleted.
+- **`--resume` reuses what was paid for.** An API-0 reconciliation reads each
+  stored file once and requires DB ids and text hashes to equal its extraction.
+  Files complete in the DB but missing from the manifest are adopted; incomplete
+  ones are deleted from the candidate only; any manifest↔DB mismatch, unknown
+  file, duplicate id or changed source is refused. Only the remaining files are
+  sent. Every attempt's receipt, manifest and ledger is archived byte-for-byte
+  under `<target>/attempts/`.
+- **Operator stops.** A stale candidate lock (SIGKILL / OOM) is never removed
+  automatically. A changed plan source voids the plan (re-plan, never resume into
+  a different input). `--resume` still needs a human `yes`: a run that stops
+  overnight waits for the morning, with its completed work kept.
+- A request that timed out may already have been billed; the receipt's
+  `api.retriedTexts` is the upper bound on double billing.
+
+The run prints one bounded progress line per minute — files, rows (new vs
+reused), requests / attempts / in flight, retries by class, pause, last success
+and an ETA range — and the receipt records per-request latency percentiles,
+failure classes, backoff, and preflight / human-wait / active / wall time. No
+message text, credential values or provider error bodies are emitted in logs
+or receipts; selected text remains in the candidate index.
+
+Measured on 2026-11-02 (thinkpad, OpenRouter Qwen3-Embedding-8B 4096d, 8 CPUs,
+API concurrency 4, control-v1 plan of 3108 JSONL files + 1 durable snapshot):
+
+| | attempt 1 (fresh) | attempt 2 (`--resume`) |
+|---|---|---|
+| active time | 29 min 55 s | 45 min 25 s (preflight reconciliation 16 s) |
+| outcome | partial: provider-timeout with a 60 s setting; timeouts were not retried then | built: 114,889 rows, unique ids, S0 hits 0, FTS, manifest == DB |
+| rows stored | 52,288 (441 computed row vectors were unpersisted after the checkpoint; source originals intact) | 52,288 reused + 62,498 new + 103 durable |
+| requests | 1,794 | 2,171 (0 retries) |
+| latency per provider call (up to 64 texts) | — | p50 3.3 s, p90 10.0 s, p99 27.8 s, max 63.3 s |
+| estimated cost | $0.169 | $0.215 |
+
+The slowest successful provider call took 63 s; the configured timeout in
+attempt 2 was 120 s. This does not prove that the same call would have failed
+with 60 s: the provider clears its abort timer after response headers arrive,
+before body decoding finishes, whereas call latency includes the latter too.
+Total embedding time
+for about 115k rows was about 75 minutes of active run; the candidate occupies
+about 2.05 GB allocated, against 9.28 GB for the production `sessions.lance`
+(directory metadata only, which also carries the production version history).
+
 ## Why the name
 
 `geworfen` — the human is thrown into the world.
