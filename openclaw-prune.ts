@@ -34,8 +34,10 @@
  *      the first delete. A receipt records what happened, including a failure
  *      half-way, next to the backup; `--restore <dir>` re-adds it.
  *
- * The harvest lock (`data/.openclaw-harvest.lock`) is held by `run.sh` around
- * plan → apply → verify → publish.
+ * The harvest lock (`<data dir>/.openclaw-harvest.lock`) is held by `run.sh`
+ * around plan → apply → verify → publish; `--apply` and `--restore` refuse to
+ * run outside it (openclaw-lock.ts), so a direct call is pointed at
+ * `./run.sh prune:openclaw`.
  */
 import * as crypto from "crypto";
 import * as fs from "fs";
@@ -44,6 +46,7 @@ import * as zlib from "zlib";
 import { spawnSync } from "child_process";
 import { VectorStore, getOpenclawDbPath, getDataDir } from "./store.js";
 import { indexAuthorityRefusal } from "./session-policy.js";
+import { assertOpenclawWriteLock } from "./openclaw-lock.js";
 import {
 	DEFAULT_MAX_RATIO,
 	PRUNE_ELIGIBLE,
@@ -515,6 +518,10 @@ async function main(): Promise<void> {
 	const offline = args.includes("--offline");
 	const ri = args.indexOf("--restore");
 	assertAuthority();
+	// --apply deletes and --restore re-adds: both write openclaw.lance and run
+	// inside the harvest lock run.sh holds on FD 8 (openclaw-lock.ts). The dry run
+	// plans and writes nothing; it keeps its direct entry.
+	if (apply || ri >= 0) assertOpenclawWriteLock(`prune:openclaw ${ri >= 0 ? "--restore" : "--apply"}`, "prune:openclaw");
 
 	if (ri >= 0) {
 		const dir = args[ri + 1];

@@ -68,7 +68,6 @@ HOST="${ANDENKEN_OPENCLAW_HOST:-oracle}"
 REMOTE_AGENTS="${ANDENKEN_OPENCLAW_AGENTS_DIR:-\$HOME/openclaw/config/agents}"
 STAGE="data/openclaw-staging"
 WATERMARK="data/openclaw-watermark.json"
-LOCKFILE="data/.openclaw-harvest.lock"
 FULL=0
 # Plain `memory status` only. ANDENKEN_OPENCLAW_STATUS_CMD=off skips it; the
 # board then reports every agent's identity as unknown, never as fresh.
@@ -122,15 +121,11 @@ mkdir -p "$STAGE"
 # Two harvests at once would each clear and refill the same staging directory,
 # and the second importer could fold the first one's artifact under the second
 # one's run id. `./run.sh sync:openclaw` takes this lock around export + import +
-# report and sets ANDENKEN_OPENCLAW_LOCK_HELD, because a second open of the same
-# file from this child would conflict with the parent's own lock.
-if [ "${ANDENKEN_OPENCLAW_LOCK_HELD:-0}" != "1" ] && command -v flock >/dev/null 2>&1; then
-  exec 8>"$LOCKFILE"
-  if ! flock -n 8; then
-    echo "❌ another openclaw harvest is running (lock: $LOCKFILE) — not starting a second one" >&2
-    exit 1
-  fi
-fi
+# reconcile; this child inherits its FD 8 and re-enters it. A standalone export
+# takes it itself. Re-entry is proven by the descriptor, never by a variable
+# (scripts/lib/openclaw-lock.sh).
+. scripts/lib/openclaw-lock.sh
+openclaw_lock_acquire "export-openclaw"
 
 # Every artifact of the previous run leaves BEFORE this one starts, so a failed
 # run leaves nothing a later importer or reconcile could mistake for its own. The

@@ -31,6 +31,9 @@ import * as path from "path";
 import * as zlib from "zlib";
 import * as readline from "readline";
 import { VectorStore, getOpenclawDbPath, getDataDir } from "./store.js";
+import { ensureOpenclawFts, describeFtsHealth } from "./openclaw-fts.js";
+import { assertOpenclawWriteLock } from "./openclaw-lock.js";
+import { indexAuthorityRefusal } from "./session-policy.js";
 
 const OPENCLAW_DIM = 4096;
 
@@ -181,6 +184,8 @@ export interface ImportStats {
 	droppedDim: number;
 	/** Rows we already held with the same stamp — accepted, but not rewritten. */
 	unchanged: number;
+	/** The FTS ensure outcome when this run wrote rows; undefined when it did not run. */
+	fts?: string;
 	byAgent: Record<string, number>;
 	watermark: Record<string, number>;
 }
@@ -480,15 +485,44 @@ export async function importOpenclaw(
 		fs.writeFileSync(getImportReceiptPath(), JSON.stringify(receipt, null, 2) + "\n");
 	}
 	await store.close();
+
+	// The full-text index, last and only after a run that WROTE rows. Order is
+	// the contract: rows, cursor and receipt above are facts by now and stay — a
+	// failure here does not roll them back, it fails the run (exit 1, so the
+	// reconcile after it in `sync:openclaw` does not run) and names the door that
+	// recovers. A run that wrote nothing — every row unchanged, or a dry run —
+	// leaves the index exactly as it was, missing included (openclaw-fts.ts).
+	if (!opts.dryRun && stats.imported > 0) {
+		try {
+			const { outcome, health } = await ensureOpenclawFts(getOpenclawDbPath());
+			stats.fts = `${outcome} — ${describeFtsHealth(health)}`;
+		} catch (err) {
+			throw new Error(
+				`${stats.imported} chunks imported, watermark and receipt written; the FTS index was NOT ensured ` +
+					`(${err instanceof Error ? err.message : String(err)}). Recover with ./run.sh fts:openclaw`,
+			);
+		}
+	}
 	return stats;
 }
 
 /**
- * Direct entry: `pnpm exec tsx openclaw-importer.ts [--dry-run]`.
- * `run.sh sync:openclaw` runs the export first and then this.
+ * Entry: `./run.sh sync:openclaw` runs the export first and then this, inside
+ * the harvest lock. A direct `node --import tsx openclaw-importer.ts --dry-run`
+ * still works (it writes nothing); a direct writing run outside the lock is
+ * refused and pointed at `./run.sh sync:openclaw`.
  */
 async function main(): Promise<void> {
 	const dryRun = process.argv.includes("--dry-run");
+
+	// A writing run belongs to the authority and runs inside the harvest lock that
+	// `./run.sh sync:openclaw` holds on FD 8 (openclaw-lock.ts). A dry run writes
+	// nothing and keeps its direct entry.
+	if (!dryRun) {
+		const refusal = indexAuthorityRefusal("openclaw import");
+		if (refusal) throw new Error(`refused: ${refusal}`);
+		assertOpenclawWriteLock("openclaw import", "sync:openclaw");
+	}
 
 	// No staged artifact is the normal outcome of a run that fetched nothing, so
 	// it exits clean. A direct call with a genuinely missing export still gets the
@@ -521,6 +555,7 @@ async function main(): Promise<void> {
 		.map(([a, n]) => `${a}=${n}`)
 		.join(" ");
 	if (agents) console.log(`   by agent: ${agents}`);
+	if (stats.fts) console.log(`   FTS: ${stats.fts}`);
 	console.log(`   💰 API: 0 calls — vectors came already computed`);
 	if (dryRun) console.log("   (dry run — nothing was written)");
 }

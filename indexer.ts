@@ -23,7 +23,9 @@ import {
   DEFAULT_CONCURRENCY,
   type EmbeddingProvider,
 } from "./embedding-provider.js";
-import { VectorStore, getSessionsDbPath, getOrgDbPath, getMdDbPath, getOpenclawDbPath, getDataDir } from "./store.js";
+import { VectorStore, getSessionsDbPath, getOrgDbPath, getMdDbPath, getOpenclawDbPath, getDataDir, describeAxisAbsence, ftsReady } from "./store.js";
+import { describeFtsHealth, OPENCLAW_FTS_HEALTHY_MARK } from "./openclaw-fts.js";
+import { assertOpenclawWriteLock, OpenclawLockRefused } from "./openclaw-lock.js";
 import { stagingState } from "./openclaw-importer.js";
 import { findSessionFiles } from "./session-indexer.js";
 import { findOrgFiles, chunkOrgFile, shouldIndexOrgFile } from "./org-chunker.js";
@@ -1863,9 +1865,17 @@ async function cleanup(target: string) {
 
 // --- Verify: post-indexing integrity check ---
 
-async function verify(target: string) {
+async function verify(target: string, opts: { requireFts?: boolean } = {}) {
   const { execSync } = await import("node:child_process");
   let allPassed = true;
+  // `--require-fts` is the openclaw FTS-required mode (openclaw-fts.ts): the same
+  // checks plus a FAIL when the full-text index is not ready. Without it the FTS
+  // state of openclaw is reported and never fails — a store served vector-only
+  // with `degraded=true` stays a valid store.
+  if (opts.requireFts && target !== "openclaw") {
+    console.error(`verify: --require-fts applies to openclaw only (got "${target}")`);
+    process.exit(2);
+  }
   const fail = (msg: string) => { console.log(`  ❌ ${msg}`); allPassed = false; };
   const pass = (msg: string) => { console.log(`  ✅ ${msg}`); };
 
@@ -1914,15 +1924,28 @@ async function verify(target: string) {
           : t === "openclaw"
             ? getOpenclawDbPath()
             : getOrgDbPath();
-    if (!fs.existsSync(dbPath)) { console.log(`${t}: not found`); continue; }
+    if (!fs.existsSync(dbPath)) {
+      console.log(`${t}: not found`);
+      if (opts.requireFts) { console.log(`  ❌ FTS-required: ${dbPath} does not exist`); allPassed = false; }
+      continue;
+    }
 
     console.log(`\n=== ${t} Verification ===`);
+
+    // openclaw is read through read-only stores end to end: a directory that
+    // holds no table is reported absent, never handed a fresh empty one. The
+    // other tracks keep their existing open (unchanged here).
+    const readOnly = t === "openclaw";
+    if (readOnly) {
+      const absence = describeAxisAbsence(dbPath);
+      if (absence) { fail(`${t}: ${absence.reason}`); continue; }
+    }
 
     // First open with a probe store to read the actual stored dim. Constructor
     // dim parameter is only consulted when CREATING a table; for an existing
     // table all read paths (getCount, getIndexedFiles, raw query/select) are
     // dim-agnostic, so this probe is safe.
-    const probe = new VectorStore(dbPath);
+    const probe = new VectorStore(dbPath, undefined, { readOnly });
     await probe.init();
     const actualDim = await probe.getActualVectorDim();
     await probe.close();
@@ -1950,7 +1973,7 @@ async function verify(target: string) {
       );
     }
 
-    const store = new VectorStore(dbPath, dim);
+    const store = new VectorStore(dbPath, dim, { readOnly });
     await store.init();
     const table = (store as any).table;
     const count = await store.getCount();
@@ -1989,6 +2012,17 @@ async function verify(target: string) {
     const dbSize = execSync(`du -sh ${dbPath}`).toString().split("\t")[0];
     pass(`${frags} data files, ${dbSize}`);
 
+    // 4b. openclaw full-text index (openclaw-fts.ts). Reported always; a FAIL only
+    // in the FTS-required mode. Health = index present + native query ok; the
+    // statistics are a report, and `unindexed` is the tail size, not coverage.
+    if (t === "openclaw") {
+      const h = await store.ftsHealth();
+      const line = `FTS: ${describeFtsHealth(h)}`;
+      if (ftsReady(h)) pass(line);
+      else if (opts.requireFts) fail(`${line} — FTS-required`);
+      else console.log(`  ⚠ ${line} (not required here; search serves the vector leg with degraded=true)`);
+    }
+
     // 5. Org-specific: manifest consistency
     if (t === "org") {
       const manifest = loadManifest();
@@ -2017,6 +2051,9 @@ async function verify(target: string) {
   }
 
   console.log(allPassed ? "\n✅ All checks passed" : "\n⚠️  Some checks failed");
+  // The one line a publisher reads to know the required mode actually ran here
+  // and passed (scripts/sync-openclaw-to-oracle.sh --require-fts).
+  if (opts.requireFts && allPassed) console.log(OPENCLAW_FTS_HEALTHY_MARK);
   process.exitCode = allPassed ? 0 : 1;
 }
 
@@ -2385,7 +2422,15 @@ if (isDirectInvocation) {
       await indexOrg(force);
       break;
     case "compact":
-      if (touchesSessions(args[1] ?? "all")) {
+      if (args[1] === "openclaw") {
+        // Our own harvest store: the authority writes it, under the harvest lock
+        // that import, prune, FTS bootstrap and publish take (openclaw-lock.ts).
+        const notAuthority = indexAuthorityRefusal("compact openclaw");
+        if (notAuthority) throw new Error(notAuthority);
+        assertOpenclawWriteLock("compact openclaw", "compact openclaw");
+        await compact("openclaw");
+      }
+      else if (touchesSessions(args[1] ?? "all")) {
         await withSessionsLock(`compact ${args[1] ?? "all"}`, () => {
           sessionsMaintenanceGate("compact");
           return compact(args[1] ?? "all");
@@ -2402,9 +2447,16 @@ if (isDirectInvocation) {
       }
       else await cleanup(args[1] ?? "org");
       break;
-    case "verify":
-      await verify(args[1] ?? "all");
+    case "verify": {
+      const rest = args.slice(2);
+      const unknownFlags = rest.filter((a) => a !== "--require-fts");
+      if (unknownFlags.length > 0) {
+        console.error(`verify: unknown argument ${unknownFlags.join(" ")}`);
+        process.exit(2);
+      }
+      await verify(args[1] ?? "all", { requireFts: rest.includes("--require-fts") });
       break;
+    }
     case "status":
       await status();
       break;
@@ -2425,7 +2477,7 @@ if (isDirectInvocation) {
       console.log("  npx tsx indexer.ts estimate md     # API-0 dry-run cost estimate");
   }
   } catch (err) {
-    if (err instanceof SessionsLockRefused || err instanceof CorpusCustodyRefused) {
+    if (err instanceof SessionsLockRefused || err instanceof CorpusCustodyRefused || err instanceof OpenclawLockRefused) {
       console.error(`REFUSED ${err.message}`);
       process.exit(err.exitCode);
     }

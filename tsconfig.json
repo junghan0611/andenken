@@ -26,6 +26,8 @@
     "openclaw-importer.ts",
     "openclaw-reconcile.ts",
     "openclaw-prune.ts",
+    "openclaw-fts.ts",
+    "openclaw-lock.ts",
     "md-search.ts",
     "durable-reader.ts",
     "durable-plan.ts",

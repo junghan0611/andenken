@@ -399,6 +399,31 @@ retrieve as the unredacted one and display as something else. Measured
 2026-09-03: 0 of 4,683 chunks trip the detector, so the policy costs nothing today
 and exists for the day it does not.
 
+**One lock, proven by its descriptor.** Every writer of `openclaw.lance` and its
+staging directory — harvest, import, prune `--apply` / `--restore`, `compact
+openclaw`, `fts:openclaw` and the publish — runs inside flock(2) on
+`<data dir>/.openclaw-harvest.lock`, held on FD 8 (`scripts/lib/openclaw-lock.sh`).
+A nested entry re-enters only when its inherited FD 8 is that file (same device
+and inode) and the open file description holds the flock (`/proc/<pid>/fdinfo/8`);
+an environment variable can only claim the lock and is never read. Node writers
+check the same descriptor (`openclaw-lock.ts`), so run.sh launches them with
+`node --import tsx`, and a direct writing call outside the lock is refused and
+pointed at its `./run.sh` door. Dry runs, reports and search keep direct entry.
+The authority gate (7.1) applies to the import and to `compact openclaw` as well.
+
+**The BM25 index is ours, and required only on request.** The full-text index of
+`openclaw.lance` is built from the stored `text` — API 0, no re-embedding, rows
+untouched (`openclaw-fts.ts`). The importer ensures it after a run that wrote rows,
+after rows, watermark and receipt; a failure there exits 1 without rolling those
+back, and a later run that writes nothing does not recover it — `./run.sh
+fts:openclaw` does. A store without the index is still a valid store: search
+serves the vector leg with `degraded=true`, and the default `verify` and publish
+do not fail on it. Only the explicit FTS-required mode does: `verify openclaw
+--require-fts` and `sync:openclaw:oracle --require-fts`, which refuses before any
+transfer unless the replica answers `fts:openclaw --protocol` exactly, and fails
+after it unless the replica prints the exact healthy line. Health means the index
+exists and a native full-text query runs; it is not row coverage or recall.
+
 ### 7.4 A read never creates an axis
 
 `lancedb.connect()` creates the dataset it is pointed at. So every search path

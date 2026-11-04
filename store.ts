@@ -157,6 +157,32 @@ function buildFilterWhere(f: SearchFilters | undefined): string {
 
 const TABLE_NAME = "session_chunks";
 
+/** The one full-text index every track keeps: `text_idx`, FTS, on `text` alone. */
+function isTextFtsIndex(index: { name: string; indexType: string; columns: string[] }): boolean {
+  return index.name === "text_idx"
+    && index.indexType === "FTS"
+    && index.columns.length === 1
+    && index.columns[0] === "text";
+}
+
+/** `VectorStore.ftsHealth()`; `query` is null only when there is no table to ask. */
+export interface FtsHealth {
+  table: boolean;
+  index: boolean;
+  indexed: number | null;
+  unindexed: number | null;
+  query: FtsDiagnostic | null;
+}
+
+/**
+ * The FTS-required bar: the index exists and a native full-text query ran `ok`.
+ * Index statistics are reported (unknown when unreadable) but are not part of
+ * the bar, and neither are coverage of every row or retrieval quality.
+ */
+export function ftsReady(h: FtsHealth): boolean {
+  return h.table && h.index && h.query?.status === "ok";
+}
+
 /**
  * Default data directory for LanceDB indexes.
  * ANDENKEN_DATA env var overrides (e.g. for tests or alternate installs).
@@ -928,25 +954,56 @@ export class VectorStore {
    * index generation each time; unindexed fresh fragments remain searchable and
    * `table.optimize()` folds them into this index during explicit compaction.
    */
-  async createFtsIndex(): Promise<void> {
+  async createFtsIndex(): Promise<"created" | "existing" | "no-table"> {
     await this.ensureInitialized();
-    if (!this.table) return;
+    if (!this.table) return "no-table";
 
     const existing = await this.table.listIndices();
-    if (existing.some((index) =>
-      index.name === "text_idx"
-      && index.indexType === "FTS"
-      && index.columns.length === 1
-      && index.columns[0] === "text",
-    )) {
-      return;
-    }
+    if (existing.some(isTextFtsIndex)) return "existing";
 
     const lancedb = await loadLanceDB();
     await this.table.createIndex("text", {
       config: lancedb.Index.fts(),
       replace: false,
     });
+    return "created";
+  }
+
+  /**
+   * Read-only FTS health: whether the one `text_idx` exists, what its own
+   * statistics say, and whether a native full-text query runs. Never creates a
+   * table or an index. `unindexed` is LanceDB's count of rows written after the
+   * last fold — a size of the tail, not a measure of what is searchable — and a
+   * healthy answer says the leg can run, not that its recall is good.
+   */
+  async ftsHealth(probe: string = "andenkenftsprobe"): Promise<FtsHealth> {
+    await this.ensureInitialized();
+    if (!this.table) return { table: false, index: false, indexed: null, unindexed: null, query: null };
+
+    let index = false;
+    let indexed: number | null = null;
+    let unindexed: number | null = null;
+    try {
+      const fts = (await this.table.listIndices()).find(isTextFtsIndex);
+      index = fts !== undefined;
+      if (fts) {
+        const stats = await this.table.indexStats(fts.name);
+        if (stats) {
+          indexed = stats.numIndexedRows;
+          unindexed = stats.numUnindexedRows;
+        }
+      }
+    } catch {
+      // unreadable index metadata stays index=false / stats null
+    }
+
+    const seen: { d: FtsDiagnostic | null } = { d: null };
+    try {
+      await this.fullTextSearch(probe, 1, undefined, (d) => { seen.d = d; });
+    } catch (err) {
+      if (!(err instanceof StoreRowDecodeError)) throw err;
+    }
+    return { table: true, index, indexed, unindexed, query: seen.d };
   }
 
   /**

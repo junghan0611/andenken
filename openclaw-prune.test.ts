@@ -332,10 +332,13 @@ console.log("\n=== CLI / run.sh — static guards ===");
 	ok("the live re-check opens the upstream db mode=ro", /mode=ro/.test(src) && !/\b(insert\s+into|update\s+\w+\s+set|delete\s+from|drop\s+|vacuum|replace\s+into)\b/i.test(src.slice(src.indexOf("RECHECK_PY"), src.indexOf("`;", src.indexOf("RECHECK_PY")))));
 	const runsh = fs.readFileSync(new URL("./run.sh", import.meta.url), "utf-8");
 	const pr = runsh.slice(runsh.indexOf("  prune:openclaw)"), runsh.indexOf("  report:openclaw)"));
-	ok("run.sh prune:openclaw takes the harvest lock before anything else", pr.indexOf("flock -n 8") >= 0 && pr.indexOf("flock -n 8") < pr.indexOf("openclaw-prune.ts"));
+	ok("run.sh prune:openclaw takes the harvest lock before anything else", pr.indexOf("openclaw_lock_acquire") >= 0 && pr.indexOf("openclaw_lock_acquire") < pr.indexOf("openclaw-prune.ts"));
+	ok("run.sh prune:openclaw launches with node --import tsx, which keeps FD 8 for the lock check", /node --import tsx openclaw-prune\.ts/.test(pr));
 	ok("--publish only after --apply, and verify before the push", /\*" --apply "\*\) \.\/run\.sh verify openclaw && bash scripts\/sync-openclaw-to-oracle\.sh/.test(pr));
 	const pub = fs.readFileSync(new URL("./scripts/sync-openclaw-to-oracle.sh", import.meta.url), "utf-8");
-	ok("a standalone publish takes the same lock", /flock -n 8/.test(pub) && /ANDENKEN_OPENCLAW_LOCK_HELD/.test(pub));
+	ok("a standalone publish takes the same lock, by descriptor and not by a variable", /openclaw_lock_acquire/.test(pub) && !/ANDENKEN_OPENCLAW_LOCK_HELD/.test(pub));
+	const lib = fs.readFileSync(new URL("./scripts/lib/openclaw-lock.sh", import.meta.url), "utf-8");
+	ok("the shared helper takes flock -n on FD 8 and proves re-entry by inode + fdinfo", /flock -n 8/.test(lib) && /-ef "\$lock"/.test(lib) && /fdinfo\/8/.test(lib));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

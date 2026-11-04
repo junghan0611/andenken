@@ -85,11 +85,17 @@ Usage: ./run.sh <command> [args]
                               `all` = sessions+md+org. openclaw by name: it is our
                               own harvest DB (their vectors, our store), fragmented
                               by our own import writes. OpenClaw's sqlite is never
-                              touched — the export opens it read-only
+                              touched — the export opens it read-only. openclaw takes
+                              the harvest lock and runs on the index authority only
   cleanup [sessions|md|org]   Dedup + orphan removal + manifest repair + compact (CPU-pinned)
   cleanup [target] --dry-run  Dry-run (report only)
   verify [sessions|md|org|openclaw|all]
                               Post-indexing integrity check (all = sessions+md+org)
+  verify openclaw --require-fts
+                              The same check, plus FAIL unless openclaw's BM25 index
+                              exists and a native full-text query runs ok (index stats
+                              are reported, not required). Without the flag the FTS
+                              state is reported and never fails
   status                      Show index statistics (text)
   status:json                 Show index statistics (machine-readable JSON)
   estimate [sessions|md|org|all] Dry-run cost estimate (Gemini-priced, legacy)
@@ -130,6 +136,18 @@ Usage: ./run.sh <command> [args]
                               staged run (no ssh, no write, API 0)
   sync:openclaw:oracle [flags] Publish completed data/openclaw.lance to Oracle.
                               Authority-only; flags: --dry-run --no-verify --smoke --host <ssh-host>
+                              --require-fts: refuse before transfer unless the local
+                                store passes verify --require-fts and the replica answers
+                                fts:openclaw --protocol; after transfer, require the
+                                replica's own verify --require-fts healthy line. Without
+                                it the publish is unchanged (FTS not required)
+  fts:openclaw [--check|--protocol]
+                              BM25 (full-text) index of openclaw.lance, built from the
+                              stored text — API 0, no re-embedding, rows untouched.
+                              No flag: create it on an existing table that lacks it
+                              (authority + harvest lock); ready = no write. --check:
+                              read-only, exit 0 only when ready. --protocol: print the
+                              required-mode protocol line, open nothing
   sync:md:oracle [flags]      Rsync completed data/md.lance + md-manifest.json to Oracle
                               flags: --dry-run --no-verify --smoke --host <ssh-host>
 
@@ -175,7 +193,8 @@ Usage: ./run.sh <command> [args]
   test:filename               Fixture tests for pi corpus admission by filename (API 0)
   test:corpus                 Fixture tests for corpus-backed device discovery (API 0)
   test:split                  Fixture tests for long-turn embedding split (API 0)
-  test:openclaw               Fixture tests for the OpenClaw harvest, reconcile and prune (API 0)
+  test:openclaw               Fixture tests for the OpenClaw harvest, reconcile, prune,
+                              FTS index and harvest lock (API 0)
   test:absent                 Fixture tests for the absent-axis invariant — a read never creates (API 0)
   test:parity                 Credential regex parity: python ↔ typescript (API 0)
   test:diagnostics            Type fence (tsconfig.diagnostics.json) + tests for the
@@ -388,11 +407,20 @@ case "${1:-help}" in
   index:org)
     shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts org "$@" ;;
   compact)
-    shift; cd "$SCRIPT_DIR" && run_pinned pnpm exec tsx indexer.ts compact "${1:-all}" ;;
+    shift; cd "$SCRIPT_DIR" || exit 1
+    if [ "${1:-all}" = "openclaw" ]; then
+      # Our harvest store: compacted under the same harvest lock as import, prune,
+      # FTS bootstrap and publish; `node --import tsx` keeps FD 8 for the check.
+      . scripts/lib/openclaw-lock.sh
+      openclaw_lock_acquire "compact openclaw"
+      run_pinned node --import tsx indexer.ts compact openclaw
+    else
+      run_pinned pnpm exec tsx indexer.ts compact "${1:-all}"
+    fi ;;
   cleanup)
     shift; load_env; cd "$SCRIPT_DIR" && run_pinned pnpm exec tsx indexer.ts cleanup "${1:-org}" "${@:2}" ;;
   verify)
-    shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts verify "${1:-all}" ;;
+    shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts verify "${1:-all}" "${@:2}" ;;
   status)
     load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts status ;;
   status:json)
@@ -424,7 +452,8 @@ case "${1:-help}" in
   test:openclaw)
     load_env; cd "$SCRIPT_DIR" && pnpm exec tsx openclaw-import.test.ts \
       && pnpm exec tsx openclaw-reconcile.test.ts \
-      && pnpm exec tsx openclaw-prune.test.ts ;;
+      && pnpm exec tsx openclaw-prune.test.ts \
+      && pnpm exec tsx openclaw-fts.test.ts ;;
   test:absent)
     cd "$SCRIPT_DIR" && pnpm exec tsx axis-absent.test.ts ;;
   test:parity)
@@ -603,31 +632,26 @@ case "${1:-help}" in
   sync:openclaw)
     # One lock around the whole pipeline: export clears and refills the staging
     # directory, and the import and reconcile that follow must read what THIS
-    # export staged. The child export sees LOCK_HELD and does not re-lock.
+    # export staged. The child export inherits FD 8 and re-enters the same lock
+    # (scripts/lib/openclaw-lock.sh proves it by inode + fdinfo, not by a flag).
     shift; load_env; cd "$SCRIPT_DIR" || exit 1
-    if command -v flock >/dev/null 2>&1; then
-      exec 8>data/.openclaw-harvest.lock
-      flock -n 8 || { echo "❌ another openclaw harvest is running (lock: data/.openclaw-harvest.lock)" >&2; exit 1; }
-      export ANDENKEN_OPENCLAW_LOCK_HELD=1
-    fi
+    . scripts/lib/openclaw-lock.sh
+    openclaw_lock_acquire "sync:openclaw"
     bash scripts/export-openclaw.sh "$@" \
       && pnpm exec tsx openclaw-reconcile.ts freshness \
-      && pnpm exec tsx openclaw-importer.ts \
+      && node --import tsx openclaw-importer.ts \
       && pnpm exec tsx openclaw-reconcile.ts reconcile --samples 0 ;;
   prune:openclaw)
     # One lock from plan to publish: no harvest may restage, and no other prune or
     # publish may run, between the plan, the delete and the replica push.
     shift; load_env; cd "$SCRIPT_DIR" || exit 1
-    if command -v flock >/dev/null 2>&1; then
-      exec 8>data/.openclaw-harvest.lock
-      flock -n 8 || { echo "❌ an openclaw harvest/prune/publish is running (lock: data/.openclaw-harvest.lock)" >&2; exit 1; }
-      export ANDENKEN_OPENCLAW_LOCK_HELD=1
-    fi
+    . scripts/lib/openclaw-lock.sh
+    openclaw_lock_acquire "prune:openclaw"
     PRUNE_ARGS=(); PUBLISH=0
     for a in "$@"; do
       if [ "$a" = "--publish" ]; then PUBLISH=1; else PRUNE_ARGS+=("$a"); fi
     done
-    pnpm exec tsx openclaw-prune.ts "${PRUNE_ARGS[@]}" || exit $?
+    node --import tsx openclaw-prune.ts "${PRUNE_ARGS[@]}" || exit $?
     if [ "$PUBLISH" = "1" ]; then
       case " ${PRUNE_ARGS[*]} " in
         *" --apply "*) ./run.sh verify openclaw && bash scripts/sync-openclaw-to-oracle.sh ;;
@@ -639,14 +663,22 @@ case "${1:-help}" in
     # staging directory would mix two runs (the binding check would refuse, but
     # there is no reason to race it).
     shift; load_env; cd "$SCRIPT_DIR" || exit 1
-    if command -v flock >/dev/null 2>&1; then
-      exec 8>data/.openclaw-harvest.lock
-      flock -n 8 || { echo "❌ an openclaw harvest is running — report after it finishes" >&2; exit 1; }
-    fi
+    . scripts/lib/openclaw-lock.sh
+    openclaw_lock_acquire "report:openclaw"
     pnpm exec tsx openclaw-reconcile.ts freshness \
       && pnpm exec tsx openclaw-reconcile.ts reconcile "$@" ;;
   sync:openclaw:oracle)
     shift; load_env; cd "$SCRIPT_DIR" && bash scripts/sync-openclaw-to-oracle.sh "$@" ;;
+  fts:openclaw)
+    # Build the BM25 index of an existing openclaw.lance that lacks it. --check and
+    # --protocol only read (no lock, no write); the build takes the harvest lock.
+    shift; load_env; cd "$SCRIPT_DIR" || exit 1
+    case " $* " in
+      *" --check "*|*" --protocol "*) pnpm exec tsx openclaw-fts.ts "$@" ;;
+      *) . scripts/lib/openclaw-lock.sh
+         openclaw_lock_acquire "fts:openclaw"
+         node --import tsx openclaw-fts.ts "$@" ;;
+    esac ;;
   search:openclaw)
     shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx cli.ts search-openclaw "$@" ;;
   rebuild:full)
