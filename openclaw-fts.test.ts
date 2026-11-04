@@ -1,13 +1,31 @@
 #!/usr/bin/env tsx
 /**
- * Fixture tests for the openclaw full-text index, its doors and the harvest lock.
+ * Fixture tests for the openclaw full-text index, its doors and the harvest lock —
+ * run ONLY inside the namespace barrier of scripts/test-openclaw-fts-sandboxed.sh.
  *
- * API 0, provider 0, network 0. Every store is a synthetic one under a temp
- * ANDENKEN_DATA with a temp HOME (no ~/.env.local, so no credential reaches a
- * child), and the run asserts it never fell through to this repo's data/. Vectors
- * are shape-only. ssh and rsync are PATH stubs that only log their arguments.
+ * Why the barrier: on 2026-11-04 an earlier run of this file reached a real host.
+ * Its ssh/rsync were PATH stubs, and a `bash -c` whose stdin was a socket re-read
+ * the system profile, which rewrote PATH so the real binaries ran. PATH stubs are
+ * kept as an emulation layer (they record and answer the calls a publish makes);
+ * they are not what keeps this test off the network. The kernel namespaces are.
  *
- * What it pins (openclaw-fts.ts, openclaw-lock.ts, scripts/lib/openclaw-lock.sh):
+ * G1 — the barrier, proven before anything else loads. Only node built-ins are
+ * imported statically; store / openclaw-* modules load after G1 passes.
+ *   static (exit 10, no active probe on failure): a user namespace (uid_map is
+ *     not the initial identity map), a network namespace other than the host's
+ *     (inode passed by the launcher), loopback-only devices and no usable IPv4 /
+ *     IPv6 route, only the expected mounts (read-only code view, deps, tools,
+ *     store; read-write run dir), descriptors classified (no socket outside this
+ *     namespace's AF_UNIX table, stdio in the run dir), the exact env allow-list,
+ *     and no host HOME content, /etc, /run, repo data/ or .git visible;
+ *   active (exit 11): a TCP connect to TEST-NET-1 must fail ENETUNREACH (IPv6 is
+ *     labelled, not over-claimed); ssh/rsync are not on PATH; positive controls
+ *     (bash under a socket stdin keeps PATH, node --import tsx, pnpm exec tsx,
+ *     flock + fdinfo, a LanceDB native table, run-dir writes); and the pure
+ *     judge must reject forged facts. No negative is ever run on the host.
+ * --barrier-only stops after G1 with exit 0; G2 is not reached.
+ *
+ * G2 — the FTS contract (openclaw-fts.ts, openclaw-lock.ts, scripts/lib/openclaw-lock.sh):
  *   1. lifecycle on INDEXED rows — rows inserted before the index, then a text
  *      change, a delete and a restore of those rows — and on the unindexed tail,
  *      each asserted before and after optimize;
@@ -21,25 +39,269 @@
  *      explicit bootstrap;
  *   5. the opt-in required publish refuses a replica that does not answer the
  *      protocol BEFORE transfer, and one that does not print the healthy line
- *      after it; the default publish is unchanged;
+ *      after it; the default publish is unchanged. Every publish names
+ *      `--host fixture.invalid`, and the stubs refuse any other host;
  *   6. compact openclaw and prune --apply/--restore run only inside the lock.
  *
+ * Artifacts stay in the run dir: g1-report.json, run-manifest.json and, per
+ * spawn, cases/case-NNN.{json,out,err,exe}. A failed run deletes nothing; a
+ * fully passing run removes only its fixture stores (fx/).
  * Observations are printed as `obs` and never counted as passes.
- * Run it: `./run.sh test:openclaw` (or `pnpm exec tsx openclaw-fts.test.ts`).
+ * Run it: `./run.sh test:openclaw-fts:barrier` (G1) or `./run.sh test:openclaw`.
  */
 
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
+import * as net from "node:net";
+import * as dns from "node:dns";
 import * as zlib from "node:zlib";
 import * as crypto from "node:crypto";
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { VectorStore, ftsReady } from "./store.ts";
-import { fdinfoHoldsFlockWrite } from "./openclaw-lock.ts";
-import { OPENCLAW_FTS_PROTOCOL, OPENCLAW_FTS_HEALTHY_MARK } from "./openclaw-fts.ts";
+import { spawn, spawnSync } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 
-const REPO = import.meta.dirname;
-const PROD_DATA = path.join(REPO, "data");
+// ═════════════════════════════════════════════════════════════════════════════
+// G1 — the barrier judge: pure, then the facts it reads, then the entry.
+// ═════════════════════════════════════════════════════════════════════════════
+
+export interface BarrierContext { root: string; evidence: string; repo: string; bindir: string; hostHome: string; hostNetns: string }
+export interface BarrierFacts {
+	uidMap: string | null;
+	netns: string | null;
+	netDev: string | null;
+	route: string | null;
+	/** null when /proc/net/ipv6_route is absent. */
+	ipv6Route: string | null;
+	/** Socket inodes of THIS network namespace's AF_UNIX table; null when unreadable. */
+	unixInodes: string[] | null;
+	/** null when /proc/self/fd could not be enumerated; `target` null + `error` when a readlink failed other than ENOENT. */
+	fds: Array<{ fd: number; target: string | null; error?: string }> | null;
+	env: Record<string, string>;
+	mounts: Array<{ point: string; opts: string }>;
+	/** Paths that must not exist and do. */
+	present: string[];
+	/** Entries of the host home and the repo's parent (they may hold only the bind skeleton). */
+	homeEntries: string[] | null;
+	repoParentEntries: string[] | null;
+	/** Entries of the run dir as seen inside (only the bound root/ and bin/ may show). */
+	runEntries: string[] | null;
+	/** Observation only: /proc/self/status Cpus_allowed_list. */
+	cpusAllowed: string | null;
+}
+export interface Verdict { ok: boolean; failures: string[]; notes: string[] }
+
+/**
+ * The runtime env allow-list. The launcher sets six keys (HOME, LANG,
+ * NOSYSBASHRC, PATH, pnpm_config_pm_on_fail, pnpm_config_verify_deps_before_run);
+ * the seventh, PWD, appears at
+ * runtime — observed in the 2026-11-04 15:48 barrier run, its setter unmeasured
+ * (bwrap's --chdir is the hypothesis). PWD is accepted only when it equals the
+ * read-only repo path the launcher chdirs to.
+ *
+ * pnpm_config_pm_on_fail=ignore: in the 15:57 run `pnpm exec` (pnpm 11.20.0
+ * against packageManager pnpm@10.33.0) failed with EROFS writing a `_tmp_*` file
+ * into the read-only repo. The pnpm 11 bundle reads this setting from the
+ * `pnpm_config_` env prefix and, on `ignore`, does not try to switch to the
+ * declared version. That this is the only cause is not proven. The value must be
+ * exactly `ignore`; missing, any other value, or any other extra key fails.
+ *
+ * pnpm_config_verify_deps_before_run=warn: a preventive literal for the one
+ * other install path the same bundle has before `exec` — a dependency-status
+ * check that installs on mismatch by default and only warns on `warn`. That
+ * path was not observed to fire. `warn` keeps the check (it is not `false`); the
+ * value must be exactly `warn`, else the run fails.
+ */
+export const PNPM_PM_ON_FAIL = "ignore";
+export const PNPM_VERIFY_DEPS = "warn";
+const ENV_KEYS = ["HOME", "LANG", "NOSYSBASHRC", "PATH", "PWD", "pnpm_config_pm_on_fail", "pnpm_config_verify_deps_before_run"];
+const RTF_REJECT = 0x0200;
+
+/** Pure: facts in, verdict out. No I/O, no spawn. */
+export function judgeBarrier(f: BarrierFacts, c: BarrierContext): Verdict {
+	const failures: string[] = [];
+	const notes: string[] = [];
+	const under = (p: string, base: string) => p === base || p.startsWith(base + "/");
+
+	if (f.uidMap === null) failures.push("uid_map unreadable");
+	else if (/^\s*0\s+0\s+4294967295\s*$/.test(f.uidMap.trim())) failures.push("initial user namespace (identity uid_map)");
+
+	const ns = f.netns?.match(/^net:\[(\d+)\]$/)?.[1];
+	if (!ns) failures.push(`network namespace unreadable (${f.netns})`);
+	else if (ns === c.hostNetns) failures.push("same network namespace as the host");
+
+	if (f.netDev === null) failures.push("/proc/net/dev unreadable");
+	else {
+		const ifs = f.netDev.split("\n").slice(2).map((l) => l.split(":")[0].trim()).filter(Boolean);
+		const other = ifs.filter((i) => i !== "lo");
+		if (other.length) failures.push(`network devices besides lo: ${other.join(",")}`);
+	}
+	if (f.route === null) failures.push("/proc/net/route unreadable");
+	else {
+		const routes = f.route.split("\n").slice(1).map((l) => l.trim().split(/\s+/)).filter((x) => x[0]);
+		const usable = routes.filter((x) => x[0] !== "lo");
+		if (usable.length) failures.push(`IPv4 routes via ${usable.map((x) => x[0]).join(",")}`);
+	}
+	if (f.ipv6Route === null) notes.push("ipv6_route absent — IPv6 state unknown/disabled here");
+	else {
+		const rows = f.ipv6Route.split("\n").map((l) => l.trim().split(/\s+/)).filter((x) => x.length >= 10);
+		const usable = rows.filter((x) => x[9] !== "lo" && (parseInt(x[8], 16) & RTF_REJECT) === 0);
+		if (usable.length) failures.push(`usable IPv6 routes via ${usable.map((x) => x[9]).join(",")}`);
+	}
+
+	const roPoints = ["/nix/store", c.bindir, c.repo, `${c.repo}/node_modules`];
+	const allowed = new Set(["/", "/tmp", "/proc", "/dev", c.root, ...roPoints]);
+	for (const m of f.mounts) {
+		if (!allowed.has(m.point) && !m.point.startsWith("/proc/") && !m.point.startsWith("/dev/")) failures.push(`unexpected mount ${m.point}`);
+	}
+	for (const p of roPoints) {
+		const m = f.mounts.filter((x) => x.point === p);
+		if (m.length === 0) failures.push(`expected mount missing: ${p}`);
+		else if (!m.every((x) => x.opts.split(",").includes("ro"))) failures.push(`mount not read-only: ${p}`);
+	}
+
+	const unix = f.unixInodes === null ? null : new Set(f.unixInodes);
+	if (unix === null) failures.push("/proc/net/unix unreadable");
+	if (f.fds === null) failures.push("/proc/self/fd could not be enumerated (unknown)");
+	for (const std of [0, 1, 2]) {
+		if (f.fds !== null && !f.fds.some((x) => x.fd === std && x.target !== null)) failures.push(`fd ${std} missing or unreadable`);
+	}
+	for (const { fd, target, error } of f.fds ?? []) {
+		if (target === null) { failures.push(`fd ${fd} readlink failed (${error ?? "unknown"})`); continue; }
+		if (fd === 0) { if (target !== "/dev/null") failures.push(`fd 0 is ${target}, not /dev/null`); continue; }
+		if (fd === 1 || fd === 2) { if (!under(target, c.evidence)) failures.push(`fd ${fd} is ${target}, not a log in the launcher's evidence dir`); continue; }
+		const sock = target.match(/^socket:\[(\d+)\]$/)?.[1];
+		if (sock !== undefined) { if (!unix?.has(sock)) failures.push(`fd ${fd} is a socket outside this namespace's AF_UNIX table`); continue; }
+		if (target.startsWith("anon_inode:") || target.startsWith("pipe:")) continue;
+		if ([c.root, c.repo, "/nix/store", "/dev", "/proc"].some((b) => under(target, b))) continue;
+		failures.push(`fd ${fd} is ${target}`);
+	}
+
+	const keys = Object.keys(f.env).sort();
+	if (JSON.stringify(keys) !== JSON.stringify(ENV_KEYS)) failures.push(`env keys ${keys.join(",")} ≠ ${ENV_KEYS.join(",")}`);
+	if (f.env.PATH !== c.bindir) failures.push("PATH is not the tool directory");
+	if (f.env.HOME !== `${c.root}/home`) failures.push("HOME is not the run dir home");
+	if (f.env.PWD !== c.repo) failures.push("PWD is missing or not the read-only repo path");
+	if (f.env.pnpm_config_pm_on_fail !== PNPM_PM_ON_FAIL) failures.push(`pnpm_config_pm_on_fail is missing or not "${PNPM_PM_ON_FAIL}"`);
+	if (f.env.pnpm_config_verify_deps_before_run !== PNPM_VERIFY_DEPS) failures.push(`pnpm_config_verify_deps_before_run is missing or not "${PNPM_VERIFY_DEPS}"`);
+
+	if (f.present.length) failures.push(`must be absent but exist: ${f.present.join(", ")}`);
+	const skeleton = (entries: string[] | null, allowedNames: string[], what: string) => {
+		if (entries === null) return;
+		const extra = entries.filter((e) => !allowedNames.includes(e));
+		if (extra.length) failures.push(`${what} shows host entries: ${extra.slice(0, 5).join(", ")}`);
+	};
+	const firstBelow = (base: string, p: string) => (under(p, base) && p !== base ? p.slice(base.length + 1).split("/")[0] : null);
+	skeleton(f.homeEntries, [firstBelow(c.hostHome, c.root), firstBelow(c.hostHome, c.repo)].filter((x): x is string => !!x), "host home");
+	skeleton(f.repoParentEntries, [path.basename(c.repo)], "repo parent");
+	skeleton(f.runEntries, [path.basename(c.root), ...(path.dirname(c.bindir) === path.dirname(c.root) ? [path.basename(c.bindir)] : [])], "run dir");
+
+	return { ok: failures.length === 0, failures, notes };
+}
+
+function readOr(p: string): string | null {
+	try { return fs.readFileSync(p, "utf-8"); } catch { return null; }
+}
+function listOr(p: string): string[] | null {
+	try { return fs.readdirSync(p); } catch { return null; }
+}
+export function readBarrierFacts(c: BarrierContext): BarrierFacts {
+	const names = listOr("/proc/self/fd");
+	const fds: BarrierFacts["fds"] = names === null ? null : [];
+	for (const n of names ?? []) {
+		try { fds!.push({ fd: Number(n), target: fs.readlinkSync(`/proc/self/fd/${n}`) }); }
+		catch (e) {
+			const code = (e as NodeJS.ErrnoException).code ?? "unknown";
+			if (code === "ENOENT") continue; // the listing's own transient handle, already closed
+			fds!.push({ fd: Number(n), target: null, error: code });
+		}
+	}
+	const unixTable = readOr("/proc/net/unix");
+	const mountinfo = readOr("/proc/self/mountinfo") ?? "";
+	const sensitive = [
+		...[".ssh", ".env.local", ".config", ".pi", ".claude", ".gnupg", ".cache", ".netrc", ".aws", ".local/share", ".current-device"].map((x) => path.join(c.hostHome, x)),
+		...["data", ".git", ".env", ".env.local", ".claude", ".agent-reports", ".review", "acceptance-cases.local.json", "dist"].map((x) => path.join(c.repo, x)),
+		"/etc", "/run", "/sys", "/var", "/root",
+		c.evidence, path.join(path.dirname(c.root), "view"),
+	];
+	return {
+		uidMap: readOr("/proc/self/uid_map"),
+		netns: (() => { try { return fs.readlinkSync("/proc/self/ns/net"); } catch { return null; } })(),
+		netDev: readOr("/proc/net/dev"),
+		route: readOr("/proc/net/route"),
+		ipv6Route: readOr("/proc/net/ipv6_route"),
+		unixInodes: unixTable === null ? null : unixTable.split("\n").slice(1).map((l) => l.trim().split(/\s+/)[6]).filter((x): x is string => !!x),
+		fds,
+		env: Object.fromEntries(Object.entries(process.env).filter((e): e is [string, string] => typeof e[1] === "string")),
+		mounts: mountinfo.split("\n").filter(Boolean).map((l) => {
+			const x = l.split(" ");
+			return { point: x[4].replace(/\\040/g, " "), opts: x[5] };
+		}),
+		present: sensitive.filter((p) => fs.existsSync(p)),
+		homeEntries: listOr(c.hostHome),
+		repoParentEntries: listOr(path.dirname(c.repo)),
+		runEntries: listOr(path.dirname(c.root)),
+		cpusAllowed: readOr("/proc/self/status")?.match(/^Cpus_allowed_list:\s*(.+)$/m)?.[1]?.trim() ?? null,
+	};
+}
+
+interface Args extends BarrierContext { barrierOnly: boolean }
+function parseArgs(argv: string[]): Args | string {
+	const get = (k: string) => { const i = argv.indexOf(k); return i >= 0 ? argv[i + 1] : undefined; };
+	const [root, evidence, hostNetns, hostHome, repo, bindir] = ["--root", "--evidence", "--host-netns", "--host-home", "--repo", "--bindir"].map(get);
+	if (!root || !evidence || !hostNetns || !hostHome || !repo || !bindir) return "missing --root/--evidence/--host-netns/--host-home/--repo/--bindir — run it through scripts/test-openclaw-fts-sandboxed.sh";
+	if (!/^\d+$/.test(hostNetns)) return "--host-netns is not an inode number";
+	for (const p of [root, evidence, hostHome, repo, bindir]) if (!path.isAbsolute(p)) return `${p} is not an absolute path`;
+	return { root, evidence, hostNetns, hostHome, repo, bindir, barrierOnly: argv.includes("--barrier-only") };
+}
+
+// ── entry: static facts first; any failure exits 10 before anything else ─────
+/** The shape of the arguments, never their values: flag → abs | digits | other | absent. */
+function argvShape(argv: string[]): Record<string, string> {
+	const out: Record<string, string> = {};
+	for (const k of ["--root", "--evidence", "--host-netns", "--host-home", "--repo", "--bindir"]) {
+		const i = argv.indexOf(k);
+		const v = i >= 0 ? argv[i + 1] : undefined;
+		out[k] = v === undefined ? "absent" : /^\d+$/.test(v) ? "digits" : path.isAbsolute(v) ? "abs" : "other";
+	}
+	out["--barrier-only"] = argv.includes("--barrier-only") ? "present" : "absent";
+	out.extra = String(argv.filter((a) => a.startsWith("--") && !(a in out)).length);
+	return out;
+}
+const parsed = parseArgs(process.argv.slice(2));
+if (typeof parsed === "string") {
+	console.log(`BARRIER-REFUSED ${parsed}`);
+	console.log(`G1-ARGV-SHAPE ${JSON.stringify(argvShape(process.argv.slice(2)))}`);
+	process.exit(10);
+}
+const ARGS: Args = parsed;
+console.log(`BARRIER-ENTRY pid=${process.pid}`);
+const FACTS = readBarrierFacts(ARGS);
+const STATIC = judgeBarrier(FACTS, ARGS);
+/**
+ * The static facts, sanitized, on stdout (the launcher's inner.out, outside the
+ * sandbox) BEFORE any decision: nothing is written to the run dir until the
+ * barrier is proven. Env values never leave; only keys and two comparisons.
+ */
+function sanitizedFacts(f: BarrierFacts, c: BarrierContext) {
+	return {
+		uidMap: f.uidMap?.trim() ?? null, netns: f.netns, hostNetns: c.hostNetns,
+		netDevices: f.netDev?.split("\n").slice(2).map((l) => l.split(":")[0].trim()).filter(Boolean) ?? null,
+		ipv4Routes: f.route?.split("\n").slice(1).filter((l) => l.trim()).length ?? null,
+		ipv6Routes: f.ipv6Route === null ? "absent" : f.ipv6Route.split("\n").filter((l) => l.trim()).map((l) => { const x = l.trim().split(/\s+/); return `${x[1]} ${x[8]} ${x[9]}`; }),
+		unixSockets: f.unixInodes?.length ?? null,
+		fds: f.fds, mounts: f.mounts,
+		envKeys: Object.keys(f.env).sort(), pathIsBindir: f.env.PATH === c.bindir, homeIsRunHome: f.env.HOME === `${c.root}/home`, pwdIsRepo: f.env.PWD === c.repo, pmOnFailIgnore: f.env.pnpm_config_pm_on_fail === PNPM_PM_ON_FAIL, verifyDepsWarn: f.env.pnpm_config_verify_deps_before_run === PNPM_VERIFY_DEPS,
+		present: f.present, homeEntries: f.homeEntries, repoParentEntries: f.repoParentEntries, runEntries: f.runEntries,
+		cpusAllowed: f.cpusAllowed,
+	};
+}
+console.log(`G1-STATIC-FACTS ${JSON.stringify({ verdict: STATIC, facts: sanitizedFacts(FACTS, ARGS) })}`);
+console.log(`\n=== G1 static: ${STATIC.ok ? "pass" : "FAIL"} ===`);
+for (const x of STATIC.failures) console.log(`  FAIL ${x}`);
+for (const x of STATIC.notes) console.log(`  note ${x}`);
+if (!STATIC.ok) {
+	console.log("BARRIER-STATIC-FAILED — no active probe, no fixture");
+	process.exit(10);
+}
 
 let pass = 0;
 let fail = 0;
@@ -50,28 +312,126 @@ function ok(label: string, cond: boolean, detail?: string): void {
 function obs(label: string, value: unknown): void {
 	console.log(`  obs  ${label}: ${typeof value === "string" ? value : JSON.stringify(value)}`);
 }
-
-// ── isolation ────────────────────────────────────────────────────────────────
-const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "andenken-oc-fts-"));
-const realRoot = fs.realpathSync(ROOT);
-if (realRoot.startsWith(fs.realpathSync(REPO))) throw new Error(`fixture root ${realRoot} is inside the repo`);
-
-/** Production state by metadata only (no DB open, no content read). */
-function prodShape(): string {
-	const out: string[] = [];
-	const walk = (p: string) => {
-		if (!fs.existsSync(p)) { out.push(`${p} absent`); return; }
-		const st = fs.lstatSync(p);
-		if (st.isDirectory()) { for (const d of fs.readdirSync(p).sort()) walk(path.join(p, d)); return; }
-		out.push(`${path.relative(PROD_DATA, p)}\t${st.size}\t${st.mtimeMs}\t${st.ino}`);
-	};
-	walk(path.join(PROD_DATA, "openclaw.lance"));
-	walk(path.join(PROD_DATA, ".openclaw-harvest.lock"));
-	walk(path.join(PROD_DATA, "openclaw-watermark.json"));
-	walk(path.join(PROD_DATA, "openclaw-staging"));
-	return crypto.createHash("sha256").update(out.join("\n")).digest("hex");
+function writeJson(p: string, v: unknown): void {
+	fs.mkdirSync(path.dirname(p), { recursive: true });
+	fs.writeFileSync(p, JSON.stringify(v, null, 2) + "\n");
 }
-const PROD_BEFORE = prodShape();
+
+// ── G1 active: only after every static fact passed ───────────────────────────
+function connectOutcome(host: string, port: number, ms = 3000): Promise<string> {
+	return new Promise((resolve) => {
+		const s = net.connect({ host, port });
+		const t = setTimeout(() => { s.destroy(); resolve("TIMEOUT"); }, ms);
+		s.once("connect", () => { clearTimeout(t); s.destroy(); resolve("CONNECTED"); });
+		s.once("error", (e: NodeJS.ErrnoException) => { clearTimeout(t); resolve(e.code ?? "ERROR"); });
+	});
+}
+const g1Dir = path.join(ARGS.root, "g1");
+fs.mkdirSync(g1Dir, { recursive: true });
+const failBefore = fail;
+console.log("\n=== G1 active ===");
+const v4 = await connectOutcome("192.0.2.1", 9);
+ok(`TCP connect to TEST-NET-1 fails ENETUNREACH (got ${v4})`, v4 === "ENETUNREACH");
+let v6 = "not-run";
+if (fail === failBefore) {
+	v6 = await connectOutcome("2001:db8::1", 9);
+	// Explicit classes only; anything else (EHOSTUNREACH = a route exists,
+	// ECONNREFUSED, TIMEOUT, CONNECTED, an unknown code) fails closed.
+	const V6: Record<string, string> = { ENETUNREACH: "unreachable", EADDRNOTAVAIL: "probe unavailable (≠ IPv6 disabled)", EAFNOSUPPORT: "probe unavailable (≠ IPv6 disabled)" };
+	ok(`IPv6 TEST-NET connect is classified (got ${v6})`, v6 in V6);
+	obs("IPv6 label", V6[v6] ?? "unclassified — failed closed");
+	const dnsCode = await new Promise<string>((r) => dns.lookup("fixture.invalid", (e) => r(e ? (e.code ?? "ERROR") : "RESOLVED")));
+	obs("dns.lookup(fixture.invalid) (observation only)", dnsCode);
+	const tools = spawnSync("bash", ["-c", 'command -v ssh || echo none; command -v rsync || echo none; echo "${PATH%%:*}"'], { encoding: "utf-8" });
+	const [sshAt, rsyncAt, firstPath] = (tools.stdout ?? "").trim().split("\n");
+	ok("tool check (not an isolation proof): ssh and rsync are not on PATH", sshAt === "none" && rsyncAt === "none", tools.stdout);
+	ok("positive: bash -c under a socket stdin keeps PATH = the tool directory", firstPath === ARGS.bindir, tools.stdout);
+	ok("positive: /bin/sh and /usr/bin/env bash run", spawnSync("/bin/sh", ["-c", "echo ok"], { encoding: "utf-8" }).stdout.trim() === "ok" && spawnSync("/usr/bin/env", ["bash", "-c", "echo ok"], { encoding: "utf-8" }).stdout.trim() === "ok");
+	fs.writeFileSync(path.join(g1Dir, "tiny.ts"), "const n: number = 41 + 1;\nconsole.log(`tiny ${n}`);\n");
+	const tiny = spawnSync("node", ["--import", "tsx", path.join(g1Dir, "tiny.ts")], { cwd: ARGS.repo, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] });
+	ok("positive: node --import tsx runs a TS file", tiny.stdout.trim() === "tiny 42", tiny.stderr);
+	const px = spawnSync("pnpm", ["exec", "tsx", "--version"], { cwd: ARGS.repo, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 });
+	ok("positive: pnpm exec tsx --version (no network)", px.status === 0, px.stderr);
+	obs("versions inside", { node: process.version, pnpm: spawnSync("pnpm", ["--version"], { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] }).stdout.trim(), tsx: px.stdout.trim().split("\n").join(" ") });
+	obs("Cpus_allowed_list inside", FACTS.cpusAllowed ?? "unreadable");
+	const lk = path.join(g1Dir, "probe.lock");
+	const fl = spawnSync("bash", ["-c", `exec 8>>"${lk}"; flock -n 8 && grep -c FLOCK "/proc/$BASHPID/fdinfo/8"`], { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] });
+	ok("positive: flock on a run-dir file shows in fdinfo", fl.stdout.trim() === "1", fl.stdout + fl.stderr);
+	try {
+		const lancedb = await import("@lancedb/lancedb");
+		const db = await lancedb.connect(path.join(g1Dir, "native.lance"));
+		const t = await db.createTable("t", [{ id: "g1", vector: [0.1, 0.2, 0.3, 0.4] }]);
+		ok("positive: LanceDB native creates and counts a synthetic table", (await t.countRows()) === 1);
+	} catch (e) {
+		ok("positive: LanceDB native creates and counts a synthetic table", false, String(e));
+	}
+	const wf = path.join(g1Dir, "write.txt");
+	fs.writeFileSync(wf, "w");
+	ok("positive: the run dir is writable", fs.readFileSync(wf, "utf-8") === "w");
+
+	// Pure negatives: the judge must reject forged facts (no I/O, no spawn).
+	const forge = (label: string, mut: (f: BarrierFacts) => void) => {
+		const f: BarrierFacts = JSON.parse(JSON.stringify(FACTS));
+		mut(f);
+		ok(`judge rejects: ${label}`, !judgeBarrier(f, ARGS).ok);
+	};
+	ok("judge accepts the observed facts", judgeBarrier(FACTS, ARGS).ok);
+	forge("the initial identity uid_map", (f) => { f.uidMap = "         0          0 4294967295\n"; });
+	forge("the host's network namespace", (f) => { f.netns = `net:[${ARGS.hostNetns}]`; });
+	forge("an eth0 device", (f) => { f.netDev = (f.netDev ?? "h1\nh2\n") + "  eth0: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n"; });
+	forge("an IPv4 route via eth0", (f) => { f.route = "Iface\tDestination\tGateway\neth0\t00000000\t0101A8C0\t0003\n"; });
+	forge("a usable IPv6 default route", (f) => { f.ipv6Route = "00000000000000000000000000000000 00 00000000000000000000000000000000 00 fe800000000000000000000000000001 00000400 00000001 00000000 00000003 eth0\n"; });
+	forge("a socket from another namespace", (f) => { f.fds!.push({ fd: 9, target: "socket:[999999999]" }); });
+	forge("stdout on a host path", (f) => { f.fds = f.fds!.map((x) => (x.fd === 1 ? { fd: 1, target: "/home/elsewhere/log" } : x)); });
+	forge("an extra env key", (f) => { f.env.SSH_AUTH_SOCK = "/run/user/1000/agent"; });
+	forge("a different PATH", (f) => { f.env.PATH = `/run/wrappers/bin:${ARGS.bindir}`; });
+	forge("a PWD other than the repo", (f) => { f.env.PWD = ARGS.root; });
+	forge("a missing PWD", (f) => { delete f.env.PWD; });
+	forge("pnpm_config_pm_on_fail other than ignore", (f) => { f.env.pnpm_config_pm_on_fail = "download"; });
+	forge("a missing pnpm_config_pm_on_fail", (f) => { delete f.env.pnpm_config_pm_on_fail; });
+	forge("pnpm_config_verify_deps_before_run = install", (f) => { f.env.pnpm_config_verify_deps_before_run = "install"; });
+	forge("a missing pnpm_config_verify_deps_before_run", (f) => { delete f.env.pnpm_config_verify_deps_before_run; });
+	forge("an unexpected mount", (f) => { f.mounts.push({ point: path.join(ARGS.hostHome, ".ssh"), opts: "ro" }); });
+	forge("a writable repo mount", (f) => { f.mounts = f.mounts.map((m) => (m.point === ARGS.repo ? { ...m, opts: "rw,nosuid" } : m)); });
+	forge("repo data/ visible", (f) => { f.present.push(path.join(ARGS.repo, "data")); });
+	forge("other host home entries", (f) => { f.homeEntries = [...(f.homeEntries ?? []), ".ssh"]; });
+	forge("an FD enumeration that failed", (f) => { f.fds = null; });
+	forge("a readlink failure other than ENOENT", (f) => { f.fds!.push({ fd: 7, target: null, error: "EACCES" }); });
+	forge("a missing fd 1", (f) => { f.fds = f.fds!.filter((x) => x.fd !== 1); });
+	forge("stdout inside the run dir instead of the evidence dir", (f) => { f.fds = f.fds!.map((x) => (x.fd === 1 ? { fd: 1, target: path.join(ARGS.root, "x.log") } : x)); });
+	forge("the evidence dir visible inside", (f) => { f.present.push(ARGS.evidence); });
+}
+const G1_ACTIVE_OK = fail === failBefore;
+writeJson(path.join(ARGS.root, "g1-report.json"), {
+	static: STATIC,
+	active: { ok: G1_ACTIVE_OK, ipv4: v4, ipv6: v6, passed: pass, failed: fail - failBefore },
+	facts: sanitizedFacts(FACTS, ARGS),
+});
+if (!G1_ACTIVE_OK) {
+	writeJson(path.join(ARGS.root, "run-manifest.json"), { mode: ARGS.barrierOnly ? "barrier" : "full", g1: "active-failed", pass, fail });
+	console.log(`\nBARRIER-ACTIVE-FAILED — no fixture (${pass} passed, ${fail} failed)`);
+	process.exit(11);
+}
+if (ARGS.barrierOnly) {
+	writeJson(path.join(ARGS.root, "run-manifest.json"), { mode: "barrier", g1: "pass", pass, fail });
+	console.log(`\nBARRIER-OK (barrier-only; G2 not run) — ${pass} passed, ${fail} failed`);
+	process.exit(0);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// G2 — the FTS contract. Its modules load only now.
+// ═════════════════════════════════════════════════════════════════════════════
+const { VectorStore, ftsReady } = await import("./store.ts");
+const { fdinfoHoldsFlockWrite } = await import("./openclaw-lock.ts");
+const { OPENCLAW_FTS_PROTOCOL, OPENCLAW_FTS_HEALTHY_MARK } = await import("./openclaw-fts.ts");
+
+const REPO = ARGS.repo;
+const PROD_DATA = path.join(REPO, "data");
+const ROOT = path.join(ARGS.root, "fx");
+fs.mkdirSync(ROOT, { recursive: true });
+const CASES = path.join(ARGS.root, "cases");
+fs.mkdirSync(CASES, { recursive: true });
+let caseN = 0;
 
 interface Box { home: string; data: string; db: string; env: NodeJS.ProcessEnv }
 let boxN = 0;
@@ -83,8 +443,11 @@ function box(device = "thinkpad"): Box {
 	fs.writeFileSync(path.join(home, ".current-device"), `${device}\n`);
 	// NOSYSBASHRC: NixOS /etc/bashrc returns at once instead of re-running
 	// /etc/profile, which rewrites PATH (see `sh()` for why bash would read it).
-	const env: NodeJS.ProcessEnv = { HOME: home, PATH: process.env.PATH ?? "", LANG: "C.UTF-8", ANDENKEN_DATA: data, NOSYSBASHRC: "1" };
-	if (!data.startsWith(realRoot) && !data.startsWith(ROOT)) throw new Error("box data escaped the fixture root");
+	// A clean env per case: nothing inherited from the test process but PATH (the
+	// tool dir), and the same fixed pnpm literals G1 verified, so a child pnpm does
+	// not try to manage its own version or install dependencies again.
+	const env: NodeJS.ProcessEnv = { HOME: home, PATH: process.env.PATH ?? "", LANG: "C.UTF-8", ANDENKEN_DATA: data, NOSYSBASHRC: "1", pnpm_config_pm_on_fail: PNPM_PM_ON_FAIL, pnpm_config_verify_deps_before_run: PNPM_VERIFY_DEPS };
+	if (!data.startsWith(ROOT + "/")) throw new Error("box data escaped the fixture root");
 	return { home, data, db: path.join(data, "openclaw.lance"), env };
 }
 
@@ -102,7 +465,7 @@ function manifest(dir: string): string {
 	return crypto.createHash("sha256").update(lines.join("\n")).digest("hex");
 }
 
-interface Run { status: number | null; out: string; err: string }
+interface Run { status: number | null; out: string; err: string; base: string }
 /**
  * stdin is /dev/null on purpose. A spawnSync "pipe" is a socketpair, and bash
  * whose stdin is a socket assumes sshd started it and reads /etc/bashrc — on
@@ -112,8 +475,16 @@ interface Run { status: number | null; out: string; err: string }
  * that way. The publish legs add a per-call guard on top (`pub()`).
  */
 function sh(b: Box, script: string, extraEnv: NodeJS.ProcessEnv = {}): Run {
-	const r = spawnSync("bash", ["-c", script], { cwd: REPO, env: { ...b.env, ...extraEnv }, encoding: "utf-8", timeout: 120_000, stdio: ["ignore", "pipe", "pipe"] });
-	return { status: r.status, out: r.stdout ?? "", err: r.stderr ?? "" };
+	const n = String(++caseN).padStart(3, "0");
+	const base = path.join(CASES, `case-${n}`);
+	const env = { ...b.env, ...extraEnv, CASE_EXE: `${base}.exe` };
+	// Each case records which binaries its own shell resolves, before the script runs.
+	const exe = `{ for t in ssh rsync bash node; do printf '%s=%s\\n' "$t" "$(command -v "$t" || echo none)"; done; } > "$CASE_EXE"; `;
+	const r = spawnSync("bash", ["-c", exe + script], { cwd: REPO, env, encoding: "utf-8", timeout: 120_000, stdio: ["ignore", "pipe", "pipe"] });
+	fs.writeFileSync(`${base}.out`, r.stdout ?? "");
+	fs.writeFileSync(`${base}.err`, r.stderr ?? "");
+	writeJson(`${base}.json`, { n, script, envKeys: Object.keys(env).sort(), status: r.status, signal: r.signal, error: r.error ? String(r.error) : null });
+	return { status: r.status, out: r.stdout ?? "", err: r.stderr ?? "", base };
 }
 const LOCKED = (cmd: string) => `. scripts/lib/openclaw-lock.sh && openclaw_lock_acquire fixture && ${cmd}`;
 
@@ -385,10 +756,15 @@ try {
 	// stub ssh/rsync for the publish legs below
 	const stubs = path.join(ROOT, "stubs");
 	fs.mkdirSync(stubs, { recursive: true });
-	fs.writeFileSync(path.join(stubs, "rsync"), `#!/usr/bin/env bash\necho "rsync $*" >> "$CALLS"\nexit 0\n`, { mode: 0o755 });
+	// The stubs answer only the fixture host; any other destination is refused (98).
+	fs.writeFileSync(path.join(stubs, "rsync"), `#!/usr/bin/env bash
+echo "rsync $*" >> "$CALLS"
+case "\${@: -1}" in fixture.invalid:*) exit 0 ;; *) echo "rsync-stub: unexpected destination \${@: -1}" >> "$CALLS"; exit 98 ;; esac
+`, { mode: 0o755 });
 	fs.writeFileSync(path.join(stubs, "ssh"), `#!/usr/bin/env bash
 cmd="\${@: -1}"
 echo "ssh $cmd" >> "$CALLS"
+[ "$1" = "fixture.invalid" ] || { echo "ssh-stub: unexpected host $1" >> "$CALLS"; exit 98; }
 case "$cmd" in
   *"fts:openclaw --protocol"*)
     case "\${PROTO:-modern}" in
@@ -410,19 +786,22 @@ esac
 `, { mode: 0o755 });
 	{
 		const probeBox = box();
-		const pr = sh(probeBox, `${"[ \"$(command -v ssh)\" = \""}${stubs}/ssh" ] && [ "$(command -v rsync)" = "${stubs}/rsync" ] && echo STUBBED`, { PATH: `${stubs}:${probeBox.env.PATH}` });
+		const pr = sh(probeBox, `[ "$(command -v ssh)" = "${stubs}/ssh" ] && [ "$(command -v rsync)" = "${stubs}/rsync" ] && echo STUBBED`, { PATH: `${stubs}:${probeBox.env.PATH}` });
 		if (!pr.out.includes("STUBBED")) throw new Error(`ssh/rsync do not resolve to the stubs in the test shell — refusing to run any publish leg (${pr.out}${pr.err})`);
-		ok("network guard: ssh and rsync resolve to the stubs in the test shell", true);
+		ok("stub routing (emulation layer, not the barrier): ssh and rsync resolve to the stubs", true);
 	}
-	// NETWORK GUARD. Every publish leg runs only after the SAME shell proved that
-	// `ssh` and `rsync` resolve to the stubs; otherwise it exits 97 before the
-	// script starts. And before any leg, one probe must pass or the run aborts.
+	// Stub routing guard (hygiene on top of the G1 barrier, not a substitute for
+	// it): every publish leg runs only after the SAME shell resolved `ssh` and
+	// `rsync` to the stubs, else it exits 97 before the script starts.
 	const NET_GUARD = `[ "$(command -v ssh)" = "${stubs}/ssh" ] && [ "$(command -v rsync)" = "${stubs}/rsync" ] || { echo "NET-GUARD: ssh/rsync are not the stubs" >&2; exit 97; }`;
 	const pub = (b: Box, flags: string, env: NodeJS.ProcessEnv = {}, wrap = (c: string) => c) => {
 		const calls = path.join(ROOT, `calls-${crypto.randomBytes(4).toString("hex")}`);
 		fs.writeFileSync(calls, "");
-		const r = sh(b, `${NET_GUARD}; ${wrap(`bash scripts/sync-openclaw-to-oracle.sh ${flags}`)}`, { PATH: `${stubs}:${b.env.PATH}`, CALLS: calls, ...env });
+		const r = sh(b, `${NET_GUARD}; ${wrap(`bash scripts/sync-openclaw-to-oracle.sh --host fixture.invalid ${flags}`)}`, { PATH: `${stubs}:${b.env.PATH}`, CALLS: calls, ...env });
 		if (r.status === 97) throw new Error(`network guard tripped — aborting before a real ssh/rsync could run: ${r.err}`);
+		// The stub argv log is evidence of what the publish asked for: keep it with
+		// the case (cases/ survives a passing run; fx/ does not).
+		fs.copyFileSync(calls, `${r.base}.calls`);
 		const log = fs.readFileSync(calls, "utf-8").split("\n").filter(Boolean);
 		return { ...r, rsync: log.filter((l) => l.startsWith("rsync")).length, ssh: log.filter((l) => l.startsWith("ssh")), log };
 	};
@@ -591,12 +970,14 @@ esac
 		const comp = runsh.slice(runsh.indexOf("  compact)"), runsh.indexOf("  cleanup)"));
 		ok("run.sh compact openclaw: lock before the node --import tsx launch", comp.indexOf("openclaw_lock_acquire") >= 0 && comp.indexOf("openclaw_lock_acquire") < comp.indexOf("node --import tsx indexer.ts compact openclaw"));
 	}
+} catch (err) {
+	ok("G2 ran to completion", false, err instanceof Error ? err.stack ?? err.message : String(err));
 } finally {
 	for (const k of killers) { try { k.kill(); } catch {} }
-	const after = prodShape();
-	ok("production data/openclaw.lance, its lock, watermark and staging: metadata unchanged by this run", after === PROD_BEFORE);
-	fs.rmSync(ROOT, { recursive: true, force: true });
 }
 
-console.log(`\n${pass} passed, ${fail} failed`);
+// Production metadata is audited by the launcher, outside: data/ is not visible here.
+writeJson(path.join(ARGS.root, "run-manifest.json"), { mode: "full", g1: "pass", pass, fail, cases: caseN, fixturesKept: fail !== 0 });
+if (fail === 0) fs.rmSync(ROOT, { recursive: true, force: true });
+console.log(`\n${pass} passed, ${fail} failed${fail ? ` — run dir kept: ${ARGS.root}` : ""}`);
 process.exit(fail === 0 ? 0 : 1);

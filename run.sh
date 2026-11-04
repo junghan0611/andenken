@@ -194,7 +194,13 @@ Usage: ./run.sh <command> [args]
   test:corpus                 Fixture tests for corpus-backed device discovery (API 0)
   test:split                  Fixture tests for long-turn embedding split (API 0)
   test:openclaw               Fixture tests for the OpenClaw harvest, reconcile, prune,
-                              FTS index and harvest lock (API 0)
+                              FTS index and harvest lock (API 0, no ~/.env.local). The
+                              FTS test runs only inside a bwrap user/net/pid namespace
+                              barrier; no bwrap → exit 3, nothing runs on the host
+  test:openclaw-fts:barrier [--expect-head SHA]
+                              Prove that barrier only (G0 + G1: namespaces, mounts,
+                              descriptors, env, no route out); the FTS fixtures (G2)
+                              are not run. Run dirs: ~/.local/state/andenken/fixture-runs/
   test:absent                 Fixture tests for the absent-axis invariant — a read never creates (API 0)
   test:parity                 Credential regex parity: python ↔ typescript (API 0)
   test:diagnostics            Type fence (tsconfig.diagnostics.json) + tests for the
@@ -450,10 +456,14 @@ case "${1:-help}" in
   test:split)
     cd "$SCRIPT_DIR" && pnpm exec tsx session-split.test.ts ;;
   test:openclaw)
-    load_env; cd "$SCRIPT_DIR" && pnpm exec tsx openclaw-import.test.ts \
+    # API 0: no load_env, so no ~/.env.local reaches any of these tests. The FTS
+    # test runs only inside the namespace barrier (scripts/test-openclaw-fts-sandboxed.sh).
+    cd "$SCRIPT_DIR" && pnpm exec tsx openclaw-import.test.ts \
       && pnpm exec tsx openclaw-reconcile.test.ts \
       && pnpm exec tsx openclaw-prune.test.ts \
-      && pnpm exec tsx openclaw-fts.test.ts ;;
+      && bash scripts/test-openclaw-fts-sandboxed.sh ;;
+  test:openclaw-fts:barrier)
+    shift; cd "$SCRIPT_DIR" && bash scripts/test-openclaw-fts-sandboxed.sh --barrier-only "$@" ;;
   test:absent)
     cd "$SCRIPT_DIR" && pnpm exec tsx axis-absent.test.ts ;;
   test:parity)
