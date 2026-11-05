@@ -23,6 +23,8 @@ import {
   DEFAULT_CONCURRENCY,
   type EmbeddingProvider,
 } from "./embedding-provider.js";
+import { rateLimitSliceSize, withRateLimitRetry } from "./embed-retry.js";
+import { finalizeIndexRun, formatApiSummary } from "./index-finalize.js";
 import { VectorStore, getSessionsDbPath, getOrgDbPath, getMdDbPath, getOpenclawDbPath, getDataDir, describeAxisAbsence, ftsReady } from "./store.js";
 import { describeFtsHealth, OPENCLAW_FTS_HEALTHY_MARK } from "./openclaw-fts.js";
 import { assertOpenclawWriteLock, OpenclawLockRefused } from "./openclaw-lock.js";
@@ -512,9 +514,9 @@ class Progress {
     );
   }
 
-  summary(): string {
+  summary(ok = true): string {
     const elapsed = ((Date.now() - this.t0) / 1000).toFixed(1);
-    return `✅ ${this.label}: ${this.chunks} chunks | ${this.errors} errors | ${elapsed}s | concurrency=${CONCURRENCY}`;
+    return `${ok ? "✅" : "⚠"} ${this.label}: ${this.chunks} chunks | ${this.errors} errors | ${elapsed}s | concurrency=${CONCURRENCY}`;
   }
 }
 
@@ -637,6 +639,10 @@ async function indexSessions(force: boolean) {
 
   const progress = new Progress(toIndex.length, "Sessions");
   const wb = new WriteBuffer(store, DB_WRITE_BATCH);
+  // 429 rescheduling (embed-retry.ts) over slices of the provider's own configured
+  // batch size; without one the provider is used as before, never a guessed size.
+  const sliceSize = rateLimitSliceSize(provider);
+  const embedder = sliceSize !== null ? withRateLimitRetry(provider, sliceSize) : null;
   const CHECKPOINT_INTERVAL = 100;
   let filesProcessed = 0;
 
@@ -701,7 +707,7 @@ async function indexSessions(force: boolean) {
         return;
       }
 
-      const vectors = await provider.embedDocumentBatch(
+      const vectors = await (embedder ?? provider).embedDocumentBatch(
         chunks.map((c) => c.text),
       );
       // wb.add() auto-deletes existing rows for this file before re-inserting,
@@ -720,23 +726,34 @@ async function indexSessions(force: boolean) {
     }
   });
 
-  const { errors: sessionErrors } = await runWithConcurrency(tasks, CONCURRENCY);
-  await wb.flush(); // final flush
-  persist(); // final persist (ledger, then manifest)
-  if (ledger) console.log(`🛡 S0 held this run: ${heldThisRun} chunks (ledger total ${ledger.count}; ids and kinds only)`);
-  if (sessionErrors > 0) {
-    throw new Error(`Session indexing failed for ${sessionErrors} files`);
-  }
-
-  try {
-    await store.createFtsIndex();
-  } catch {}
-  const total = await store.getCount();
-  const stats = provider.getStats();
-  console.log(progress.summary());
-  console.log(`💰 API: ${stats.calls} calls, ~${(stats.estimatedTokens / 1000).toFixed(0)}K tokens, ~$${stats.estimatedCostUSD.toFixed(3)}`);
-  console.log(`Total in DB: ${total}`);
-  await store.close();
+  // index-finalize.ts: final flush → persist (ledger, then manifest) → summary on
+  // every outcome → close; failed files still make the run fail (non-zero exit).
+  let total: number | null = null;
+  await finalizeIndexRun({
+    label: "Session",
+    run: () => runWithConcurrency(tasks, CONCURRENCY),
+    flush: () => wb.flush(),
+    persist: () => {
+      persist();
+      if (ledger) console.log(`🛡 S0 held this run: ${heldThisRun} chunks (ledger total ${ledger.count}; ids and kinds only)`);
+    },
+    onSuccess: async () => {
+      try {
+        await store.createFtsIndex();
+      } catch {}
+      total = await store.getCount();
+    },
+    summary: (o) => [
+      progress.summary(o.ok),
+      ...formatApiSummary(
+        provider.getStats(),
+        embedder ? { kind: "on", telemetry: embedder.telemetry } : { kind: "off", why: "provider has no configured native batch size" },
+      ),
+      ...(total !== null ? [`Total in DB: ${total}`] : []),
+    ],
+    log: (line) => console.log(line),
+    close: () => store.close(),
+  });
 }
 
 // --- pi-durable snapshots (issue #15) ---
@@ -1017,24 +1034,28 @@ async function indexMd(force: boolean) {
     }
   });
 
-  const { errors: mdErrors } = await runWithConcurrency(tasks, CONCURRENCY);
-  await wb.flush();
-  saveMdManifest(manifest);
-  if (mdErrors > 0) {
-    throw new Error(`MD indexing failed for ${mdErrors} files`);
-  }
-
-  try {
-    await store.createFtsIndex();
-  } catch {}
-  const total = await store.getCount();
-  const stats = provider.getStats();
-  console.log(progress.summary());
-  console.log(
-    `💰 API: ${stats.calls} calls, ~${(stats.estimatedTokens / 1000).toFixed(0)}K tokens, ~$${stats.estimatedCostUSD.toFixed(3)}`,
-  );
-  console.log(`Total in DB: ${total}`);
-  await store.close();
+  // Same finalization seam as sessions (summary on every outcome); md has no
+  // 429 rescheduling.
+  let total: number | null = null;
+  await finalizeIndexRun({
+    label: "MD",
+    run: () => runWithConcurrency(tasks, CONCURRENCY),
+    flush: () => wb.flush(),
+    persist: () => saveMdManifest(manifest),
+    onSuccess: async () => {
+      try {
+        await store.createFtsIndex();
+      } catch {}
+      total = await store.getCount();
+    },
+    summary: (o) => [
+      progress.summary(o.ok),
+      ...formatApiSummary(provider.getStats(), { kind: "off", why: "not applied to md" }),
+      ...(total !== null ? [`Total in DB: ${total}`] : []),
+    ],
+    log: (line) => console.log(line),
+    close: () => store.close(),
+  });
 }
 
 // --- Org Indexing ---

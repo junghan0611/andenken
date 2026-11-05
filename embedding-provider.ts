@@ -14,11 +14,32 @@
 // --- Interface ---
 
 export interface EmbeddingStats {
+  /**
+   * Provider calls: one per request this provider was asked to make, a
+   * caller's resubmission included. Not a count of unique requests.
+   */
   calls: number;
+  /** Submitted-input estimate (chars / 2.5) over those calls. Not provider usage, not a bill. */
   estimatedTokens: number;
   estimatedCostUSD: number; // 0 for local providers; computed from tokens × price for paid
   /** PR-B: true when the provider talks to a paid remote endpoint. */
   paidRemote?: boolean;
+  /**
+   * Transport counters (VLLMProvider; absent elsewhere). `httpAttempts` counts
+   * every fetch started, the provider's own transport retries included;
+   * `httpOk` returned vectors, `httpFailed` did not.
+   */
+  httpAttempts?: number;
+  httpOk?: number;
+  httpFailed?: number;
+  /**
+   * Provider-reported `usage.prompt_tokens`, summed over the ok attempts that
+   * carried it (`okWithUsage`). `okWithoutUsage` ok attempts reported none:
+   * their tokens are unknown, not zero.
+   */
+  reportedPromptTokens?: number;
+  okWithUsage?: number;
+  okWithoutUsage?: number;
 }
 
 export interface EmbeddingProvider {
@@ -213,6 +234,172 @@ export function parseRetryAfterMs(value: string | null, nowMs: number = Date.now
   return Math.min(ms, 3_600_000);
 }
 
+// --- Provider error diagnostics (bounded, allowlisted) ---
+//
+// At most PROVIDER_ERROR_BODY_LIMIT bytes of a non-2xx body are kept for
+// parsing; the stream is then cancelled (never drained). Only allowlisted fields are
+// kept: error.code / error.type / error.metadata.provider_name and, for an
+// upstream error wrapped as "HTTP NNN: {json}", its status, code and type.
+// Free-form text (messages, raw upstream bodies, URLs) is never kept or logged.
+// Each kept value must pass `diagnosticToken` — a shape rule plus a configured-key
+// overlap check. That lowers, but does not prove away, the chance of a secret
+// surviving; it is why only these few fields are read at all.
+
+export const PROVIDER_ERROR_BODY_LIMIT = 4096;
+
+export interface ProviderErrorMeta {
+  status: number;
+  retryAfterMs?: number;
+  /** What became of the body. Never the body itself. */
+  body: "empty" | "parsed" | "unparsed" | "truncated" | "read-error";
+  code?: string;
+  type?: string;
+  providerName?: string;
+  upstreamStatus?: number;
+  upstreamCode?: string;
+  upstreamType?: string;
+  /** Allowlisted fields present but refused by the value rule. */
+  dropped?: number;
+}
+
+export type BoundedBody = { text: string; state: "empty" | "complete" | "truncated" | "read-error" };
+
+/**
+ * Keep at most `limit` bytes of a response body for parsing, then cancel the
+ * stream. Reaching the limit ends the read at once — no further read() is
+ * awaited, so a body that stops sending without closing cannot hold it — and
+ * is reported as "truncated" even when the body was exactly `limit` bytes.
+ * The limit bounds what is kept and parsed; it is not a strict cap on what the
+ * transport may already have received (a fetch chunk can be larger).
+ */
+export async function readBoundedBody(res: Response, limit: number = PROVIDER_ERROR_BODY_LIMIT): Promise<BoundedBody> {
+  const stream = res.body;
+  if (!stream) return { text: "", state: "empty" };
+  const reader = stream.getReader();
+  const parts: Uint8Array[] = [];
+  let size = 0;
+  let state: BoundedBody["state"] = "complete";
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const room = limit - size;
+      if (value.byteLength >= room) {
+        parts.push(value.subarray(0, room));
+        size = limit;
+        state = "truncated";
+        break;
+      }
+      parts.push(value);
+      size += value.byteLength;
+    }
+  } catch {
+    state = "read-error";
+  } finally {
+    // Release the connection without reading the rest.
+    void reader.cancel().catch(() => {});
+  }
+  if (state === "read-error") return { text: "", state };
+  if (size === 0 && state === "complete") return { text: "", state: "empty" };
+  const buf = new Uint8Array(size);
+  let off = 0;
+  for (const p of parts) {
+    buf.set(p, off);
+    off += p.byteLength;
+  }
+  return { text: new TextDecoder().decode(buf), state };
+}
+
+const DIAGNOSTIC_TOKEN = /^[A-Za-z0-9._:/ -]{1,64}$/;
+
+/**
+ * A value fit for an allowlisted diagnostic field, `undefined` when absent, or
+ * `null` when refused: not a short plain token, URL- or credential-shaped,
+ * containing the whole configured key (any length), or sharing any
+ * 8-character run with it.
+ */
+export function diagnosticToken(v: unknown, secret?: string): string | undefined | null {
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== "string" && !(typeof v === "number" && Number.isFinite(v))) return null;
+  const s = String(v);
+  if (!DIAGNOSTIC_TOKEN.test(s)) return null;
+  if (s.includes("://")) return null;
+  if (/bearer|^sk[-_]|api[-_]?key|secret|password/i.test(s)) return null;
+  if (/[A-Za-z0-9]{24,}/.test(s)) return null;
+  if (secret && s.includes(secret)) return null;
+  if (secret && secret.length >= 8) {
+    for (let i = 0; i + 8 <= s.length; i++) {
+      if (secret.includes(s.slice(i, i + 8))) return null;
+    }
+  }
+  return s;
+}
+
+function asRecord(v: unknown): Record<string, unknown> | undefined {
+  return v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
+}
+
+/** Reduce a bounded body to allowlisted fields. Parse failure or truncation keeps the state only. */
+export function extractProviderErrorMeta(
+  status: number,
+  retryAfterMs: number | undefined,
+  read: BoundedBody,
+  secret?: string,
+): ProviderErrorMeta {
+  const meta: ProviderErrorMeta = { status, body: read.state === "complete" ? "unparsed" : read.state };
+  if (retryAfterMs !== undefined) meta.retryAfterMs = retryAfterMs;
+  if (read.state !== "complete") return meta;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(read.text);
+  } catch {
+    return meta;
+  }
+  const err = asRecord(asRecord(parsed)?.error);
+  meta.body = "parsed";
+  if (!err) return meta;
+  let dropped = 0;
+  const keep = (field: "code" | "type" | "providerName" | "upstreamCode" | "upstreamType", v: unknown) => {
+    const t = diagnosticToken(v, secret);
+    if (t === null) dropped++;
+    else if (t !== undefined) meta[field] = t;
+  };
+  keep("code", err.code);
+  keep("type", err.type);
+  keep("providerName", asRecord(err.metadata)?.provider_name);
+  if (typeof err.message === "string") {
+    const wrapped = /^HTTP (\d{3}): (\{[\s\S]*\})$/.exec(err.message);
+    if (wrapped) {
+      meta.upstreamStatus = Number(wrapped[1]);
+      try {
+        const inner = asRecord(asRecord(JSON.parse(wrapped[2]))?.error);
+        if (inner) {
+          keep("upstreamCode", inner.code);
+          keep("upstreamType", inner.type);
+        }
+      } catch { /* upstream JSON unparsable: status only */ }
+    }
+  }
+  if (dropped > 0) meta.dropped = dropped;
+  return meta;
+}
+
+/** `key=value` rendering of the allowlisted fields (status is in the message prefix). */
+export function formatProviderErrorMeta(m: ProviderErrorMeta): string {
+  const q = (s: string) => (s.includes(" ") ? JSON.stringify(s) : s);
+  const parts = [`body=${m.body}`];
+  if (m.type !== undefined) parts.push(`type=${q(m.type)}`);
+  if (m.code !== undefined) parts.push(`code=${q(m.code)}`);
+  if (m.providerName !== undefined) parts.push(`provider=${q(m.providerName)}`);
+  if (m.upstreamStatus !== undefined) {
+    const up = [String(m.upstreamStatus), m.upstreamType, m.upstreamCode].filter((x): x is string => x !== undefined);
+    parts.push(`upstream=${up.map(q).join("/")}`);
+  }
+  if (m.retryAfterMs !== undefined) parts.push(`retry-after=${m.retryAfterMs}ms`);
+  if (m.dropped !== undefined) parts.push(`dropped=${m.dropped}`);
+  return parts.join(" ");
+}
+
 export class VLLMProvider implements EmbeddingProvider {
   readonly name: string;
   private _dimensions: number;
@@ -220,6 +407,12 @@ export class VLLMProvider implements EmbeddingProvider {
   private config: VLLMProviderConfig;
   private _calls = 0;
   private _tokenEstimate = 0;
+  private _httpAttempts = 0;
+  private _httpOk = 0;
+  private _httpFailed = 0;
+  private _reportedPromptTokens = 0;
+  private _okWithUsage = 0;
+  private _okWithoutUsage = 0;
   private _healthy: boolean | null = null; // null = unknown
   private _paidRemote: boolean;
   private _pricePerM: number;
@@ -256,6 +449,19 @@ export class VLLMProvider implements EmbeddingProvider {
    */
   get isPaidRemote(): boolean {
     return this._paidRemote;
+  }
+
+  /**
+   * The batch size this provider was configured with (preset or
+   * `*_MAX_BATCH_SIZE`), when it is a positive integer. embedDocumentBatch()
+   * sends at most this many inputs per embed() call, so a caller handing it
+   * slices of this size makes one embed() call per slice (one call may still
+   * make several HTTP attempts on 5xx/network). Undefined when not configured —
+   * callers must not guess a size.
+   */
+  get configuredMaxBatchSize(): number | undefined {
+    const v = this.config.maxBatchSize;
+    return typeof v === "number" && Number.isInteger(v) && v > 0 ? v : undefined;
   }
 
   private nextEndpoint(): string {
@@ -359,12 +565,24 @@ export class VLLMProvider implements EmbeddingProvider {
       estimatedTokens: this._tokenEstimate,
       estimatedCostUSD: cost,
       paidRemote: this._paidRemote,
+      httpAttempts: this._httpAttempts,
+      httpOk: this._httpOk,
+      httpFailed: this._httpFailed,
+      reportedPromptTokens: this._reportedPromptTokens,
+      okWithUsage: this._okWithUsage,
+      okWithoutUsage: this._okWithoutUsage,
     } as EmbeddingStats & { paidRemote: boolean };
   }
 
   resetStats(): void {
     this._calls = 0;
     this._tokenEstimate = 0;
+    this._httpAttempts = 0;
+    this._httpOk = 0;
+    this._httpFailed = 0;
+    this._reportedPromptTokens = 0;
+    this._okWithUsage = 0;
+    this._okWithoutUsage = 0;
   }
 
   // --- Internal ---
@@ -405,6 +623,7 @@ export class VLLMProvider implements EmbeddingProvider {
           this.config.timeoutMs ??
           (Number.isFinite(envTimeout) && envTimeout > 0 ? envTimeout : 30000);
         const timeout = setTimeout(() => controller.abort(), timeoutMs);
+        this._httpAttempts++;
         const res = await fetch(url, {
           method: "POST",
           headers,
@@ -414,21 +633,35 @@ export class VLLMProvider implements EmbeddingProvider {
         clearTimeout(timeout);
 
         if (!res.ok) {
-          const errBody = await res.text();
-          const errMsg = `vLLM embed (${res.status}): ${errBody.slice(0, 200)}`;
+          const retryAfterMs = parseRetryAfterMs(res.headers.get("retry-after"));
+          const providerMeta = extractProviderErrorMeta(
+            res.status,
+            retryAfterMs,
+            await readBoundedBody(res),
+            this.config.apiKey,
+          );
+          // The message carries allowlisted fields only — never body text.
+          // The "vLLM embed (NNN):" prefix is a contract (candidate-build's
+          // providerErrorCode reads the status from it).
+          const errMsg = `vLLM embed (${res.status}): ${formatProviderErrorMeta(providerMeta)}`;
           // Structured hints for callers that schedule their own retries (the
-          // candidate builder); this provider's own retry behaviour is unchanged.
-          const hints = { status: res.status, retryAfterMs: parseRetryAfterMs(res.headers.get("retry-after")) };
-          // 4xx = client error, non-retryable (bad request, model not found, etc.)
+          // candidate builder, embed-retry.ts); this provider's own retry
+          // behaviour is unchanged.
+          const hints = { status: res.status, retryAfterMs, providerMeta };
+          // 4xx: `nonRetryable` makes THIS provider's transport retry loop below
+          // let the error through at once. It is not a verdict that the failure
+          // is permanent — a 429 leaves here immediately, and whether to
+          // resubmit is the caller's decision, made on `status`.
           if (res.status >= 400 && res.status < 500) {
             throw Object.assign(new Error(errMsg), { nonRetryable: true }, hints);
           }
-          // 5xx = server error, retryable
+          // 5xx = server error, retried by the loop below
           throw Object.assign(new Error(errMsg), hints);
         }
 
         const data = (await res.json()) as {
           data: Array<{ embedding: number[]; index: number }>;
+          usage?: { prompt_tokens?: unknown };
         };
 
         if (!data.data || data.data.length === 0) {
@@ -444,8 +677,17 @@ export class VLLMProvider implements EmbeddingProvider {
           process.stderr.write(`📡 vLLM auto-detected ${this._dimensions}d\n`);
         }
 
+        this._httpOk++;
+        const reported = data.usage?.prompt_tokens;
+        if (typeof reported === "number" && Number.isInteger(reported) && reported >= 0) {
+          this._reportedPromptTokens += reported;
+          this._okWithUsage++;
+        } else {
+          this._okWithoutUsage++;
+        }
         return sorted.map((d) => d.embedding);
       } catch (err) {
+        this._httpFailed++;
         const msg = err instanceof Error ? err.message : String(err);
         // Node.js fetch wraps network errors as TypeError with cause
         const causeMsg = (err as { cause?: { message?: string } })?.cause?.message ?? "";

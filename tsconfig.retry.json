@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "allowImportingTsExtensions": true
+  },
+  "include": [
+    "embedding-provider.ts", "embed-retry.ts", "index-finalize.ts", "model-presets.ts",
+    "embed-retry.test.ts"
+  ],
+  "exclude": ["node_modules"]
+}

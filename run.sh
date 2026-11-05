@@ -210,6 +210,10 @@ Usage: ./run.sh <command> [args]
                               full-text leg diagnostics (store, md core, CLI/pi report
                               fields) and the table-shape report vocabulary (API 0,
                               synthetic temp LanceDB, no optimize is run)
+  test:retry                  Type fence (tsconfig.retry.json) + synthetic suite for the
+                              sessions 429 rescheduler, provider error diagnostics and
+                              the index-run finalization seam (API 0: fetch stubbed,
+                              fake clock, temp HOME/ANDENKEN_DATA, no ~/.env.local)
 
 === Session corpus (~/repos/gh/session) ===
   corpus:gather [--dry-run] [--strict] [--checkpoint]
@@ -487,6 +491,11 @@ case "${1:-help}" in
   test:diagnostics)
     cd "$SCRIPT_DIR" && pnpm exec tsc -p tsconfig.diagnostics.json \
       && pnpm exec tsx store-fts-diagnostics.test.ts && pnpm exec tsx table-shape.test.ts ;;
+  test:retry)
+    # API 0: no load_env; the suite stubs fetch, swaps HOME for a temp dir and
+    # removes credential-shaped env names from its own process before any test.
+    cd "$SCRIPT_DIR" && node node_modules/typescript/bin/tsc -p tsconfig.retry.json \
+      && node --import tsx embed-retry.test.ts ;;
 
   # === Session corpus ===
   corpus:gather)
