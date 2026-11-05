@@ -197,10 +197,13 @@ Usage: ./run.sh <command> [args]
                               FTS index and harvest lock (API 0, no ~/.env.local). The
                               FTS test runs only inside a bwrap user/net/pid namespace
                               barrier; no bwrap → exit 3, nothing runs on the host
-  test:openclaw-fts:barrier [--expect-head SHA]
+  test:openclaw-fts:barrier [--expect-head SHA] [--deps-from DIR]
                               Prove that barrier only (G0 + G1: namespaces, mounts,
                               descriptors, env, no route out); the FTS fixtures (G2)
                               are not run. Run dirs: ~/.local/state/andenken/fixture-runs/
+                              --deps-from: run this checkout against the node_modules
+                              of the installed checkout DIR (same lock); only DIR's
+                              node_modules is bound, read-only; nothing else of DIR
   test:absent                 Fixture tests for the absent-axis invariant — a read never creates (API 0)
   test:parity                 Credential regex parity: python ↔ typescript (API 0)
   test:diagnostics            Type fence (tsconfig.diagnostics.json) + tests for the
@@ -426,7 +429,20 @@ case "${1:-help}" in
   cleanup)
     shift; load_env; cd "$SCRIPT_DIR" && run_pinned pnpm exec tsx indexer.ts cleanup "${1:-org}" "${@:2}" ;;
   verify)
-    shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts verify "${1:-all}" "${@:2}" ;;
+    # verify openclaw, and any verify with the exact token --require-fts anywhere
+    # in its arguments (the target slot included), launch with `node --import tsx`
+    # like the openclaw writers; no package manager runs on that path. The
+    # arguments reach indexer.ts unchanged and in order, so its validators
+    # (unknown argument, unknown target, --require-fts on another track) remain
+    # the only judge of validity and of the exit code. Every other verify keeps
+    # its pnpm exec tsx launch.
+    shift; load_env; cd "$SCRIPT_DIR" || exit 1
+    VERIFY_RUNNER=(pnpm exec tsx)
+    if [ "${1:-all}" = "openclaw" ]; then VERIFY_RUNNER=(node --import tsx); fi
+    for a in "$@"; do
+      if [ "$a" = "--require-fts" ]; then VERIFY_RUNNER=(node --import tsx); fi
+    done
+    "${VERIFY_RUNNER[@]}" indexer.ts verify "${1:-all}" "${@:2}" ;;
   status)
     load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts status ;;
   status:json)
@@ -682,9 +698,10 @@ case "${1:-help}" in
   fts:openclaw)
     # Build the BM25 index of an existing openclaw.lance that lacks it. --check and
     # --protocol only read (no lock, no write); the build takes the harvest lock.
+    # All three launch with `node --import tsx`; no package manager runs here.
     shift; load_env; cd "$SCRIPT_DIR" || exit 1
     case " $* " in
-      *" --check "*|*" --protocol "*) pnpm exec tsx openclaw-fts.ts "$@" ;;
+      *" --check "*|*" --protocol "*) node --import tsx openclaw-fts.ts "$@" ;;
       *) . scripts/lib/openclaw-lock.sh
          openclaw_lock_acquire "fts:openclaw"
          node --import tsx openclaw-fts.ts "$@" ;;

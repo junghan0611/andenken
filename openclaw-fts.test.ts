@@ -19,9 +19,10 @@
  *     namespace's AF_UNIX table, stdio in the run dir), the exact env allow-list,
  *     and no host HOME content, /etc, /run, repo data/ or .git visible;
  *   active (exit 11): a TCP connect to TEST-NET-1 must fail ENETUNREACH (IPv6 is
- *     labelled, not over-claimed); ssh/rsync are not on PATH; positive controls
- *     (bash under a socket stdin keeps PATH, node --import tsx, pnpm exec tsx,
- *     flock + fdinfo, a LanceDB native table, run-dir writes); and the pure
+ *     labelled, not over-claimed); neither ssh/rsync nor a package manager is on
+ *     PATH; positive controls (bash under a socket stdin keeps PATH, node
+ *     --import tsx, flock + fdinfo, a LanceDB native table — and that the package
+ *     and the one native it mapped are 0.40.x — run-dir writes); and the pure
  *     judge must reject forged facts. No negative is ever run on the host.
  * --barrier-only stops after G1 with exit 0; G2 is not reached.
  *
@@ -58,6 +59,7 @@ import * as zlib from "node:zlib";
 import * as crypto from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 // ═════════════════════════════════════════════════════════════════════════════
 // G1 — the barrier judge: pure, then the facts it reads, then the entry.
@@ -76,7 +78,8 @@ export interface BarrierFacts {
 	/** null when /proc/self/fd could not be enumerated; `target` null + `error` when a readlink failed other than ENOENT. */
 	fds: Array<{ fd: number; target: string | null; error?: string }> | null;
 	env: Record<string, string>;
-	mounts: Array<{ point: string; opts: string }>;
+	/** `root` is mountinfo field 4: the bound source's path inside its filesystem. */
+	mounts: Array<{ point: string; opts: string; root: string }>;
 	/** Paths that must not exist and do. */
 	present: string[];
 	/** Entries of the host home and the repo's parent (they may hold only the bind skeleton). */
@@ -90,29 +93,32 @@ export interface BarrierFacts {
 export interface Verdict { ok: boolean; failures: string[]; notes: string[] }
 
 /**
- * The runtime env allow-list. The launcher sets six keys (HOME, LANG,
- * NOSYSBASHRC, PATH, pnpm_config_pm_on_fail, pnpm_config_verify_deps_before_run);
- * the seventh, PWD, appears at
- * runtime — observed in the 2026-11-04 15:48 barrier run, its setter unmeasured
- * (bwrap's --chdir is the hypothesis). PWD is accepted only when it equals the
- * read-only repo path the launcher chdirs to.
+ * The runtime env allow-list. The launcher sets four keys (HOME, LANG,
+ * NOSYSBASHRC, PATH); the fifth, PWD, appears at runtime — observed in the
+ * 2026-11-04 15:48 barrier run, its setter unmeasured (bwrap's --chdir is the
+ * hypothesis). PWD is accepted only when it equals the read-only repo path the
+ * launcher chdirs to. Any other key fails.
  *
- * pnpm_config_pm_on_fail=ignore: in the 15:57 run `pnpm exec` (pnpm 11.20.0
- * against packageManager pnpm@10.33.0) failed with EROFS writing a `_tmp_*` file
- * into the read-only repo. The pnpm 11 bundle reads this setting from the
- * `pnpm_config_` env prefix and, on `ignore`, does not try to switch to the
- * declared version. That this is the only cause is not proven. The value must be
- * exactly `ignore`; missing, any other value, or any other extra key fails.
- *
- * pnpm_config_verify_deps_before_run=warn: a preventive literal for the one
- * other install path the same bundle has before `exec` — a dependency-status
- * check that installs on mismatch by default and only warns on `warn`. That
- * path was not observed to fire. `warn` keeps the check (it is not `false`); the
- * value must be exactly `warn`, else the run fails.
+ * No package-manager key. Earlier revisions set two pnpm_config_ literals after
+ * `pnpm exec` (pnpm 11.20.0 against packageManager pnpm@10.33.0) started an
+ * install child that failed with EROFS on a `_tmp_*` file in the read-only repo
+ * (2026-11-04 run3). The doors this test drives no longer launch through pnpm:
+ * `run.sh verify openclaw`, any verify carrying `--require-fts`, and
+ * `fts:openclaw --check/--protocol` use `node --import tsx` like the writers, and
+ * pnpm is not in the tool directory (PATH). A pnpm_config_ key is therefore an
+ * extra key, and a door that still called pnpm by name fails (not found)
+ * instead of installing. Not claimed: that a package manager is unreachable —
+ * /nix/store is bound whole, so an absolute store path is not blocked.
  */
-export const PNPM_PM_ON_FAIL = "ignore";
-export const PNPM_VERIFY_DEPS = "warn";
-const ENV_KEYS = ["HOME", "LANG", "NOSYSBASHRC", "PATH", "PWD", "pnpm_config_pm_on_fail", "pnpm_config_verify_deps_before_run"];
+const ENV_KEYS = ["HOME", "LANG", "NOSYSBASHRC", "PATH", "PWD"];
+/**
+ * The CPU set the launcher starts the sandbox on (`taskset -c 0-1`). It is an
+ * inherited affinity, not a cgroup limit: a child may widen it, and run.sh
+ * run_pinned would taskset a compact to its production default 0-3. So G1
+ * requires exactly this set, and every case pins its own taskset children to
+ * it through ANDENKEN_COMPACT_CPUS (box()). Not a hard cap.
+ */
+const SANDBOX_CPUS = "0-1";
 const RTF_REJECT = 0x0200;
 
 /** Pure: facts in, verdict out. No I/O, no spawn. */
@@ -157,6 +163,15 @@ export function judgeBarrier(f: BarrierFacts, c: BarrierContext): Verdict {
 		if (m.length === 0) failures.push(`expected mount missing: ${p}`);
 		else if (!m.every((x) => x.opts.split(",").includes("ro"))) failures.push(`mount not read-only: ${p}`);
 	}
+	// Sources, not only points — a SHAPE check, not exact-source proof: the repo
+	// mount's source ends in view/ (not a checkout with .git and data/) and the
+	// deps mount's in node_modules. The exact bind sources are the launcher's
+	// recorded argv (outside/bwrap-argv.txt), its code manifest and RO binds.
+	const sourcesOf = (p: string) => f.mounts.filter((x) => x.point === p).map((x) => x.root);
+	const repoSrc = sourcesOf(c.repo);
+	if (repoSrc.some((r) => !r.endsWith("/view"))) failures.push(`repo mount source is not the launcher's view/: ${repoSrc.join(",")}`);
+	const depsSrc = sourcesOf(`${c.repo}/node_modules`);
+	if (depsSrc.some((r) => !r.endsWith("/node_modules"))) failures.push(`node_modules mount source is not a node_modules directory: ${depsSrc.join(",")}`);
 
 	const unix = f.unixInodes === null ? null : new Set(f.unixInodes);
 	if (unix === null) failures.push("/proc/net/unix unreadable");
@@ -180,8 +195,6 @@ export function judgeBarrier(f: BarrierFacts, c: BarrierContext): Verdict {
 	if (f.env.PATH !== c.bindir) failures.push("PATH is not the tool directory");
 	if (f.env.HOME !== `${c.root}/home`) failures.push("HOME is not the run dir home");
 	if (f.env.PWD !== c.repo) failures.push("PWD is missing or not the read-only repo path");
-	if (f.env.pnpm_config_pm_on_fail !== PNPM_PM_ON_FAIL) failures.push(`pnpm_config_pm_on_fail is missing or not "${PNPM_PM_ON_FAIL}"`);
-	if (f.env.pnpm_config_verify_deps_before_run !== PNPM_VERIFY_DEPS) failures.push(`pnpm_config_verify_deps_before_run is missing or not "${PNPM_VERIFY_DEPS}"`);
 
 	if (f.present.length) failures.push(`must be absent but exist: ${f.present.join(", ")}`);
 	const skeleton = (entries: string[] | null, allowedNames: string[], what: string) => {
@@ -202,6 +215,61 @@ function readOr(p: string): string | null {
 }
 function listOr(p: string): string[] | null {
 	try { return fs.readdirSync(p); } catch { return null; }
+}
+
+/**
+ * Which LanceDB this process actually runs — read after G1's own LanceDB
+ * positive control, from that same import: no second import, no host probe.
+ * The deps are mixed (a pnpm 0.40.0 install next to an npm-era 0.15.0 native),
+ * so a successful count alone does not say which one loaded. Measured: the
+ * package the specifier resolves to (import.meta.resolve, the resolver the
+ * import used) and every LanceDB `.node` the kernel has mapped into this
+ * process (/proc/self/maps), each with its own package.json name/version, size
+ * and sha256. Paths are as seen inside; the launcher's receipt maps
+ * $REPO/node_modules to the host directory.
+ */
+interface LanceNative { path: string; package: string | null; version: string | null; bytes: number | null; sha256: string | null }
+interface LanceProvenance { node: string; arch: string; platform: string; entry: string | null; packageDir: string | null; packageVersion: string | null; natives: LanceNative[]; errors: string[] }
+function nearestPackage(from: string, name?: string): { dir: string; name: string | null; version: string | null } | null {
+	for (let d = path.dirname(from); ; d = path.dirname(d)) {
+		const raw = readOr(path.join(d, "package.json"));
+		if (raw !== null) {
+			try {
+				const p = JSON.parse(raw) as { name?: string; version?: string };
+				if (name === undefined || p.name === name) return { dir: d, name: p.name ?? null, version: p.version ?? null };
+			} catch { /* not JSON: keep walking */ }
+		}
+		if (path.dirname(d) === d) return null;
+	}
+}
+function sha256File(p: string): string {
+	const h = crypto.createHash("sha256");
+	const fd = fs.openSync(p, "r");
+	try {
+		const buf = Buffer.alloc(1 << 20);
+		for (let n = fs.readSync(fd, buf, 0, buf.length, null); n > 0; n = fs.readSync(fd, buf, 0, buf.length, null)) h.update(buf.subarray(0, n));
+	} finally { fs.closeSync(fd); }
+	return h.digest("hex");
+}
+function lanceProvenance(): LanceProvenance {
+	const out: LanceProvenance = { node: process.version, arch: process.arch, platform: process.platform, entry: null, packageDir: null, packageVersion: null, natives: [], errors: [] };
+	try {
+		const entry = fs.realpathSync(fileURLToPath(import.meta.resolve("@lancedb/lancedb")));
+		const pkg = nearestPackage(entry, "@lancedb/lancedb");
+		out.entry = entry;
+		out.packageDir = pkg?.dir ?? null;
+		out.packageVersion = pkg?.version ?? null;
+	} catch (e) { out.errors.push(`resolve: ${String(e)}`); }
+	const maps = readOr("/proc/self/maps");
+	if (maps === null) out.errors.push("/proc/self/maps unreadable");
+	const mapped = [...new Set((maps ?? "").split("\n").map((l) => l.trim().split(/\s+/).slice(5).join(" ")).filter((p) => p.endsWith(".node") && /lancedb/i.test(p)))];
+	for (const p of mapped) {
+		const pkg = nearestPackage(p);
+		const n: LanceNative = { path: p, package: pkg?.name ?? null, version: pkg?.version ?? null, bytes: null, sha256: null };
+		try { n.bytes = fs.statSync(p).size; n.sha256 = sha256File(p); } catch (e) { out.errors.push(`native ${p}: ${String(e)}`); }
+		out.natives.push(n);
+	}
+	return out;
 }
 export function readBarrierFacts(c: BarrierContext): BarrierFacts {
 	const names = listOr("/proc/self/fd");
@@ -233,7 +301,7 @@ export function readBarrierFacts(c: BarrierContext): BarrierFacts {
 		env: Object.fromEntries(Object.entries(process.env).filter((e): e is [string, string] => typeof e[1] === "string")),
 		mounts: mountinfo.split("\n").filter(Boolean).map((l) => {
 			const x = l.split(" ");
-			return { point: x[4].replace(/\\040/g, " "), opts: x[5] };
+			return { point: x[4].replace(/\\040/g, " "), opts: x[5], root: x[3].replace(/\\040/g, " ") };
 		}),
 		present: sensitive.filter((p) => fs.existsSync(p)),
 		homeEntries: listOr(c.hostHome),
@@ -289,7 +357,7 @@ function sanitizedFacts(f: BarrierFacts, c: BarrierContext) {
 		ipv6Routes: f.ipv6Route === null ? "absent" : f.ipv6Route.split("\n").filter((l) => l.trim()).map((l) => { const x = l.trim().split(/\s+/); return `${x[1]} ${x[8]} ${x[9]}`; }),
 		unixSockets: f.unixInodes?.length ?? null,
 		fds: f.fds, mounts: f.mounts,
-		envKeys: Object.keys(f.env).sort(), pathIsBindir: f.env.PATH === c.bindir, homeIsRunHome: f.env.HOME === `${c.root}/home`, pwdIsRepo: f.env.PWD === c.repo, pmOnFailIgnore: f.env.pnpm_config_pm_on_fail === PNPM_PM_ON_FAIL, verifyDepsWarn: f.env.pnpm_config_verify_deps_before_run === PNPM_VERIFY_DEPS,
+		envKeys: Object.keys(f.env).sort(), pathIsBindir: f.env.PATH === c.bindir, homeIsRunHome: f.env.HOME === `${c.root}/home`, pwdIsRepo: f.env.PWD === c.repo,
 		present: f.present, homeEntries: f.homeEntries, repoParentEntries: f.repoParentEntries, runEntries: f.runEntries,
 		cpusAllowed: f.cpusAllowed,
 	};
@@ -333,6 +401,7 @@ console.log("\n=== G1 active ===");
 const v4 = await connectOutcome("192.0.2.1", 9);
 ok(`TCP connect to TEST-NET-1 fails ENETUNREACH (got ${v4})`, v4 === "ENETUNREACH");
 let v6 = "not-run";
+let lance: LanceProvenance | "not-run" = "not-run";
 if (fail === failBefore) {
 	v6 = await connectOutcome("2001:db8::1", 9);
 	// Explicit classes only; anything else (EHOSTUNREACH = a route exists,
@@ -350,10 +419,16 @@ if (fail === failBefore) {
 	fs.writeFileSync(path.join(g1Dir, "tiny.ts"), "const n: number = 41 + 1;\nconsole.log(`tiny ${n}`);\n");
 	const tiny = spawnSync("node", ["--import", "tsx", path.join(g1Dir, "tiny.ts")], { cwd: ARGS.repo, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] });
 	ok("positive: node --import tsx runs a TS file", tiny.stdout.trim() === "tiny 42", tiny.stderr);
-	const px = spawnSync("pnpm", ["exec", "tsx", "--version"], { cwd: ARGS.repo, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 });
-	ok("positive: pnpm exec tsx --version (no network)", px.status === 0, px.stderr);
-	obs("versions inside", { node: process.version, pnpm: spawnSync("pnpm", ["--version"], { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] }).stdout.trim(), tsx: px.stdout.trim().split("\n").join(" ") });
-	obs("Cpus_allowed_list inside", FACTS.cpusAllowed ?? "unreadable");
+	// No door below launches through a package manager, and none is on PATH, so
+	// a door that still called one by name fails (not found) instead of
+	// installing. Not a block on absolute /nix/store paths.
+	const pms = spawnSync("bash", ["-c", "for t in pnpm npm npx corepack yarn; do command -v \"$t\" || echo none; done"], { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] });
+	ok("tool check: no package manager is on PATH (pnpm npm npx corepack yarn)", (pms.stdout ?? "").trim().split("\n").every((l) => l === "none"), pms.stdout);
+	const tsxVersion = (() => { try { return JSON.parse(fs.readFileSync(path.join(ARGS.repo, "node_modules", "tsx", "package.json"), "utf-8")).version as string; } catch (e) { return `unreadable (${String(e)})`; } })();
+	obs("versions inside", { node: process.version, tsx: tsxVersion });
+	// Children that pin themselves (run.sh run_pinned → taskset) get exactly this
+	// set (box() below), so a compact cannot widen past the launcher's CPUs.
+	ok(`Cpus_allowed_list inside is the launcher's set ${SANDBOX_CPUS} (got ${FACTS.cpusAllowed ?? "unreadable"})`, FACTS.cpusAllowed === SANDBOX_CPUS);
 	const lk = path.join(g1Dir, "probe.lock");
 	const fl = spawnSync("bash", ["-c", `exec 8>>"${lk}"; flock -n 8 && grep -c FLOCK "/proc/$BASHPID/fdinfo/8"`], { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] });
 	ok("positive: flock on a run-dir file shows in fdinfo", fl.stdout.trim() === "1", fl.stdout + fl.stderr);
@@ -365,6 +440,12 @@ if (fail === failBefore) {
 	} catch (e) {
 		ok("positive: LanceDB native creates and counts a synthetic table", false, String(e));
 	}
+	// What that import loaded (no new import): 0.40.x package, one 0.40.x native.
+	const lp = lanceProvenance();
+	lance = lp;
+	obs("LanceDB loaded by that import (package + mapped native)", lp);
+	ok(`LanceDB package the import resolved is 0.40.x (got ${lp.packageVersion ?? "unknown"} at ${lp.packageDir ?? "?"})`, /^0\.40\./.test(lp.packageVersion ?? ""), lp.errors.join("; "));
+	ok(`exactly one LanceDB native is mapped into this process, from a 0.40.x package (got ${lp.natives.map((n) => `${n.package}@${n.version}`).join(", ") || "none"})`, lp.natives.length === 1 && /^0\.40\./.test(lp.natives[0].version ?? "") && lp.natives[0].sha256 !== null, lp.errors.join("; "));
 	const wf = path.join(g1Dir, "write.txt");
 	fs.writeFileSync(wf, "w");
 	ok("positive: the run dir is writable", fs.readFileSync(wf, "utf-8") === "w");
@@ -387,12 +468,12 @@ if (fail === failBefore) {
 	forge("a different PATH", (f) => { f.env.PATH = `/run/wrappers/bin:${ARGS.bindir}`; });
 	forge("a PWD other than the repo", (f) => { f.env.PWD = ARGS.root; });
 	forge("a missing PWD", (f) => { delete f.env.PWD; });
-	forge("pnpm_config_pm_on_fail other than ignore", (f) => { f.env.pnpm_config_pm_on_fail = "download"; });
-	forge("a missing pnpm_config_pm_on_fail", (f) => { delete f.env.pnpm_config_pm_on_fail; });
-	forge("pnpm_config_verify_deps_before_run = install", (f) => { f.env.pnpm_config_verify_deps_before_run = "install"; });
-	forge("a missing pnpm_config_verify_deps_before_run", (f) => { delete f.env.pnpm_config_verify_deps_before_run; });
-	forge("an unexpected mount", (f) => { f.mounts.push({ point: path.join(ARGS.hostHome, ".ssh"), opts: "ro" }); });
+	forge("a pnpm_config_pm_on_fail key (no package-manager key is allowed)", (f) => { f.env.pnpm_config_pm_on_fail = "ignore"; });
+	forge("a pnpm_config_verify_deps_before_run key (no package-manager key is allowed)", (f) => { f.env.pnpm_config_verify_deps_before_run = "warn"; });
+	forge("an unexpected mount", (f) => { f.mounts.push({ point: path.join(ARGS.hostHome, ".ssh"), opts: "ro", root: "/" }); });
 	forge("a writable repo mount", (f) => { f.mounts = f.mounts.map((m) => (m.point === ARGS.repo ? { ...m, opts: "rw,nosuid" } : m)); });
+	forge("the repo path bound from a checkout instead of view/", (f) => { f.mounts = f.mounts.map((m) => (m.point === ARGS.repo ? { ...m, root: "/junghan/repos/gh/andenken" } : m)); });
+	forge("node_modules bound from a directory that is not node_modules", (f) => { f.mounts = f.mounts.map((m) => (m.point === `${ARGS.repo}/node_modules` ? { ...m, root: "/junghan/.ssh" } : m)); });
 	forge("repo data/ visible", (f) => { f.present.push(path.join(ARGS.repo, "data")); });
 	forge("other host home entries", (f) => { f.homeEntries = [...(f.homeEntries ?? []), ".ssh"]; });
 	forge("an FD enumeration that failed", (f) => { f.fds = null; });
@@ -406,6 +487,7 @@ writeJson(path.join(ARGS.root, "g1-report.json"), {
 	static: STATIC,
 	active: { ok: G1_ACTIVE_OK, ipv4: v4, ipv6: v6, passed: pass, failed: fail - failBefore },
 	facts: sanitizedFacts(FACTS, ARGS),
+	lancedb: lance,
 });
 if (!G1_ACTIVE_OK) {
 	writeJson(path.join(ARGS.root, "run-manifest.json"), { mode: ARGS.barrierOnly ? "barrier" : "full", g1: "active-failed", pass, fail });
@@ -444,9 +526,11 @@ function box(device = "thinkpad"): Box {
 	// NOSYSBASHRC: NixOS /etc/bashrc returns at once instead of re-running
 	// /etc/profile, which rewrites PATH (see `sh()` for why bash would read it).
 	// A clean env per case: nothing inherited from the test process but PATH (the
-	// tool dir), and the same fixed pnpm literals G1 verified, so a child pnpm does
-	// not try to manage its own version or install dependencies again.
-	const env: NodeJS.ProcessEnv = { HOME: home, PATH: process.env.PATH ?? "", LANG: "C.UTF-8", ANDENKEN_DATA: data, NOSYSBASHRC: "1", pnpm_config_pm_on_fail: PNPM_PM_ON_FAIL, pnpm_config_verify_deps_before_run: PNPM_VERIFY_DEPS };
+	// tool dir, which holds no package manager). ANDENKEN_COMPACT_CPUS is the
+	// launcher's CPU set (SANDBOX_CPUS, which G1 proved is this process's own):
+	// run.sh run_pinned would otherwise taskset a compact to its production
+	// default 0-3, and an affinity can widen — it is not a cgroup limit.
+	const env: NodeJS.ProcessEnv = { HOME: home, PATH: process.env.PATH ?? "", LANG: "C.UTF-8", ANDENKEN_DATA: data, NOSYSBASHRC: "1", ANDENKEN_COMPACT_CPUS: SANDBOX_CPUS };
 	if (!data.startsWith(ROOT + "/")) throw new Error("box data escaped the fixture root");
 	return { home, data, db: path.join(data, "openclaw.lance"), env };
 }
@@ -682,7 +766,7 @@ try {
 		const proto = sh(b, "./run.sh fts:openclaw --protocol");
 		ok("--protocol prints the exact protocol line", proto.status === 0 && proto.out.split("\n").includes(OPENCLAW_FTS_PROTOCOL), proto.out);
 		const check0 = sh(b, "./run.sh fts:openclaw --check");
-		ok("--check on a missing index → exit 1", check0.status === 1, check0.out + check0.err);
+		ok("--check on a missing index → exit 1, says not ready", check0.status === 1 && check0.out.includes("openclaw FTS: not ready"), check0.out + check0.err);
 		ok("--check wrote nothing and took no lock", manifest(b.db) === m0 && !fs.existsSync(lock));
 
 		const v0 = sh(b, "./run.sh verify openclaw");
@@ -691,7 +775,15 @@ try {
 		ok("verify --require-fts on a missing index: exit 1, no healthy line", vr0.status === 1 && !vr0.out.includes(OPENCLAW_FTS_HEALTHY_MARK), vr0.out);
 		ok("both verifies wrote nothing", manifest(b.db) === m0);
 		const vmd = sh(b, "./run.sh verify md --require-fts");
-		ok("--require-fts on another track → exit 2", vmd.status === 2, vmd.err);
+		ok("--require-fts on another track → exit 2, refused by indexer.ts itself", vmd.status === 2 && vmd.err.includes('verify: --require-fts applies to openclaw only (got "md")'), vmd.err);
+		const vbad = sh(b, "./run.sh verify openclaw --require-fts --bogus");
+		ok("an unknown verify argument → exit 2, refused by indexer.ts itself", vbad.status === 2 && vbad.err.includes("verify: unknown argument --bogus"), vbad.err);
+		// The flag in the target slot: run.sh launches it with node (exact token),
+		// and indexer.ts reads it as before — a target, or a target then an argument.
+		const vflag = sh(b, "./run.sh verify --require-fts");
+		ok("flag only (verify --require-fts) → exit 1, unknown target, from indexer.ts", vflag.status === 1 && vflag.err.includes('verify: unknown target "--require-fts"'), vflag.out + vflag.err);
+		const vrev = sh(b, "./run.sh verify --require-fts openclaw");
+		ok("reversed (verify --require-fts openclaw) → exit 2, unknown argument openclaw, from indexer.ts", vrev.status === 2 && vrev.err.includes("verify: unknown argument openclaw"), vrev.out + vrev.err);
 
 		const other = box("someotherhost");
 		fs.cpSync(b.data, other.data, { recursive: true });
@@ -713,7 +805,8 @@ try {
 		const build = sh(b, "./run.sh fts:openclaw");
 		ok("fts:openclaw → exit 0, created", build.status === 0 && build.out.includes("openclaw FTS: created"), build.out + build.err);
 		const m1 = manifest(b.db);
-		ok("--check after the build → exit 0", sh(b, "./run.sh fts:openclaw --check").status === 0);
+		const check1 = sh(b, "./run.sh fts:openclaw --check");
+		ok("--check after the build → exit 0 and says ready (not a silent exit 0)", check1.status === 0 && check1.out.includes("openclaw FTS: ready"), check1.out + check1.err);
 		const vr1 = sh(b, "./run.sh verify openclaw --require-fts");
 		ok("verify --require-fts after the build → exit 0 and the exact healthy line", vr1.status === 0 && vr1.out.split("\n").includes(OPENCLAW_FTS_HEALTHY_MARK), vr1.out);
 		const again = sh(b, "./run.sh fts:openclaw");
@@ -751,7 +844,10 @@ try {
 	const unstage = (b: Box) => fs.rmSync(path.join(b.data, "openclaw-staging", "openclaw-chunks.jsonl.gz"), { force: true });
 	const IMPORT = "node --import tsx openclaw-importer.ts";
 	const T0 = Date.UTC(2026, 10, 4, 0, 0, 0);
-	const fts = (b: Box) => sh(b, "./run.sh fts:openclaw --check").status === 0;
+	// Both answers are asserted by exit AND line, so a silent exit (an entry that
+	// never ran main) can pass neither.
+	const fts = (b: Box) => { const r = sh(b, "./run.sh fts:openclaw --check"); return r.status === 0 && r.out.includes("openclaw FTS: ready"); };
+	const ftsMissing = (b: Box) => { const r = sh(b, "./run.sh fts:openclaw --check"); return r.status === 1 && r.out.includes("openclaw FTS: not ready"); };
 
 	// stub ssh/rsync for the publish legs below
 	const stubs = path.join(ROOT, "stubs");
@@ -822,19 +918,19 @@ esac
 		stage(b, [{ id: "c1", text: "ftsheldqx", ts: T0 }]);
 		const zero = sh(b, LOCKED(IMPORT));
 		ok("zero-delta import (every row unchanged) → exit 0, 0 written", zero.status === 0 && zero.out.includes("0 chunks written"), zero.out + zero.err);
-		ok("zero-delta import: the store is byte-identical and the index is still missing", manifest(b.db) === m0 && !fts(b));
+		ok("zero-delta import: the store is byte-identical and the index is still missing", manifest(b.db) === m0 && ftsMissing(b));
 
 		unstage(b);
 		const none = sh(b, LOCKED(IMPORT));
 		ok("no-staged import → exit 0, nothing staged", none.status === 0 && none.out.includes("nothing staged"));
-		ok("no-staged import: store byte-identical, index still missing", manifest(b.db) === m0 && !fts(b));
+		ok("no-staged import: store byte-identical, index still missing", manifest(b.db) === m0 && ftsMissing(b));
 
 		stage(b, [{ id: "c9", text: "ftsdryqx", ts: T0 + 9 }]);
 		const wm = path.join(b.data, "openclaw-watermark.json");
 		const wmBefore = fs.existsSync(wm) ? fs.readFileSync(wm, "utf-8") : "absent";
 		const dry = sh(b, `${IMPORT} --dry-run`);
 		ok("dry-run (direct entry, no lock) → exit 0", dry.status === 0, dry.out + dry.err);
-		ok("dry-run: store byte-identical, index missing, watermark unchanged", manifest(b.db) === m0 && !fts(b) && (fs.existsSync(wm) ? fs.readFileSync(wm, "utf-8") : "absent") === wmBefore);
+		ok("dry-run: store byte-identical, index missing, watermark unchanged", manifest(b.db) === m0 && ftsMissing(b) && (fs.existsSync(wm) ? fs.readFileSync(wm, "utf-8") : "absent") === wmBefore);
 
 		const direct = sh(b, IMPORT);
 		ok("direct writing import outside the lock → exit 1, names ./run.sh sync:openclaw, nothing written", direct.status === 1 && direct.err.includes("./run.sh sync:openclaw") && manifest(b.db) === m0, direct.err);
@@ -862,7 +958,7 @@ esac
 		ok("partial effects stay: the watermark advanced to the new row", mark.fxa === T0 + 5, JSON.stringify(mark));
 		const rc = fs.existsSync(receipt) ? JSON.parse(fs.readFileSync(receipt, "utf-8")) : null;
 		ok("partial effects stay: the import receipt records 1 imported", rc?.imported === 1 && rc?.unchanged === 1, JSON.stringify(rc));
-		ok("the index is still missing", !fts(b));
+		ok("the index is still missing", ftsMissing(b));
 		const runsh = fs.readFileSync(path.join(REPO, "run.sh"), "utf-8");
 		const syncCase = runsh.slice(runsh.indexOf("  sync:openclaw)"), runsh.indexOf("  prune:openclaw)"));
 		ok("run.sh sync:openclaw chains the importer with && before the reconcile (exit 1 stops it)", /node --import tsx openclaw-importer\.ts \\\n\s+&& pnpm exec tsx openclaw-reconcile\.ts reconcile/.test(syncCase));
@@ -870,7 +966,7 @@ esac
 		unstage(b);
 		const noop = sh(b, LOCKED(IMPORT));
 		ok("the next no-staged run exits 0 …", noop.status === 0);
-		ok("… and the index is still missing (a no-op is not a recovery)", !fts(b));
+		ok("… and the index is still missing (a no-op is not a recovery)", ftsMissing(b));
 		ok("required verify stays blocked", sh(b, "./run.sh verify openclaw --require-fts").status === 1);
 		const blocked = pub(b, "--require-fts");
 		ok("required publish refused before transfer: exit 1, rsync 0, ssh 0", blocked.status === 1 && blocked.rsync === 0 && blocked.ssh.length === 0, blocked.err + blocked.log.join("|"));
@@ -949,6 +1045,11 @@ esac
 		ok("./run.sh compact openclaw → exit 0; rows and FTS kept", c.status === 0 && (await rowCount(b.db)) === 2 && fts(b) && (await ftsIds(b.db, "ftscompactqx")).includes("fx:k1"), c.out + c.err);
 		const sessionsCompact = fs.readFileSync(path.join(REPO, "run.sh"), "utf-8");
 		ok("run.sh: other compact targets keep their old launch line", sessionsCompact.includes('run_pinned pnpm exec tsx indexer.ts compact "${1:-all}"'));
+		// The child CPU path: run_pinned is `taskset -c "$COMPACT_CPUS"` with
+		// COMPACT_CPUS from ANDENKEN_COMPACT_CPUS (static check in 7.); the same
+		// taskset, in a case shell with the box env, lands on the sandbox set.
+		const pin = sh(b, 'taskset -c "$ANDENKEN_COMPACT_CPUS" grep -m1 Cpus_allowed_list /proc/self/status');
+		ok(`a child pinned like run_pinned (taskset -c "$ANDENKEN_COMPACT_CPUS") runs on ${SANDBOX_CPUS}`, pin.status === 0 && new RegExp(`^Cpus_allowed_list:\\s*${SANDBOX_CPUS}$`).test(pin.out.trim()), pin.out + pin.err);
 
 		const pr = sh(b, "node --import tsx openclaw-prune.ts --restore /nonexistent");
 		ok("direct prune --restore outside the lock → exit 1, names ./run.sh prune:openclaw", pr.status === 1 && pr.err.includes("./run.sh prune:openclaw"), pr.err);
@@ -969,6 +1070,16 @@ esac
 		ok("no source reads ANDENKEN_OPENCLAW_LOCK_HELD any more", sources.every((f) => !fs.readFileSync(path.join(REPO, f), "utf-8").includes("ANDENKEN_OPENCLAW_LOCK_HELD") || f === "openclaw-lock.ts"));
 		const comp = runsh.slice(runsh.indexOf("  compact)"), runsh.indexOf("  cleanup)"));
 		ok("run.sh compact openclaw: lock before the node --import tsx launch", comp.indexOf("openclaw_lock_acquire") >= 0 && comp.indexOf("openclaw_lock_acquire") < comp.indexOf("node --import tsx indexer.ts compact openclaw"));
+		const ver = runsh.slice(runsh.indexOf("  verify)"), runsh.indexOf("  status)"));
+		ok("run.sh verify: node only for target openclaw or an exact --require-fts token anywhere in its arguments; argv passed through unchanged; other targets keep pnpm exec tsx",
+			ver.includes("VERIFY_RUNNER=(pnpm exec tsx)") && ver.includes('if [ "${1:-all}" = "openclaw" ]; then VERIFY_RUNNER=(node --import tsx); fi')
+			&& ver.includes('for a in "$@"; do') && ver.includes('if [ "$a" = "--require-fts" ]; then VERIFY_RUNNER=(node --import tsx); fi')
+			&& ver.includes('"${VERIFY_RUNNER[@]}" indexer.ts verify "${1:-all}" "${@:2}" ;;'), ver);
+		const ftsCase = runsh.slice(runsh.indexOf("  fts:openclaw)"), runsh.indexOf("  search:openclaw)"));
+		ok("run.sh fts:openclaw --check/--protocol launch with node --import tsx, outside the lock", ftsCase.includes('*" --check "*|*" --protocol "*) node --import tsx openclaw-fts.ts "$@" ;;') && !ftsCase.includes("pnpm"), ftsCase);
+		ok("run.sh run_pinned: taskset -c \"$COMPACT_CPUS\", COMPACT_CPUS from ANDENKEN_COMPACT_CPUS (the box env pins it)", runsh.includes('COMPACT_CPUS="${ANDENKEN_COMPACT_CPUS:-0-3}"') && runsh.includes('taskset -c "$COMPACT_CPUS" "$@"') && comp.includes("run_pinned node --import tsx indexer.ts compact openclaw"));
+		const launcher = fs.readFileSync(path.join(REPO, "scripts", "test-openclaw-fts-sandboxed.sh"), "utf-8");
+		ok(`launcher starts the sandbox on CPUS="${SANDBOX_CPUS}" and binds no package manager`, launcher.includes(`CPUS="${SANDBOX_CPUS}"`) && launcher.includes('exec taskset -c "$CPUS" "$BWRAP"') && !/^\s+node pnpm /m.test(launcher) && !launcher.includes("--setenv pnpm_config"));
 	}
 } catch (err) {
 	ok("G2 ran to completion", false, err instanceof Error ? err.stack ?? err.message : String(err));
