@@ -23,7 +23,13 @@
 
 import * as fs from "node:fs";
 import * as readline from "node:readline";
-import { detectSource, extractProjectName, type SessionSource } from "./session-indexer.js";
+import {
+  detectSource,
+  extractProjectName,
+  isClaudeCompactSummary,
+  piCompactionSummary,
+  type SessionSource,
+} from "./session-indexer.js";
 import { sanitizeSessionChunkText } from "./session-sanitize.js";
 
 // ---------------------------------------------------------------------------
@@ -311,11 +317,11 @@ function renderJsonlLine(
   const p = parsed as Record<string, unknown>;
   const type = p.type;
 
-  // ---- compaction (pi only) ----
+  // ---- pi compaction entry (Claude Code summaries arrive as user lines below) ----
   if (ctx.source === "pi" && type === "compaction") {
-    const c = p.compaction as { summary?: unknown } | undefined;
-    if (typeof c?.summary === "string" && c.summary.trim()) {
-      const text = c.summary.trim();
+    const summary = piCompactionSummary(p);
+    if (summary !== null && summary.trim()) {
+      const text = summary.trim();
       return {
         line: {
           sourceLine,
@@ -457,6 +463,20 @@ function renderJsonlLine(
       return { line: null, skipReason: `sanitize:${sanitized.dropReason}` };
     }
     const text = sanitized.text;
+
+    // Claude Code compaction summary: same sanitize and inclusion as a user
+    // line, displayed as the summary it is rather than as a human turn.
+    if (ctx.source === "claude" && role === "user" && isClaudeCompactSummary(p)) {
+      return {
+        line: {
+          sourceLine,
+          kind: "compaction",
+          text: `[Compaction summary] ${text}`,
+          rawChars: text.length,
+        },
+      };
+    }
+
     const label = role === "user" ? "User" : "Assistant";
 
     // assistant turn that has BOTH text and tool calls: append a compact tail.

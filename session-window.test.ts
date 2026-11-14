@@ -139,6 +139,32 @@ section("buildSessionTranscriptEntry");
   truthy(inline.content.includes("Compaction:"), "inline compaction rendered with label");
 }
 
+{
+  // pi SDK CompactionEntry shape: top-level summary (and a systemMessage that is never transcript text).
+  const file = writeTempSession([
+    {
+      type: "compaction",
+      id: "c1",
+      parentId: null,
+      timestamp: "2026-11-14T05:00:00.000Z",
+      summary: "Top-level compaction summary retained inline when requested.",
+      firstKeptEntryId: "c1",
+      tokensBefore: 1000,
+      systemMessage: { role: "system", content: "SYSMSG-NEVER-IN-TRANSCRIPT", toolsAdded: [], timestamp: 1 },
+    },
+    { type: "compaction", timestamp: 1, summary: "Top wins.", compaction: { summary: "Nested loses." } },
+    { type: "message", message: { role: "user", content: "Actual user question that is long enough." } },
+  ]);
+  const skipped = await buildSessionTranscriptEntry(file, { compactionMode: "skip" });
+  const inline = await buildSessionTranscriptEntry(file, { compactionMode: "inline" });
+  eq(skipped.compactionLines, 0, "top-level compaction skipped by default option");
+  eq(skipped.lines.length, 1, "skip mode keeps only the user line");
+  eq(inline.compactionLines, 2, "top-level compaction summaries added inline");
+  eq(inline.lines.filter((l) => l.role === "compaction").map((l) => l.sourceLine), [1, 2], "compaction lines keep their source lines");
+  truthy(inline.content.includes("Compaction: Top wins."), "top-level wins over nested");
+  truthy(!inline.content.includes("Nested loses.") && !inline.content.includes("SYSMSG-NEVER-IN-TRANSCRIPT"), "nested loser and systemMessage absent");
+}
+
 section("chunkTranscriptContent / buildWindowChunks");
 
 {

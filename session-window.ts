@@ -21,6 +21,7 @@ import {
   extractProjectName,
   isNoise,
   passesLengthFilter,
+  piCompactionSummary,
   type SessionSource,
 } from "./session-indexer.js";
 import { sanitizeSessionChunkText } from "./session-sanitize.js";
@@ -172,9 +173,9 @@ export async function buildSessionTranscriptEntry(
     const p = parsed as Record<string, unknown>;
 
     if (source === "pi" && p.type === "compaction") {
-      const compaction = p.compaction as { summary?: unknown } | undefined;
-      if (compactionMode === "inline" && typeof compaction?.summary === "string") {
-        const text = compaction.summary.trim();
+      const summary = piCompactionSummary(p);
+      if (compactionMode === "inline" && summary !== null) {
+        const text = summary.trim();
         if (text) {
           pushTranscriptLine(lines, "compaction", text, lineNumber, timestampToIso(p.timestamp));
           compactionLines++;

@@ -578,6 +578,50 @@ section("compaction and boundary clamping");
 }
 
 // ---------------------------------------------------------------------------
+section("compaction summary producer shapes (pi top-level, Claude Code flag)");
+// ---------------------------------------------------------------------------
+
+{
+  // pi SDK CompactionEntry: top-level summary; systemMessage must not leak into display.
+  const file = writeTempPiSession([
+    {
+      type: "compaction",
+      id: "c1",
+      parentId: null,
+      timestamp: "2026-11-14T05:00:00.000Z",
+      summary: "  top-level session summary text.  ",
+      firstKeptEntryId: "c1",
+      tokensBefore: 1000,
+      systemMessage: { role: "system", content: "SYSMSG-NEVER-SHOWN", toolsAdded: [], timestamp: 1 },
+    },
+    { type: "compaction", timestamp: 1, summary: "top wins", compaction: { summary: "nested loses" } },
+    { type: "compaction", timestamp: 1, summary: "   " },
+  ]);
+  const ex = await readSessionExcerpt(file, 2, { beforeLines: 1, afterLines: 1 });
+  eq(ex.lines.map((l) => l.kind), ["compaction", "compaction"], "top-level summaries render as compaction");
+  eq(ex.lines[0]!.text, "[Compaction summary] top-level session summary text.", "top-level summary trimmed and prefixed");
+  eq(ex.lines[0]!.rawChars, "top-level session summary text.".length, "rawChars counts the trimmed summary");
+  eq(ex.lines[1]!.text, "[Compaction summary] top wins", "top-level wins over nested");
+  falsy(ex.text.includes("SYSMSG-NEVER-SHOWN"), "systemMessage never displayed");
+  eq(ex.skippedCounts.compaction_empty, 1, "whitespace-only top-level summary skipped as compaction_empty");
+}
+
+{
+  const PRE = "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.";
+  const file = writeTempClaudeSession([
+    { type: "user", timestamp: "2026-11-14T05:00:00.000Z", isCompactSummary: true, isVisibleInTranscriptOnly: true, message: { role: "user", content: `${PRE}\nsummary body.` } },
+    { type: "user", timestamp: "2026-11-14T05:00:01.000Z", message: { role: "user", content: `${PRE}\nquoted by a human.` } },
+    { type: "system", subtype: "compact_boundary", content: "Conversation compacted", isMeta: false, level: "info" },
+    { type: "user", timestamp: "2026-11-14T05:00:02.000Z", isCompactSummary: true, message: { role: "user", content: "System (untrusted): [x] wrapper text" } },
+  ]);
+  const ex = await readSessionExcerpt(file, 2, { beforeLines: 1, afterLines: 2 });
+  eq(ex.lines.map((l) => [l.sourceLine, l.kind]), [[1, "compaction"], [2, "user"]], "flagged line is compaction, quoting human stays user");
+  eq(ex.lines[0]!.text, `[Compaction summary] ${PRE}\nsummary body.`, "flagged summary keeps its text, prefixed");
+  eq(ex.skippedCounts["type:system"], 1, "compact_boundary skipped as before");
+  eq(ex.skippedCounts["sanitize:generated_system_wrapper"], 1, "flagged line still goes through user sanitize");
+}
+
+// ---------------------------------------------------------------------------
 section("skipped counts — invalid JSON and non-target types");
 // ---------------------------------------------------------------------------
 

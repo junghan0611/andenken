@@ -20,6 +20,8 @@ import { Readable } from "node:stream";
 import {
   extractSessionChunks,
   extractSessionChunksDetailed,
+  isClaudeCompactSummary,
+  piCompactionSummary,
   splitForEmbedding,
   type SessionChunk,
 } from "./session-indexer.ts";
@@ -268,6 +270,105 @@ await check("coordinates: ids stay file:line[#part]; decisions carry no text", a
   ok(line2.length > 1, "long answer split into parts");
   ok(line2.every((c, i) => c.id === `${file}:2#${i}`));
   ok(!JSON.stringify(r.decisions).includes(MARK));
+});
+
+// ---------------------------------------------------------------------------
+console.log("\n# extraction: compaction summaries (pi top-level / Claude Code isCompactSummary)");
+// ---------------------------------------------------------------------------
+// pi SDK 1.5.2 CompactionEntry: `summary` is top-level; systemMessage/details must never be embedded.
+const SUMMARY = prose(2600, "압축 요약 문장입니다. ");
+const piCompactTop = (summary: unknown, extra: Record<string, unknown> = {}) => ({
+  type: "compaction", id: "c1", parentId: "a1", timestamp: ISO, summary, firstKeptEntryId: "a1", tokensBefore: 50000,
+  details: { readFiles: [`/r/${MARK}`], modifiedFiles: [] },
+  systemMessage: { role: "system", content: `${MARK} ${prose(3000)}`, toolsAdded: [], timestamp: TS },
+  ...extra,
+});
+const piCompactNested = (summary: unknown) => ({ type: "compaction", timestamp: TS, compaction: { summary } });
+const CC_PREAMBLE = "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.";
+const CC_SUMMARY = `${CC_PREAMBLE}\n${prose(2600)}`;
+async function bothPaths(file: string, rows: unknown[]) {
+  const bytes = write(file, rows);
+  const prod = await extractSessionChunks(file);
+  const legacyPolicy = await extractSessionChunksDetailed(Readable.from([bytes]), file, "legacy");
+  const control = await extractSessionChunksDetailed(Readable.from([bytes]), file, "control-v1");
+  deepStrictEqual(legacyPolicy.selected, prod, "legacy policy == production parser");
+  return { prod, control };
+}
+await check("piCompactionSummary: top-level, nested, top-level wins, compaction type only", () => {
+  strictEqual(piCompactionSummary(piCompactTop("top")), "top");
+  strictEqual(piCompactionSummary(piCompactNested("nested")), "nested");
+  strictEqual(piCompactionSummary({ ...piCompactTop("top"), compaction: { summary: "nested" } }), "top");
+  strictEqual(piCompactionSummary({ ...piCompactTop(""), compaction: { summary: "nested" } }), "", "a top-level string is authoritative even when empty");
+  strictEqual(piCompactionSummary(piCompactTop(42)), null);
+  strictEqual(piCompactionSummary({ type: "branch_summary", summary: "branch" }), null);
+  strictEqual(piCompactionSummary(null), null);
+});
+await check("pi top-level compaction: split into role compaction chunks, same in legacy and control-v1", async () => {
+  const file = PI_FILE(uuid7());
+  const { prod, control } = await bothPaths(file, [piU([T(prose(30))]), piCompactTop(SUMMARY)]);
+  const line2 = prod.filter((c) => c.lineNumber === 2);
+  deepStrictEqual(texts(line2), splitForEmbedding(SUMMARY));
+  ok(line2.length > 1, "a 2600-char summary splits");
+  ok(line2.every((c, i) => c.id === `${file}:2#${i}` && c.role === "compaction" && c.source === "pi" && c.metadata.type === "compaction"));
+  deepStrictEqual(control.selected, prod, "no control-v1 decision touches a compaction line");
+  strictEqual(control.decisions.length, 0);
+  ok(!prod.some((c) => c.text.includes(MARK)), "systemMessage / details are never embedded");
+});
+await check("pi nested compaction still read; same chunks as the top-level shape", async () => {
+  const top = await bothPaths(PI_FILE(uuid7()), [piCompactTop(SUMMARY)]);
+  const nested = await bothPaths(PI_FILE(uuid7()), [piCompactNested(SUMMARY)]);
+  deepStrictEqual(texts(nested.prod), texts(top.prod));
+  ok(nested.prod.every((c) => c.role === "compaction"));
+});
+await check("pi compaction: empty / non-string summary and branch_summary emit nothing", async () => {
+  const { prod } = await bothPaths(PI_FILE(uuid7()), [
+    piCompactTop(""), piCompactTop(42), piCompactNested(""), { type: "branch_summary", timestamp: ISO, summary: SUMMARY },
+  ]);
+  strictEqual(prod.length, 0);
+});
+await check("CC isCompactSummary: relabelled compaction; text, id, lineNumber, source unchanged", async () => {
+  const flagged = await bothPaths(CC_FILE("00000000-0000-4000-8000-0000000000c1"), [ccU(prose(30)), ccU(CC_SUMMARY, { isCompactSummary: true, isVisibleInTranscriptOnly: true })]);
+  const plain = await bothPaths(CC_FILE("00000000-0000-4000-8000-0000000000c1"), [ccU(prose(30)), ccU(CC_SUMMARY)]);
+  const f2 = flagged.prod.filter((c) => c.lineNumber === 2);
+  const p2 = plain.prod.filter((c) => c.lineNumber === 2);
+  ok(f2.length > 1, "summary splits");
+  deepStrictEqual(f2.map((c) => [c.id, c.text, c.lineNumber, c.timestamp, c.source, c.metadata.part, c.metadata.parts]), p2.map((c) => [c.id, c.text, c.lineNumber, c.timestamp, c.source, c.metadata.part, c.metadata.parts]));
+  ok(f2.every((c) => c.role === "compaction" && c.metadata.type === "compaction"));
+  ok(p2.every((c) => c.role === "user" && c.metadata.type === "user_message"));
+  deepStrictEqual(flagged.control.selected, flagged.prod, "control-v1 labels the same way");
+  const human = flagged.prod.filter((c) => c.lineNumber === 1);
+  ok(human.length === 1 && human[0].role === "user", "the human line is untouched");
+});
+await check("CC isCompactSummary: inclusion boundary unchanged (user floor, user-only sanitize drops)", async () => {
+  const cases: Array<[string, unknown]> = [
+    ["short (≤20)", "Summary: short."],
+    ["system wrapper", `System (untrusted): [x] ${prose(200)}`],
+    ["cron prompt", `[cron:daily] ${prose(200)}`],
+    ["over floor", prose(25)],
+  ];
+  for (const [label, content] of cases) {
+    const f = await bothPaths(CC_FILE("00000000-0000-4000-8000-0000000000c2"), [ccU(content, { isCompactSummary: true })]);
+    const p = await bothPaths(CC_FILE("00000000-0000-4000-8000-0000000000c2"), [ccU(content)]);
+    deepStrictEqual(texts(f.prod), texts(p.prod), `${label}: same inclusion`);
+    deepStrictEqual(texts(f.control.selected), texts(p.control.selected), `${label}: same inclusion under control-v1`);
+  }
+});
+await check("CC: flag must be exactly top-level isCompactSummary === true on a user line", async () => {
+  const { prod } = await bothPaths(CC_FILE("00000000-0000-4000-8000-0000000000c3"), [
+    ccU(CC_SUMMARY, { isCompactSummary: false }),
+    ccU(CC_SUMMARY, { isCompactSummary: "true" }),
+    ccU(CC_SUMMARY),
+    ccU(`Quoting it: ${CC_SUMMARY}`),
+    { ...ccA([T(CC_SUMMARY)]), isCompactSummary: true },
+    { type: "system", subtype: "compact_boundary", content: "Conversation compacted", isMeta: false, level: "info", timestamp: ISO, compactMetadata: { trigger: "manual", preTokens: 1 } },
+  ]);
+  ok(prod.filter((c) => c.lineNumber <= 4).every((c) => c.role === "user"), "false / string / absent / quoted stay user");
+  ok(prod.filter((c) => c.lineNumber === 5).every((c) => c.role === "assistant"), "assistant line is not relabelled");
+  strictEqual(prod.filter((c) => c.lineNumber === 6).length, 0, "compact_boundary emits nothing");
+  ok(!prod.some((c) => c.role === "compaction"));
+  strictEqual(isClaudeCompactSummary({ type: "user", isCompactSummary: true }), true);
+  strictEqual(isClaudeCompactSummary({ type: "assistant", isCompactSummary: true }), false);
+  strictEqual(isClaudeCompactSummary({ type: "user", message: { isCompactSummary: true } }), false);
 });
 
 // ---------------------------------------------------------------------------

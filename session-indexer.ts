@@ -136,9 +136,39 @@ interface PiJsonlMessage {
     role: string;
     content: Array<{ type: string; text?: string }> | string;
   };
+  /** Producer shape (pi SDK `CompactionEntry`): the summary is a top-level field. */
+  summary?: unknown;
+  /** Older nested shape, kept readable; read through `piCompactionSummary` only. */
   compaction?: {
-    summary: string;
+    summary?: unknown;
   };
+}
+
+/**
+ * The model-written summary of a pi `compaction` entry, or null.
+ *
+ * The pi SDK writes `{type: "compaction", summary, firstKeptEntryId, tokensBefore,
+ * details?, usage?, fromHook?, systemMessage?}` — `summary` at the top level
+ * (`@earendil-works/pi-coding-agent` 1.5.2, `CompactionEntry`). The nested
+ * `compaction.summary` shape is still read for older fixtures; no producer of it
+ * was found in that SDK, migrations included. A top-level string wins when both
+ * are present. Only `summary` is read: the prompt/tool checkpoint in
+ * `systemMessage`, `details` and `usage` are never memory text.
+ *
+ * Shared by the indexer, the hit excerpt and the transcript window, so the three
+ * readers cannot disagree about which field carries the summary.
+ */
+export function piCompactionSummary(entry: unknown): string | null {
+  if (!entry || typeof entry !== "object") return null;
+  const e = entry as Record<string, unknown>;
+  if (e.type !== "compaction") return null;
+  if (typeof e.summary === "string") return e.summary;
+  const nested = e.compaction;
+  if (nested && typeof nested === "object") {
+    const s = (nested as Record<string, unknown>).summary;
+    if (typeof s === "string") return s;
+  }
+  return null;
 }
 
 // --- Claude Code format ---
@@ -146,10 +176,28 @@ interface PiJsonlMessage {
 interface ClaudeJsonlMessage {
   type: string; // "user" | "assistant" | "system" | "progress" | ...
   timestamp?: string; // ISO string (not epoch ms)
+  /** Set by Claude Code on the user line that carries its compaction summary. */
+  isCompactSummary?: unknown;
   message?: {
     role: string;
     content: Array<{ type: string; text?: string }> | string;
   };
+}
+
+/**
+ * True for the Claude Code line that carries a compaction summary: exactly
+ * `type: "user"` with a top-level `isCompactSummary === true`. Claude Code stores
+ * the model-written summary as a user message, so without this flag it reads as
+ * a human turn. The text is never inspected — a quoted preamble in a real user
+ * turn stays a user turn — and the `compact_boundary` system line is not this.
+ *
+ * Only the label changes: inclusion (sanitize as user, the user length floor,
+ * noise) is decided exactly as for any other user line.
+ */
+export function isClaudeCompactSummary(entry: unknown): boolean {
+  if (!entry || typeof entry !== "object") return false;
+  const e = entry as Record<string, unknown>;
+  return e.type === "user" && e.isCompactSummary === true;
 }
 
 // --- Directory discovery ---
@@ -601,6 +649,8 @@ interface SelectionView {
   content: Array<{ type: string; text?: string }> | string;
   api?: unknown;
   timestamp: string;
+  /** Claude Code compaction-summary line: chunks are labelled `compaction`. */
+  compactSummary?: boolean;
 }
 
 /** The same message fields parsePiLine / parseClaudeLine read, plus pi's `api`. */
@@ -609,7 +659,12 @@ function selectionView(parsed: Record<string, unknown>, source: SessionSource): 
     const p = parsed as unknown as ClaudeJsonlMessage;
     if (p.type !== "user" && p.type !== "assistant") return null;
     if (!p.message || !p.message.content) return null;
-    return { role: p.type, content: p.message.content, timestamp: p.timestamp ?? "" };
+    return {
+      role: p.type,
+      content: p.message.content,
+      timestamp: p.timestamp ?? "",
+      compactSummary: isClaudeCompactSummary(parsed),
+    };
   }
   const p = parsed as unknown as PiJsonlMessage;
   if (p.type !== "message" || !p.message) return null;
@@ -664,7 +719,8 @@ function selectMessage(
   const text = sanitized.text;
   const floor = msg.role === "user" ? 20 : 100;
   const outcome: SelectionOutcome = text.length <= floor ? "protected-short" : isNoise(text) ? "protected-noise" : "reduced";
-  return decide(outcome, buildMessageChunks(text, msg.role, sessionFile, project, lineNumber, msg.timestamp, source), text.length, text);
+  const label = msg.compactSummary ? "compaction" : undefined;
+  return decide(outcome, buildMessageChunks(text, msg.role, sessionFile, project, lineNumber, msg.timestamp, source, label), text.length, text);
 }
 
 function parsePiLine(
@@ -681,9 +737,10 @@ function parsePiLine(
   // Compaction summaries. Split like any other long text — a compaction summary
   // is often the densest record of a session and routinely runs past 2,000
   // chars, so head-truncating it lost exactly the part worth keeping.
-  if (parsed.type === "compaction" && parsed.compaction?.summary) {
-    const parts = splitForEmbedding(parsed.compaction.summary);
-    onText?.(parsed.compaction.summary);
+  const summary = piCompactionSummary(parsed);
+  if (summary) {
+    const parts = splitForEmbedding(summary);
+    onText?.(summary);
     return parts.map((part, i) => ({
       id: parts.length === 1
         ? `${sessionFile}:${lineNumber}`
@@ -741,6 +798,7 @@ function parseClaudeLine(
     timestamp,
     "claude",
     onText,
+    isClaudeCompactSummary(parsed) ? "compaction" : undefined,
   );
 }
 
@@ -754,6 +812,8 @@ function parseMessageContent(
   source: SessionSource,
   /** Opt-in (issue #18 selection path): receives the accepted text before split. */
   onText?: (text: string) => void,
+  /** Chunk label override; inclusion is still decided by `role`. */
+  label?: "compaction",
 ): SessionChunk[] {
   if (!content) return [];
   if (role !== "user" && role !== "assistant") return [];
@@ -778,12 +838,14 @@ function parseMessageContent(
   if (isNoise(text)) return [];
 
   onText?.(text);
-  return buildMessageChunks(text, role, sessionFile, project, lineNumber, timestamp, source);
+  return buildMessageChunks(text, role, sessionFile, project, lineNumber, timestamp, source, label);
 }
 
 /**
  * Split an accepted message text into chunks. Shared by the legacy path above
  * and the opt-in selection path, so ids, roles and metadata cannot drift apart.
+ * `label` only relabels already-accepted text (Claude Code compaction summary):
+ * role and metadata.type become `compaction`; id, source and lineNumber stay.
  */
 function buildMessageChunks(
   text: string,
@@ -793,9 +855,11 @@ function buildMessageChunks(
   lineNumber: number,
   timestamp: string,
   source: SessionSource,
+  label?: "compaction",
 ): SessionChunk[] {
   const parts = splitForEmbedding(text);
-  const metaType = role === "user" ? "user_message" : "assistant_response";
+  const chunkRole = label ?? role;
+  const metaType = label ?? (role === "user" ? "user_message" : "assistant_response");
 
   return parts.map((part, i) => ({
     // A turn that fits in one part keeps its historical id, so the 70% of
@@ -808,7 +872,7 @@ function buildMessageChunks(
     project,
     lineNumber,
     timestamp,
-    role: role as "user" | "assistant",
+    role: chunkRole,
     source,
     metadata: (parts.length === 1
       ? { type: metaType }
