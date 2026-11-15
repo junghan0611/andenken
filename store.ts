@@ -603,15 +603,18 @@ export class VectorStore {
   /**
    * Delete all chunks for a specific file.
    * Used by WriteBuffer to pre-clean before batched inserts.
+   *
+   * ensureTable() creates an empty table when none exists, so the delete then
+   * runs against that table; the early return covers only a table that is still
+   * absent after ensureTable(). Any delete failure propagates: swallowing it
+   * let the caller insert the new rows next to the old ones (same ids twice).
+   * A rejected delete leaves the file's rows and manifest entry as they were,
+   * and its task fails.
    */
   async deleteByFile(filePath: string): Promise<void> {
     await this.ensureTable();
     if (!this.table) return;
-    try {
-      await this.table.delete(`\`sessionFile\` = '${filePath.replace(/'/g, "''")}'`);
-    } catch {
-      // Table might be empty or filter syntax issue — safe to ignore
-    }
+    await this.table.delete(`\`sessionFile\` = '${filePath.replace(/'/g, "''")}'`);
   }
 
   /**
@@ -1027,6 +1030,33 @@ export class VectorStore {
     } catch {
       return new Set();
     }
+  }
+
+  /**
+   * The indexed file set with failures surfaced — for callers that decide what
+   * to re-embed (getStaleFiles: indexers, status, estimate). An empty set means
+   * "no table" or "no rows", never "the query failed": countRows/query errors
+   * propagate, and a read that returns fewer rows than countRows refuses.
+   * countRows is read again after the query; a table that grew or shrank in
+   * between (a non-locking writer, or status/estimate during a sync) refuses as
+   * indexed-files-moved. A same-count replacement between the two reads is not
+   * detected. getIndexedFiles() above keeps its lenient empty-on-error contract
+   * for the display and doctor callers.
+   */
+  async getIndexedFilesStrict(): Promise<Set<string>> {
+    await this.ensureInitialized();
+    if (!this.table) return new Set();
+    const count = await this.table.countRows();
+    if (count === 0) return new Set();
+    const results = await this.table.query().select(["sessionFile"]).limit(count).toArray();
+    if (results.length !== count) {
+      throw new Error(`indexed-files-short-read: query returned ${results.length} of ${count} rows`);
+    }
+    const after = await this.table.countRows();
+    if (after !== count) {
+      throw new Error(`indexed-files-moved: countRows changed from ${count} to ${after} during the read`);
+    }
+    return new Set(results.map((r) => r.sessionFile as string));
   }
 
   /**

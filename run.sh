@@ -214,6 +214,11 @@ Usage: ./run.sh <command> [args]
                               sessions 429 rescheduler, provider error diagnostics and
                               the index-run finalization seam (API 0: fetch stubbed,
                               fake clock, temp HOME/ANDENKEN_DATA, no ~/.env.local)
+  test:writer                 Type fence (tsconfig.writer.json) + synthetic suites for the
+                              sessions writer's crash recovery (missing-rows rediscovery,
+                              strict indexed-files read, propagating deleteByFile) and its
+                              delete/flush/persist windows (API 0, no LanceDB opened,
+                              temp HOME/ANDENKEN_DATA, no ~/.env.local)
 
 === Session corpus (~/repos/gh/session) ===
   corpus:gather [--dry-run] [--strict] [--checkpoint]
@@ -496,6 +501,12 @@ case "${1:-help}" in
     # removes credential-shaped env names from its own process before any test.
     cd "$SCRIPT_DIR" && node node_modules/typescript/bin/tsc -p tsconfig.retry.json \
       && node --import tsx embed-retry.test.ts ;;
+  test:writer)
+    # API 0: no load_env; the store is never opened (stub tables, fake stores),
+    # and the recovery suite points HOME/ANDENKEN_DATA at a temp dir before import.
+    cd "$SCRIPT_DIR" && node node_modules/typescript/bin/tsc -p tsconfig.writer.json \
+      && node --import tsx writer-recovery.test.ts \
+      && node --import tsx writer-crash.test.ts ;;
 
   # === Session corpus ===
   corpus:gather)

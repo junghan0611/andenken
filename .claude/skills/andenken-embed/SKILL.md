@@ -142,6 +142,15 @@ Reading the rows:
 That request is this, in order, from `~/repos/gh/andenken`. Run it and report;
 you do not need the rest of this file to do it.
 
+**First run after the writer-recovery release (once).** Files whose manifest
+entry claims rows that `sessions.lance` does not hold are now re-embedded, so the
+first sessions sync can pay a backlog of unknown size — and the Pi warm path runs
+`--local` from source at session start, with no build step in between. On the
+authority, hold the warm path first (no Pi start, or hold the warm lock — GLG
+picks), pull, then run `./run.sh estimate:sessions` (API 0) and have GLG accept
+the **whole `to_index` scope and cost**, not the `missing rows` count alone. Only
+then release warm or run the block below.
+
 ```bash
 cd ~/repos/gh/andenken
 ./run.sh sync:sessions --global   # all devices → embed → verify → publish index+manifest+corpus

@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "allowImportingTsExtensions": true
+  },
+  "include": [
+    "indexer.ts", "store.ts", "write-buffer.ts", "index-finalize.ts",
+    "writer-recovery.test.ts", "writer-crash.test.ts"
+  ],
+  "exclude": ["node_modules"]
+}

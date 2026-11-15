@@ -209,15 +209,18 @@ function saveMdManifest(manifest: MdFileManifest): void {
   fs.writeFileSync(getMdManifestPath(), JSON.stringify(manifest, null, 2));
 }
 
-function getStaleFiles(
+export function getStaleFiles(
   files: string[],
   indexed: Set<string>,
   manifest: OrgFileManifest,
-): { newFiles: string[]; staleFiles: string[] } {
+): { newFiles: string[]; staleFiles: string[]; missingRowFiles: string[] } {
   const newFiles: string[] = [];
   const staleFiles: string[] = [];
+  const missingRowFiles: string[] = [];
   const hasManifest = Object.keys(manifest.files).length > 0;
 
+  // `indexed` must come from VectorStore.getIndexedFilesStrict(): "not in the
+  // DB" below has to mean no rows, never a failed query.
   for (const f of files) {
     if (!indexed.has(f)) {
       const entry = manifest.files[f];
@@ -227,7 +230,18 @@ function getStaleFiles(
       }
       try {
         const stat = fs.statSync(f);
-        if (stat.mtimeMs > entry.mtimeMs || stat.size !== entry.size) {
+        // Missing rows: the manifest says this file has rows, the DB has none.
+        // A run that deleted the file's rows (wb.add / wb.markFile delete before
+        // the new rows are flushed) and then stopped — crash, flush failure, or a
+        // manifest entry persisted ahead of its rows — leaves exactly this state,
+        // and mtime/size cannot reveal it when the file did not change. Covers
+        // whole-file absence only; partial rows are not detected. `chunks` is the
+        // count the writer sent (S0-held excluded), so 0 means "no rows expected".
+        const claimed = entry.chunks;
+        if (typeof claimed === "number" && Number.isInteger(claimed) && claimed > 0) {
+          staleFiles.push(f);
+          missingRowFiles.push(f);
+        } else if (stat.mtimeMs > entry.mtimeMs || stat.size !== entry.size) {
           staleFiles.push(f);
         }
       } catch {
@@ -266,7 +280,7 @@ function getStaleFiles(
     }
   }
 
-  return { newFiles, staleFiles };
+  return { newFiles, staleFiles, missingRowFiles };
 }
 
 // --- MD-specific stale detection ---
@@ -585,15 +599,25 @@ async function indexSessions(force: boolean) {
   await store.assertCompatibleDim();
 
   const files = findSessionFiles();
-  const indexed = force ? new Set<string>() : await store.getIndexedFiles();
+  // Strict: a failed indexed-files query stops the run here, before any API
+  // call, instead of reading as "no rows" (which getStaleFiles would turn into
+  // missing-rows reprocessing of every file the manifest knows).
+  let indexed: Set<string>;
+  try {
+    indexed = force ? new Set<string>() : await store.getIndexedFilesStrict();
+  } catch (e) {
+    await store.close();
+    throw e;
+  }
   let manifest: SessionFileManifest = force
     ? { files: {}, lastUpdated: "" }
     : loadSessionManifest();
   const hasManifest = Object.keys(manifest.files).length > 0;
 
-  // Stale detection: new files + mtime/size-changed appended files
-  const { newFiles, staleFiles } = force
-    ? { newFiles: files.filter((f) => !indexed.has(f)), staleFiles: [] as string[] }
+  // Stale detection: new files + mtime/size-changed appended files + files the
+  // manifest says have rows that the DB does not hold (missing rows).
+  const { newFiles, staleFiles, missingRowFiles } = force
+    ? { newFiles: files.filter((f) => !indexed.has(f)), staleFiles: [] as string[], missingRowFiles: [] as string[] }
     : getStaleFiles(files, indexed, manifest);
   const toIndex = [...newFiles, ...staleFiles];
 
@@ -629,6 +653,7 @@ async function indexSessions(force: boolean) {
 
   console.log(
     `Sessions: ${files.length} | indexed: ${indexed.size} | new: ${newFiles.length} | stale: ${staleFiles.length} | concurrency: ${CONCURRENCY}` +
+      (missingRowFiles.length > 0 ? ` | missing rows (in stale): ${missingRowFiles.length}` : "") +
       (policy.pinned ? ` | policy: ${policy.selection} + S0 ${policy.s0}` : ""),
   );
   if (toIndex.length === 0) {
@@ -1074,7 +1099,7 @@ async function indexOrg(force: boolean) {
 
   const allFiles = findOrgFiles();
   const files = allFiles.filter((f) => shouldIndexOrgFile(f));
-  const indexed = force ? new Set<string>() : await store.getIndexedFiles();
+  const indexed = force ? new Set<string>() : await store.getIndexedFilesStrict();
   let manifest = force ? { files: {}, lastUpdated: "" } as OrgFileManifest : loadManifest();
   const hasManifest = Object.keys(manifest.files).length > 0;
 
@@ -1367,12 +1392,31 @@ interface StatusTrack {
   md_stale_by_meta?: number;
   md_suspect?: number;
   md_ghost_zone?: number;
+  // sessions/org only — files counted in `stale` because the manifest claims
+  // rows the DB does not hold (getStaleFiles missing-rows rule).
+  missing_rows?: number;
 }
+
+/**
+ * Org status reads the indexed set strictly but in a catch: org is disabled and
+ * status org is display only, so its read error must not fail the whole status
+ * call (sessions sync Step 1, the md replica check). When the read fails the
+ * five numbers that depend on it are null — unknown, never 0 and never the
+ * missing-rows count an empty set would produce — and indexed_error names it.
+ */
+type OrgStatusTrack = Omit<StatusTrack, "indexed_files" | "new" | "stale" | "to_index" | "missing_rows"> & {
+  indexed_files: number | null;
+  new: number | null;
+  stale: number | null;
+  to_index: number | null;
+  missing_rows?: number | null;
+  indexed_error?: string;
+};
 
 interface StatusJson {
   sessions: StatusTrack;
   md: StatusTrack;
-  org: StatusTrack;
+  org: OrgStatusTrack;
 }
 
 async function collectSessionStatus(): Promise<StatusTrack> {
@@ -1386,7 +1430,7 @@ async function collectSessionStatus(): Promise<StatusTrack> {
     await store.init();
     count = await store.getCount();
     actualDim = await store.getActualVectorDim();
-    indexedFiles = await store.getIndexedFiles();
+    indexedFiles = await store.getIndexedFilesStrict();
     await store.close();
   }
   const files = findSessionFiles();
@@ -1394,10 +1438,12 @@ async function collectSessionStatus(): Promise<StatusTrack> {
   const manifestEntries = Object.keys(manifest.files).length;
   let newCount = 0;
   let staleCount = 0;
+  let missingCount = 0;
   if (manifestEntries > 0) {
-    const { newFiles, staleFiles } = getStaleFiles(files, indexedFiles, manifest);
+    const { newFiles, staleFiles, missingRowFiles } = getStaleFiles(files, indexedFiles, manifest);
     newCount = newFiles.length;
     staleCount = staleFiles.length;
+    missingCount = missingRowFiles.length;
   }
   const fileSet = new Set(files);
   const deletedCount = Object.keys(manifest.files).filter((f) => !fileSet.has(f)).length;
@@ -1410,6 +1456,7 @@ async function collectSessionStatus(): Promise<StatusTrack> {
     stale: staleCount,
     deleted: deletedCount,
     to_index: newCount + staleCount,
+    missing_rows: missingCount,
     actual_dim: actualDim,
     last_indexed: manifest.lastUpdated || null,
     exists,
@@ -1469,44 +1516,89 @@ async function collectMdStatus(): Promise<StatusTrack> {
   };
 }
 
-async function collectOrgStatus(): Promise<StatusTrack> {
+export type OrgIndexedRead = { ok: true; indexed: Set<string> } | { ok: false; errorName: string };
+
+/**
+ * The org status numbers that depend on the indexed read. A failed read skips
+ * getStaleFiles and yields null for all five: an empty set would turn every
+ * entry that claims rows into a missing-rows file. The error is a fixed code
+ * plus an allowlisted error class name — never the raw message.
+ */
+export function orgStaleCounts(
+  files: string[],
+  read: OrgIndexedRead,
+  manifest: Parameters<typeof getStaleFiles>[2],
+): Pick<OrgStatusTrack, "indexed_files" | "new" | "stale" | "to_index" | "missing_rows" | "indexed_error"> {
+  if (!read.ok) {
+    const name = /^[A-Za-z][A-Za-z0-9]{0,39}$/.test(read.errorName) ? read.errorName : "Error";
+    return {
+      indexed_files: null,
+      new: null,
+      stale: null,
+      to_index: null,
+      missing_rows: null,
+      indexed_error: `indexed-files-read-failed (${name})`,
+    };
+  }
+  let newCount = 0;
+  let staleCount = 0;
+  let missingCount = 0;
+  if (Object.keys(manifest.files).length > 0) {
+    const { newFiles, staleFiles, missingRowFiles } = getStaleFiles(files, read.indexed, manifest);
+    newCount = newFiles.length;
+    staleCount = staleFiles.length;
+    missingCount = missingRowFiles.length;
+  }
+  return {
+    indexed_files: read.indexed.size,
+    new: newCount,
+    stale: staleCount,
+    to_index: newCount + staleCount,
+    missing_rows: missingCount,
+  };
+}
+
+async function collectOrgStatus(): Promise<OrgStatusTrack> {
   const dbPath = getOrgDbPath();
   const exists = fs.existsSync(dbPath);
   let count = 0;
   let actualDim: number | null = null;
-  let indexedFiles = new Set<string>();
+  let read: OrgIndexedRead = { ok: true, indexed: new Set<string>() };
   if (exists) {
     const store = new VectorStore(dbPath);
     await store.init();
     count = await store.getCount();
     actualDim = await store.getActualVectorDim();
-    indexedFiles = await store.getIndexedFiles();
+    // Strict, caught here only: see OrgStatusTrack. indexOrg, the path that
+    // pays, lets the strict read throw. count/actual_dim failures are outside
+    // this catch.
+    try {
+      read = { ok: true, indexed: await store.getIndexedFilesStrict() };
+    } catch (e) {
+      read = { ok: false, errorName: e instanceof Error ? e.name : "Error" };
+    }
     await store.close();
   }
   const files = findOrgFiles().filter((f) => shouldIndexOrgFile(f));
   const manifest = loadManifest();
   const manifestEntries = Object.keys(manifest.files).length;
-  let newCount = 0;
-  let staleCount = 0;
-  if (manifestEntries > 0) {
-    const { newFiles, staleFiles } = getStaleFiles(files, indexedFiles, manifest);
-    newCount = newFiles.length;
-    staleCount = staleFiles.length;
-  }
   const fileSet = new Set(files);
   const deletedCount = Object.keys(manifest.files).filter((f) => !fileSet.has(f)).length;
+  const counts = orgStaleCounts(files, read, manifest);
   return {
     count,
     files: files.length,
-    indexed_files: indexedFiles.size,
+    indexed_files: counts.indexed_files,
     manifest_entries: manifestEntries,
-    new: newCount,
-    stale: staleCount,
+    new: counts.new,
+    stale: counts.stale,
     deleted: deletedCount,
-    to_index: newCount + staleCount,
+    to_index: counts.to_index,
+    missing_rows: counts.missing_rows,
     actual_dim: actualDim,
     last_indexed: manifest.lastUpdated || null,
     exists,
+    ...(counts.indexed_error ? { indexed_error: counts.indexed_error } : {}),
   };
 }
 
@@ -1561,7 +1653,7 @@ async function status() {
   );
   if (sessions.manifest_entries > 0) {
     console.log(
-      `   ↳ manifest: ${sessions.manifest_entries} entries | new: ${sessions.new} | stale: ${sessions.stale} | deleted: ${sessions.deleted} | to-index: ${sessions.to_index}`,
+      `   ↳ manifest: ${sessions.manifest_entries} entries | new: ${sessions.new} | stale: ${sessions.stale}${sessions.missing_rows ? ` (missing rows: ${sessions.missing_rows})` : ""} | deleted: ${sessions.deleted} | to-index: ${sessions.to_index}`,
     );
     if (sessions.last_indexed) {
       console.log(`   ↳ last indexed: ${sessions.last_indexed}`);
@@ -1633,16 +1725,22 @@ async function status() {
         ? `empty, provider=${orgProviderDim}d`
         : "empty";
     console.log(
-      `📚 Org (${oDimLabel}): ${org.count} chunks | ${org.indexed_files}/${org.files} files | ${oFrags} data files | ${oSize}`,
+      `📚 Org (${oDimLabel}): ${org.count} chunks | ${org.indexed_files ?? "?"}/${org.files} files | ${oFrags} data files | ${oSize}`,
     );
     if (org.actual_dim && orgProviderDim && org.actual_dim !== orgProviderDim) {
       console.log(
         `   ⚠ org provider dim=${orgProviderDim}d differs from DB dim=${org.actual_dim}d — search/index paths will refuse until rebuild or config fix`,
       );
     }
-    console.log(
-      `   ↳ manifest: ${org.manifest_entries} entries | new: ${org.new} | stale: ${org.stale} | deleted: ${org.deleted} | to-index: ${org.to_index}`,
-    );
+    if (org.indexed_error) {
+      console.log(
+        `   ⚠ org ${org.indexed_error} — new/stale/to-index unknown | manifest: ${org.manifest_entries} entries | deleted: ${org.deleted}`,
+      );
+    } else {
+      console.log(
+        `   ↳ manifest: ${org.manifest_entries} entries | new: ${org.new} | stale: ${org.stale}${org.missing_rows ? ` (missing rows: ${org.missing_rows})` : ""} | deleted: ${org.deleted} | to-index: ${org.to_index}`,
+      );
+    }
     if (org.last_indexed) {
       console.log(`   ↳ last indexed: ${org.last_indexed}`);
     }
@@ -2120,6 +2218,7 @@ async function estimate(target: string) {
   // Use the same getStaleFiles logic indexSessions uses, so the estimate
   // reflects exactly what the next sync-sessions run would embed.
   let filesToEstimate: string[];
+  let missingRowsToEstimate = 0;
   if (fullMode) {
     filesToEstimate = allFiles;
   } else {
@@ -2135,11 +2234,12 @@ async function estimate(target: string) {
       if (fs.existsSync(sDbPath)) {
         const store = new VectorStore();
         await store.init();
-        indexed = await store.getIndexedFiles();
+        indexed = await store.getIndexedFilesStrict();
         await store.close();
       }
-      const { newFiles, staleFiles } = getStaleFiles(allFiles, indexed, manifest);
+      const { newFiles, staleFiles, missingRowFiles } = getStaleFiles(allFiles, indexed, manifest);
       filesToEstimate = [...newFiles, ...staleFiles];
+      missingRowsToEstimate = missingRowFiles.length;
     }
   }
 
@@ -2191,6 +2291,7 @@ async function estimate(target: string) {
     const skipped = allFiles.length - filesToEstimate.length;
     console.log(`  files to index: ${filesToEstimate.length}` + (skipped > 0 ? ` (${skipped} already indexed → skipped)` : ""));
   }
+  if (missingRowsToEstimate > 0) console.log(`  missing rows (in files to index): ${missingRowsToEstimate} file(s) the manifest says have rows the DB does not hold`);
   console.log(`  chunks (estimated): ~${totalChunks}`);
   if (policy.pinned) console.log(`  S0-held (never sent, not priced): ${heldChunks} chunks, ${heldChars.toLocaleString()} chars`);
   if (conflictFiles > 0) {

@@ -67,7 +67,9 @@ fi
 
 if [ "$VERIFY" = "1" ]; then
   echo "== remote status + verify md (API 0) =="
-  ssh "$HOST" "cd '$REMOTE_ROOT' && ./run.sh status && ./run.sh verify md"
+  # status covers every track; a sessions or org read error there must not skip
+  # the md verify of what was just published. verify md decides the exit code.
+  ssh "$HOST" "cd '$REMOTE_ROOT' && { if ! ./run.sh status; then echo 'warning: global status failed; continuing mandatory md verification' >&2; fi; ./run.sh verify md; }"
 fi
 
 if [ "$SMOKE" = "1" ]; then

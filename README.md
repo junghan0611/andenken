@@ -28,9 +28,10 @@ it answers a different question.
 
 Three operating consequences follow, and each one is visible in this repo:
 
-- **No automatic dreaming.** Memory refresh is split into four surfaces and
-  none of them run on a timer by default. `--local` is cheap enough to schedule,
-  but *the moment two machines come to hold the same memory* stays an explicit
+- **No automatic dreaming.** Memory refresh is split into four surfaces.
+  This repo schedules none; agent-config can run `--local` at Pi session start
+  on the authority. The first post-recovery run needs the estimate gate below,
+  while *the moment two machines come to hold the same memory* stays an explicit
   human call (`--global`). The owner is not whoever holds every beat; it is
   whoever decides the moment of coherence.
 - **Memory follows the person, not the machine.** The session corpus is a
@@ -292,7 +293,8 @@ is degraded. **`degraded: false` does not certify whole-search quality**: it can
 also mean FTS never ran, and it says nothing about human usefulness.
 
 Run `./run.sh test:diagnostics` for the fenced synthetic store, consumer-report
-and table-shape tests (API 0, no optimize). Maintenance reports distinguish
+and table-shape tests (API 0, no optimize). `./run.sh test:writer` runs the writer
+type fence and small synthetic recovery/window tests (API 0, no LanceDB). Maintenance reports distinguish
 logical fragments, physical data files, manifest-reported bytes, disk usage
 and an optimize call's own statistics; none alone guarantees space reduction.
 These follow-up changes are source and temporary-build validated; they do not
@@ -322,7 +324,9 @@ separate claims. Dated measurements and the completed recovery are in
 
 A rebuilt `dist/` or a new native module reaches **new processes only**. A
 running pi keeps the code and the LanceDB module it loaded at start; nothing
-here reloads a harness.
+here reloads a harness. A type check of the main config must use
+`tsc -p tsconfig.json --noEmit` if it must not overwrite `dist/`; that config's
+ordinary invocation emits compiled files.
 
 ## Provider split — directly embedded tracks and harvest
 
@@ -334,7 +338,11 @@ here reloads a harness.
 | **Org** | Qwen3-Embedding-4B / 2560d | `ANDENKEN_ORG_*` → `data/org.lance` | **Disabled.** Upstream R&D only. Do not run `index:org` in production. |
 
 For current counts use `./run.sh status`; dated verification snapshots belong in
-CHANGELOG, not the provider contract.
+CHANGELOG, not the provider contract. Sessions indexed-file read failures or
+count changes make status fail explicitly, rather than inventing counts; sessions
+sync then stops with a diagnostic before indexing or publication. A disabled org
+indexed-read failure is shown as unknown, not as missing-row work. Org init/count
+failures outside that narrow handler can still fail status.
 
 LanceDB stores are dimension- and track-separated. Each track's search must use
 its own provider env. The 4096d sessions/md providers and the 2560d org provider
@@ -504,7 +512,11 @@ cd ~/repos/gh/andenken
 `scripts/sync-sessions.sh` is the operating heartbeat for the sessions track and
 what the agent-config `memory-sync` skill calls. Since 2026-09-03 it has two
 modes. `--local` (the default) indexes only this device's live sessions, uses no
-ssh, and does not touch the replica — cheap enough to put on a timer.
+ssh, and does not touch the replica. **First use after the writer-recovery
+release is different:** missing-row recovery can pay a backlog of unknown size.
+Hold the authority's agent-config warm path before pulling; pull, run API-0
+`./run.sh estimate:sessions`, and accept the whole `to_index` scope and cost
+before resuming warm or sync. See the `andenken-embed` skill's first-run gate.
 `--global` gathers every device with `--strict`, embeds, verifies, and publishes
 the index, the manifest **and** the corpus in one act; that is the moment a human
 is meant to hold. The publish runs in a fixed order: verify → corpus
@@ -516,7 +528,8 @@ removed on the replica when the authority has none). A failure before the index
 step leaves the replica's index as it was, and a 0-row index is never
 published. Admitted snapshots travel with the corpus. A failed step fails the
 whole publish.
-`--push` remains as a deprecated alias. Nothing here is automated by default.
+`--push` remains as a deprecated alias. This repo schedules nothing; agent-config's
+Pi warm caller can run `--local` automatically at session start on the authority.
 
 **One writer at a time, across processes.** Every `sessions.lance` writer —
 sync, rebuild, `index:sessions` / `index:durable`, sessions cleanup / compact,
@@ -689,7 +702,14 @@ full rebuild in all but name, so `indexer.ts sessions`, `cli.ts reindex` and pi
 `sync-sessions.sh` refuses a 0-row index before its 1-call preflight. That
 wrapper guard is coarse (total rows): an index holding only pi-durable rows passes
 it, costs the one preflight call, and is then refused by the indexer before any
-embedding. The index
+embedding. The fresh-paid guard does not fire while any discovered file remains
+indexed: a partial missing-row backlog still needs the first-run estimate gate.
+Reprocessing currently embeds the selected file's entire send set, including
+unchanged text; production vector reuse and metadata-only migration are not
+implemented. Expected-positive files with no rows are rediscovered; partial rows
+and legacy zero/missing chunk counts are not repaired by that rule. Delete errors
+propagate, including through shared legacy CLI/Pi reindex paths; those two caller
+paths were not end-to-end tested by this repair. The index
 authority rule (INVARIANT 7.1) now also gates `indexer.ts sessions`, `cli.ts
 reindex`, pi `/memory reindex` and `rebuild-sessions-full.sh` (before it gathers
 or destroys anything), as it already gated `sync-sessions.sh` and

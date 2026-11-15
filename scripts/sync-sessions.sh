@@ -267,7 +267,11 @@ sessions_lock_acquire "sync-sessions --$MODE"
 # --- Step 1: status --json (API 0 — read DB schema + manifest) ---
 # One JSON read gives us actual_dim and to_index. We never spawn `tsx -e`
 # with top-level await here; the env's tsx CJS output has bitten us before.
-STATUS_JSON=$(pnpm exec tsx indexer.ts status --json 2>/dev/null)
+# stderr is not discarded: a strict indexed-files read error must be visible.
+STATUS_JSON=$(pnpm exec tsx indexer.ts status --json) || {
+  echo "❌ refused: status --json failed (see the error above) — no embedding, no publish, no API call" >&2
+  exit 1
+}
 
 ACTUAL_DIM=$(printf '%s' "$STATUS_JSON" | python3 -c '
 import sys, json
@@ -465,7 +469,11 @@ node --import tsx indexer.ts sessions || INDEX_RC=$?
 if [ "$MODE" = "global" ]; then
   if [ "$INDEX_OK" = "1" ]; then
     # Re-read the row count: publish judges the index it ships, not the pre-run one.
-    ROWS=$(pnpm exec tsx indexer.ts status --json 2>/dev/null | python3 -c '
+    POST_JSON=$(pnpm exec tsx indexer.ts status --json) || {
+      echo "❌ publish stopped: post-index status --json failed (see the error above) — the replica was NOT updated" >&2
+      exit 1
+    }
+    ROWS=$(printf '%s' "$POST_JSON" | python3 -c '
 import sys, json
 print(int(json.loads(sys.stdin.read()).get("sessions", {}).get("count", 0) or 0))
 ')
