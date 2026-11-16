@@ -19,5 +19,8 @@ data
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
 
+# Caller-maintained Entwurf sibling bookmarks (not runtime configuration).
+/team.json
+
 # agent scratch — incident notes, drafts awaiting GLG review
 .agent-reports/
