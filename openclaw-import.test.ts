@@ -29,6 +29,7 @@ import {
 	readWatermarkHost,
 	writeWatermark,
 	getWatermarkPath,
+	OPENCLAW_UPDATED_AT_MEANING,
 	type OpenclawRow,
 } from "./openclaw-importer.ts";
 
@@ -253,6 +254,31 @@ console.log("\n=== watermark host scoping ===");
 		if (prev === undefined) delete process.env.ANDENKEN_DATA;
 		else process.env.ANDENKEN_DATA = prev;
 	}
+}
+
+console.log("\n=== openclaw updated_at label (index time, not event date) ===");
+
+{
+	// The stored timestamp is the upstream index-row stamp, carried verbatim. A
+	// rebuild restamps rows, so the same chunk re-exported later carries a later
+	// stamp although its content and date did not change.
+	const before = prepareRow(row({ updated_at: Date.UTC(2026, 9, 23, 3, 36) }));
+	const restamped = prepareRow(row({ updated_at: Date.UTC(2026, 10, 15, 11, 21) }));
+	ok("timestamp is the upstream updated_at, verbatim",
+		before.kind === "import" && before.chunk.timestamp === "2026-10-23T03:36:00.000Z");
+	ok("a restamp changes only the timestamp, not id or text",
+		before.kind === "import" && restamped.kind === "import"
+		&& before.chunk.id === restamped.chunk.id && before.chunk.text === restamped.chunk.text
+		&& before.chunk.timestamp !== restamped.chunk.timestamp);
+	ok("the label names it index time", /index-row update time/.test(OPENCLAW_UPDATED_AT_MEANING));
+	ok("the label says it is not the original date", /not the original/.test(OPENCLAW_UPDATED_AT_MEANING));
+
+	// Static wiring check: search-openclaw keeps the `updated_at` key per hit and
+	// adds the label at the top level (no rename, no schema change).
+	const cli = fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname), "cli.ts"), "utf8");
+	ok("search-openclaw still emits per-hit updated_at", /updated_at: r\.timestamp,/.test(cli));
+	ok("search-openclaw adds updated_at_meaning at the top level",
+		/updated_at_meaning: OPENCLAW_UPDATED_AT_MEANING, results: out/.test(cli));
 }
 
 console.log(`\n${"─".repeat(40)}`);

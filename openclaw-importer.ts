@@ -121,6 +121,19 @@ export function prepareRow(r: OpenclawRow): RowVerdict {
 }
 
 /**
+ * What `timestamp` means on this track — and therefore what `search-openclaw`
+ * prints as `updated_at`.
+ *
+ * `prepareRow` stores OpenClaw's `memory_index_chunks.updated_at`: the upstream
+ * index row's last update, not the date of the note or conversation it
+ * describes. Reindexing can change it without the original note or event date
+ * changing. The key name stays `updated_at` so existing consumers keep working;
+ * this label is additive and says what it is.
+ */
+export const OPENCLAW_UPDATED_AT_MEANING =
+	"index-row update time of the OpenClaw memory index (restamped by upstream rebuilds); not the original note or event date";
+
+/**
  * Which of these rows actually have to be written.
  *
  * The export asks `updated_at >= watermark`, so a run with nothing new still

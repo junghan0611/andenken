@@ -24,6 +24,7 @@ import { VectorStore, getSessionsDbPath, getOrgDbPath, getMdDbPath, getOpenclawD
 import { findSessionFiles, extractSessionChunks, normalizeSourceFilter } from "./session-indexer.js";
 import { retrieve, expandQueryForBM25, getShortCJKTokens, sortByTimestampDesc, type MergeStrategy } from "./retriever.js";
 import { readHitExcerpt, isHitExcerpt, type HitExcerpt, type HitUnsupported } from "./session-excerpt-dispatch.js";
+import { OPENCLAW_UPDATED_AT_MEANING } from "./openclaw-importer.js";
 import {
   searchMdCore,
   dictcliExpand,
@@ -811,7 +812,9 @@ async function searchOpenclaw(query: string, limit: number, full: boolean): Prom
     text: full ? r.text : r.text.slice(0, 400),
   }));
 
-  console.log(JSON.stringify({ axis: "openclaw", query, ...ftsRequestReport(ftsDiag.result()), count: out.length, results: out }, null, 2));
+  // `updated_at` is the OpenClaw index-row time, not the note/event date; the
+  // additive `updated_at_meaning` says so without renaming the per-hit key.
+  console.log(JSON.stringify({ axis: "openclaw", query, ...ftsRequestReport(ftsDiag.result()), count: out.length, updated_at_meaning: OPENCLAW_UPDATED_AT_MEANING, results: out }, null, 2));
   await store.close();
 }
 
