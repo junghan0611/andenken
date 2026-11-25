@@ -5,6 +5,10 @@ andenken CalVer 스냅샷. 형식 `vYYYY.M.D[-suffix]`. 과거에 *닫힌* 작�
 
 ## Unreleased
 
+## v2026.11.26 — BGE-M3 generations and guarded OpenClaw harvest
+
+This source release does not deploy indexes or switch consumers. Isolated acceptance reported 63,092 session rows, 15,289 garden rows and 10,612 OpenClaw rows. Six known-item session/garden CLI probes passed; four early topical session probes missed. OpenClaw harvest and FTS were verified, but cross-generation semantic retrieval was not accepted or attested. Keep the previous code, configuration and stores together for recovery.
+
 ### BGE-M3 only; the Qwen / 4096d generation is no longer known to current code (2026-11-26)
 
 - Removed every Qwen / 4096d path from active code: the legacy `openrouter-qwen3-8b-4096` profile and its "unstamped store = legacy" rule, model-string / preset / Gemini provider construction (`model-presets.ts`, `GeminiProvider`, `createProvider`, `resolveProviderType`), automatic profile inference and all `|| 4096` / `?? 2560` dimension defaults. Providers are built only from `ANDENKEN_<NS>_PROFILE` (`ollama-bge-m3-1024`); an unstamped store with rows is refused for read and write. The earlier generation (4096d indexes, manifests, backups) is a recovery artefact restored together with its own code and configuration, never read by this code; `data/` is untouched.
