@@ -25,6 +25,7 @@ import {
 	prepareRow,
 	importOpenclaw,
 	openclawProducerFromManifest,
+	openclawManifestProducers,
 	mergeWatermark,
 	partitionByChange,
 	type PreparedChunk,
@@ -73,6 +74,37 @@ console.log("\n=== producer identity ===");
 		let message = "";
 		try { openclawProducerFromManifest(lines); } catch (e) { message = String(e); }
 		ok(label + " refused", message.includes(code));
+	}
+}
+
+console.log("\n=== never-indexed empty agent (live shape 2026-11-26: claude) ===");
+{
+	const valid = { model: "baai/bge-m3", provider: "openai", vectorDims: 1024, chunkingVersion: 6 };
+	const EMPTY_SHA = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+	const populated = (name: string) => JSON.stringify({ kind: "agent", agent: name, state: "ok", rows: 3, revision: 4, meta: { memory_index_meta_v1: valid }, indexed_mtime: { memory: 1 }, max_updated_at: 5 });
+	// The exact record the live export produced for an agent that never indexed.
+	const emptyRec = (over: Record<string, unknown> = {}) => JSON.stringify({ kind: "agent", agent: "claude", run_id: "r", snapshot_at: 1, state: "ok", rows: 0, max_updated_at: null, revision: 0, meta: {}, indexed_mtime: {}, digest: EMPTY_SHA, row_digest: EMPTY_SHA, ...over });
+	const r = openclawManifestProducers([populated("bbot"), emptyRec()]);
+	ok("an explicitly never-indexed empty agent is named, not a producer", JSON.stringify(r.emptyAgents) === JSON.stringify(["claude"]));
+	ok("its revision is never stamped", !("claude" in r.producer.revisions) && !("claude" in (r.producer.chunkingVersions ?? {})) && r.producer.revisions.bbot === 4);
+	ok("the legacy entry point returns the same producer", JSON.stringify(openclawProducerFromManifest([populated("bbot"), emptyRec()])) === JSON.stringify(r.producer));
+	const fatal: Array<[string, string[]]> = [
+		["rows > 0 without meta", [populated("bbot"), emptyRec({ rows: 2 })]],
+		["revision > 0 (it indexed before)", [populated("bbot"), emptyRec({ revision: 3 })]],
+		["revision absent (ambiguous)", [populated("bbot"), JSON.stringify({ ...JSON.parse(emptyRec()), revision: undefined })]],
+		["max_updated_at set", [populated("bbot"), emptyRec({ max_updated_at: 7 })]],
+		["indexed_mtime non-empty", [populated("bbot"), emptyRec({ indexed_mtime: { memory: 1 } })]],
+		["meta has other keys but no v1", [populated("bbot"), emptyRec({ meta: { something: 1 } })]],
+		["meta field absent", [populated("bbot"), JSON.stringify({ ...JSON.parse(emptyRec()), meta: undefined })]],
+		["digest not the empty digest", [populated("bbot"), emptyRec({ digest: "0".repeat(64) })]],
+		["state delta-failed", [populated("bbot"), emptyRec({ state: "delta-failed" })]],
+		["a chunk line listed for the empty agent", [populated("bbot"), emptyRec(), JSON.stringify({ kind: "chunk", agent: "claude", id: "x" })]],
+		["only empty agents (no producer at all)", [emptyRec()]],
+	];
+	for (const [label, lines] of fatal) {
+		let message = "";
+		try { openclawManifestProducers(lines); } catch (e) { message = String(e); }
+		ok(`fatal: ${label}`, message.includes("openclaw-producer-meta-missing"), message);
 	}
 }
 
@@ -322,6 +354,27 @@ console.log("\n=== openclaw updated_at label (index time, not event date) ===");
 		fs.unlinkSync(path.join(tmp, "openclaw.lance", "andenken-profile.json"));
 		err = ""; try { await importOpenclaw(file); } catch (e) { err = String(e); }
 		ok("unstamped populated store refused", err.includes("store-unstamped"));
+		// A never-indexed empty agent with a chunk in the staged rows: refused before ANY store mutation.
+		fs.rmSync(path.join(tmp, "openclaw.lance"), { recursive: true, force: true });
+		fs.rmSync(path.join(tmp, "openclaw-watermark.json"), { force: true });
+		const valid = { model: "baai/bge-m3", provider: "openai", vectorDims: 1024, chunkingVersion: 2 };
+		const EMPTY_SHA = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+		fs.writeFileSync(path.join(stage, "manifest.jsonl.gz"), zlib.gzipSync([
+			JSON.stringify({ kind: "agent", agent: "a", state: "ok", rows: 250, revision: 1, meta: { memory_index_meta_v1: valid } }),
+			JSON.stringify({ kind: "agent", agent: "claude", state: "ok", rows: 0, max_updated_at: null, revision: 0, meta: {}, indexed_mtime: {}, digest: EMPTY_SHA, row_digest: EMPTY_SHA }),
+		].join("\n") + "\n"));
+		// 250 rows of the vouched agent first (more than one 200-row flush), then one of the empty agent.
+		const many = Array.from({ length: 250 }, (_, i) => JSON.stringify(row({ agent: "a", id: `a${i}`, text: `row ${i} 충분히 긴 본문 텍스트 ${i}` })));
+		fs.writeFileSync(file, zlib.gzipSync([...many, JSON.stringify(row({ agent: "claude", id: "c1" }))].join("\n") + "\n"));
+		err = ""; try { await importOpenclaw(file); } catch (e) { err = String(e); }
+		ok("a chunk of the never-indexed empty agent is refused", err.includes("openclaw-producer-meta-missing") && err.includes("claude"), err);
+		ok("…before any store mutation (no openclaw.lance created, no watermark)", !fs.existsSync(path.join(tmp, "openclaw.lance")) && !fs.existsSync(path.join(tmp, "openclaw-watermark.json")));
+		// Without that chunk the import proceeds and names the empty agent.
+		fs.writeFileSync(file, zlib.gzipSync(many.join("\n") + "\n"));
+		const st = await importOpenclaw(file);
+		ok("the import proceeds and reports the empty agent by name", JSON.stringify(st.emptyAgents) === JSON.stringify(["claude"]) && st.seen === 250);
+		const s2 = readStoreStamp(path.join(tmp, "openclaw.lance"));
+		ok("the stamp never records the empty agent", s2.state === "ok" && !("claude" in (s2.stamp.producer?.revisions ?? {})) && s2.stamp.producer?.revisions.a === 1);
 	} finally {
 		fs.rmSync(tmp, { recursive: true, force: true });
 		if (prev === undefined) delete process.env.ANDENKEN_DATA; else process.env.ANDENKEN_DATA = prev;

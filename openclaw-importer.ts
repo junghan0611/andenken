@@ -211,6 +211,8 @@ export interface ImportStats {
 	fts?: string;
 	byAgent: Record<string, number>;
 	watermark: Record<string, number>;
+	/** Agents the manifest proves never indexed (empty): named, not producers, never stamped. */
+	emptyAgents?: string[];
 }
 
 export function getStagingPath(): string {
@@ -413,18 +415,58 @@ export function stagingState(): {
  * the whole artifact a mixed generation, and the import refuses it before a
  * single row is read. Exported for tests.
  */
-export function openclawProducerFromManifest(manifestLines: Iterable<string>): StampProducer {
+/** sha256 of the empty string: the export's id / row digest over zero rows. */
+const EMPTY_ROWS_DIGEST = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+/**
+ * An agent the export PROVES never indexed (live shape 2026-11-26, `claude`):
+ * state ok, rows 0, revision 0, meta {} (no memory_index_meta at all),
+ * max_updated_at null, indexed_mtime {}, and — when present — the empty-set
+ * digests. Every field must say so; anything else without producer meta stays
+ * fatal (populated, stale, revision > 0, ambiguous, inconsistent).
+ */
+function isNeverIndexedEmpty(r: Record<string, unknown>): boolean {
+	const emptyObj = (v: unknown) => v !== null && typeof v === "object" && !Array.isArray(v) && Object.keys(v as object).length === 0;
+	return (
+		r.state === "ok" &&
+		r.rows === 0 &&
+		r.revision === 0 &&
+		emptyObj(r.meta) &&
+		"max_updated_at" in r && r.max_updated_at === null &&
+		emptyObj(r.indexed_mtime) &&
+		(r.digest === undefined || r.digest === EMPTY_ROWS_DIGEST) &&
+		(r.row_digest === undefined || r.row_digest === EMPTY_ROWS_DIGEST)
+	);
+}
+
+/**
+ * Producer facts per agent from the staged manifest, plus the agents that are
+ * proven never-indexed and empty. Those are NOT producers: their revision is
+ * never stamped and any staged chunk of theirs is refused (importOpenclaw
+ * checks that before touching the store). They are reported by name, never
+ * silently dropped.
+ */
+export function openclawManifestProducers(manifestLines: Iterable<string>): { producer: StampProducer; emptyAgents: string[] } {
 	const revisions: Record<string, string | number | null> = {};
 	const chunkingVersions: Record<string, number | null> = {};
+	const emptyAgents: string[] = [];
+	const chunkAgents = new Set<string>();
 	let agents = 0;
 	for (const line of manifestLines) {
 		if (!line.trim()) continue;
-		const r = JSON.parse(line) as { kind?: string; agent?: string; state?: string; revision?: unknown; meta?: { memory_index_meta_v1?: Record<string, unknown> } };
+		const r = JSON.parse(line) as Record<string, unknown> & { kind?: string; agent?: string; state?: string; revision?: unknown; meta?: { memory_index_meta_v1?: Record<string, unknown> } };
+		if (r.kind === "chunk" && typeof r.agent === "string") chunkAgents.add(r.agent);
 		if (r.kind !== "agent" || typeof r.agent !== "string") continue;
 		if (r.state === "no-index") continue;
-		agents++;
 		const m = r.meta?.memory_index_meta_v1;
-		if (!m) throw new Error(`openclaw-producer-meta-missing: agent ${r.agent}`);
+		if (!m) {
+			if (isNeverIndexedEmpty(r)) {
+				emptyAgents.push(r.agent);
+				continue;
+			}
+			throw new Error(`openclaw-producer-meta-missing: agent ${r.agent}`);
+		}
+		agents++;
 		if (m.model !== OPENCLAW_PRODUCER.model || m.provider !== OPENCLAW_PRODUCER.provider || m.vectorDims !== OPENCLAW_PRODUCER.vectorDims) {
 			throw new Error(
 				`openclaw-producer-mismatch: agent ${r.agent} says model=${String(m.model)} provider=${String(m.provider)} vectorDims=${String(m.vectorDims)}; ` +
@@ -434,8 +476,17 @@ export function openclawProducerFromManifest(manifestLines: Iterable<string>): S
 		revisions[r.agent] = typeof r.revision === "number" || typeof r.revision === "string" ? r.revision : null;
 		chunkingVersions[r.agent] = typeof m.chunkingVersion === "number" ? m.chunkingVersion : null;
 	}
+	// Inconsistent: an agent claimed empty but the same manifest lists chunk ids for it.
+	for (const a of emptyAgents) {
+		if (chunkAgents.has(a)) throw new Error(`openclaw-producer-meta-missing: agent ${a} is recorded empty but the manifest lists chunks for it`);
+	}
 	if (agents === 0) throw new Error("openclaw-producer-meta-missing: the staged manifest names no indexed agent");
-	return { kind: "openclaw-harvest", ...OPENCLAW_PRODUCER, revisions, chunkingVersions };
+	return { producer: { kind: "openclaw-harvest", ...OPENCLAW_PRODUCER, revisions, chunkingVersions }, emptyAgents: emptyAgents.sort() };
+}
+
+/** The producer only (see openclawManifestProducers). Exported for tests. */
+export function openclawProducerFromManifest(manifestLines: Iterable<string>): StampProducer {
+	return openclawManifestProducers(manifestLines).producer;
 }
 
 export async function importOpenclaw(
@@ -465,8 +516,25 @@ export async function importOpenclaw(
 	// Producer identity before the store: a mixed or foreign artifact refuses here.
 	const manifestPath = path.join(path.dirname(stagingPath), "manifest.jsonl.gz");
 	if (!fs.existsSync(manifestPath)) throw new Error(`openclaw-producer-meta-missing: no staged manifest at ${manifestPath}`);
-	const producer = openclawProducerFromManifest(zlib.gunzipSync(fs.readFileSync(manifestPath)).toString("utf-8").split("\n"));
+	const { producer, emptyAgents } = openclawManifestProducers(zlib.gunzipSync(fs.readFileSync(manifestPath)).toString("utf-8").split("\n"));
 	const producerAgents = new Set(Object.keys(producer.revisions));
+	stats.emptyAgents = emptyAgents;
+
+	// Every staged row must belong to a vouched producer agent — checked over the
+	// WHOLE artifact before the store is opened, so a row of an unvouched or
+	// never-indexed agent cannot land after earlier batches were already written.
+	{
+		const pre = readline.createInterface({ input: fs.createReadStream(stagingPath).pipe(zlib.createGunzip()), crlfDelay: Infinity });
+		for await (const line of pre) {
+			if (!line.trim()) continue;
+			const agent = (JSON.parse(line) as { agent?: unknown }).agent;
+			if (typeof agent !== "string" || !producerAgents.has(agent)) {
+				pre.close();
+				const why = typeof agent === "string" && emptyAgents.includes(agent) ? "which the manifest records as never indexed (empty)" : "which the staged manifest does not vouch for";
+				throw new Error(`openclaw-producer-meta-missing: row of agent ${String(agent)}, ${why} — nothing was written`);
+			}
+		}
+	}
 
 	const store = new VectorStore(getOpenclawDbPath(), OPENCLAW_DIM, { profile: OPENCLAW_PROFILE, producer });
 	await store.init();
@@ -627,6 +695,9 @@ async function main(): Promise<void> {
 		.map(([a, n]) => `${a}=${n}`)
 		.join(" ");
 	if (agents) console.log(`   by agent: ${agents}`);
+	if (stats.emptyAgents && stats.emptyAgents.length > 0) {
+		console.log(`   never indexed (empty, not a producer, not stamped): ${stats.emptyAgents.length} — ${stats.emptyAgents.join(" ")}`);
+	}
 	if (stats.fts) console.log(`   FTS: ${stats.fts}`);
 	console.log(`   💰 API: 0 calls — vectors came already computed`);
 	if (dryRun) console.log("   (dry run — nothing was written)");
