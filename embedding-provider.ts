@@ -133,9 +133,10 @@ export class CachingProvider implements EmbeddingProvider {
 // --- vLLM Provider ---
 
 /**
- * vLLM OpenAI-compatible embedding provider.
+ * Loopback / OpenAI-compatible embedding provider.
  *
- * Calls /v1/embeddings endpoint served by vLLM.
+ * Calls `/v1/embeddings`, or — for a profile whose transport is
+ * `ollama-native` — Ollama's `/api/embed` with `truncate: false`.
  * Supports instruction-aware models (Qwen3-Embedding, etc.)
  * via query/document instruction prefixes.
  *
@@ -619,21 +620,35 @@ export class VLLMProvider implements EmbeddingProvider {
     this._tokenEstimate += Math.ceil(chars / 2.5);
 
     const ep = this.nextEndpoint();
-    const url = `${ep}/v1/embeddings`;
+    // Native Ollama transport (profile.transport): /api/embed with
+    // truncate:false, so the runtime refuses an oversize input instead of
+    // embedding a truncated one. Loopback only — re-checked here, not trusted
+    // from the factory.
+    const profile = this.config.profile;
+    const native = profile?.transport === "ollama-native";
+    if (native && !isLoopbackEndpoint(ep)) {
+      throw Object.assign(new Error(`native-transport-not-loopback: ${ep}`), { nonRetryable: true, code: "native-transport-not-loopback" });
+    }
+    const url = native ? `${ep}/api/embed` : `${ep}/v1/embeddings`;
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
     };
-    if (this.config.apiKey) {
+    if (this.config.apiKey && !native) {
       headers["Authorization"] = `Bearer ${this.config.apiKey}`;
     }
-    const body: Record<string, unknown> = {
-      model: this.config.model,
-      input: inputs,
-    };
-    // Only send dimensions if explicitly configured (not auto-detected)
-    // Some models (e.g., Qwen3-Embedding-0.6B) reject dimensions param
-    if (this._requestDimensions && this._dimensions > 0) {
-      body.dimensions = this._dimensions;
+    let body: Record<string, unknown>;
+    if (native) {
+      body = nativeEmbedBody(profile!, inputs);
+    } else {
+      body = {
+        model: this.config.model,
+        input: inputs,
+      };
+      // Only send dimensions if explicitly configured (not auto-detected)
+      // Some models (e.g., Qwen3-Embedding-0.6B) reject dimensions param
+      if (this._requestDimensions && this._dimensions > 0) {
+        body.dimensions = this._dimensions;
+      }
     }
 
     let attempt = 0;
@@ -660,10 +675,17 @@ export class VLLMProvider implements EmbeddingProvider {
 
         if (!res.ok) {
           const retryAfterMs = parseRetryAfterMs(res.headers.get("retry-after"));
+          const bounded = await readBoundedBody(res);
+          // The runtime's own "input longer than the context" refusal, at ANY
+          // status: permanent for this request, never retried here or by a
+          // caller. Only the status travels; the body text does not.
+          if (native && isContextLengthRefusal(bounded.text)) {
+            throw new EmbeddingRuntimeRefusedLength(res.status);
+          }
           const providerMeta = extractProviderErrorMeta(
             res.status,
             retryAfterMs,
-            await readBoundedBody(res),
+            bounded,
             this.config.apiKey,
           );
           // The message carries allowlisted fields only — never body text.
@@ -685,7 +707,8 @@ export class VLLMProvider implements EmbeddingProvider {
           throw Object.assign(new Error(errMsg), hints);
         }
 
-        const data = (await res.json()) as {
+        const raw = (await res.json()) as unknown;
+        const data = (native ? nativeToValidatable(raw) : raw) as {
           data?: unknown;
           model?: unknown;
           usage?: { prompt_tokens?: unknown };
@@ -764,8 +787,12 @@ export class VLLMProvider implements EmbeddingProvider {
 
 import {
   assertInputsFit,
+  EmbeddingRuntimeRefusedLength,
   getProfile,
+  isContextLengthRefusal,
   isLoopbackEndpoint,
+  nativeEmbedBody,
+  nativeToValidatable,
   validateEmbeddingResponse,
   verifyRuntimeIdentity,
   type EmbeddingProfile,

@@ -12,8 +12,11 @@
  *   - the known profiles (local Ollama BGE-M3 1024d,
  *     OpenRouter BGE-M3 1024d for documents produced on another host)
  *   - a fingerprint over the fields that decide vector geometry
- *   - strict validation of an OpenAI-compatible /v1/embeddings response
- *   - a fail-closed input-length bound for runtimes that silently truncate
+ *   - the request transport: Ollama-native `/api/embed` with `truncate:false`
+ *     for the loopback profile, OpenAI-compatible `/v1/embeddings` otherwise
+ *   - strict validation of an embeddings response (either transport)
+ *   - a fail-closed input-length bound, plus the runtime's own refusal of an
+ *     oversize input classified as permanent
  *   - the store stamp (read / write / compatibility decision)
  *
  * What does NOT live here: starting a runtime, choosing a corpus, or deciding
@@ -63,6 +66,21 @@ export interface EmbeddingProfile {
 	 * 32K-context models where chunks are far below the window).
 	 */
 	tokenOverhead: number | null;
+	/**
+	 * How requests reach the runtime. `ollama-native`: POST `/api/embed` with
+	 * `truncate: false` and `options.num_ctx = maxInputTokens`, so an oversize
+	 * input is an error from the runtime instead of a silently truncated vector
+	 * (Ollama's `/v1/embeddings` cannot say `truncate:false`). Loopback only.
+	 * `openai-v1`: POST `/v1/embeddings`.
+	 *
+	 * PART of the fingerprint (agent-config acceptance, 2026-11-26): rows
+	 * embedded through `/v1` carry no proof that no input was truncated, so a
+	 * `/v1` store and a native no-truncate store are different generations
+	 * until a live parity measurement says otherwise (a short parity probe is
+	 * diagnostic only). Native → native resume under the same pin is the same
+	 * generation; a store or plan from the `/v1` era is refused by fingerprint.
+	 */
+	transport: "ollama-native" | "openai-v1";
 }
 
 /**
@@ -71,8 +89,9 @@ export interface EmbeddingProfile {
  * configuration and data together, never read by this code).
  */
 export const PROFILES: Readonly<Record<string, EmbeddingProfile>> = Object.freeze({
-	// Runtime contract from nixos-config: Ollama 0.32.3, /v1 on loopback
+	// Runtime contract from nixos-config: Ollama 0.32.3 on loopback
 	// 127.0.0.1:11435, bge-m3:latest at this digest, ctx 2048, batch ≤ 4, 30 s.
+	// Requests use the native /api/embed with truncate:false (see `transport`).
 	"ollama-bge-m3-1024": {
 		id: "ollama-bge-m3-1024",
 		family: "bge-m3",
@@ -89,6 +108,7 @@ export const PROFILES: Readonly<Record<string, EmbeddingProfile>> = Object.freez
 		paidRemote: false,
 		endpoint: "http://127.0.0.1:11435",
 		tokenOverhead: 3,
+		transport: "ollama-native",
 	},
 	// Documents embedded on another host (Oracle OpenClaw, its producer only).
 	// Same family as the local profile, DIFFERENT generation: Ollama query
@@ -109,6 +129,7 @@ export const PROFILES: Readonly<Record<string, EmbeddingProfile>> = Object.freez
 		provider: "openrouter",
 		paidRemote: true,
 		tokenOverhead: 3,
+		transport: "openai-v1",
 	},
 });
 
@@ -134,10 +155,15 @@ export function getProfile(id: string): EmbeddingProfile | null {
 	return Object.prototype.hasOwnProperty.call(PROFILES, id) ? PROFILES[id] : null;
 }
 
-/** Fields that decide vector geometry. Batch, timeout and price do not. */
+/**
+ * Fields that decide vector geometry — and, since v3, the transport, because
+ * it decides whether an oversize input could have been silently truncated.
+ * Batch, timeout and price do not.
+ */
 export function profileFingerprint(p: EmbeddingProfile): string {
 	const canonical = JSON.stringify([
-		"andenken-embedding-profile-v2",
+		"andenken-embedding-profile-v3",
+		p.transport,
 		p.provider,
 		p.endpointClass,
 		p.model,
@@ -280,6 +306,64 @@ export function assertInputsFit(p: EmbeddingProfile, kind: "query" | "document",
 	}
 }
 
+/**
+ * The RUNTIME refused a request because an input exceeds its context window
+ * (Ollama `/api/embed` with `truncate:false`). Permanent for that request: the
+ * same text at the same runtime is refused again, so it is never retried. It
+ * means the client-side bound above let through something the runtime counts
+ * as longer — a bound to fix, not a transient. Carries the HTTP status only,
+ * never the body text.
+ */
+export class EmbeddingRuntimeRefusedLength extends Error {
+	readonly nonRetryable = true;
+	readonly code = "runtime-input-exceeds-context";
+	constructor(readonly status: number) {
+		super(`runtime-input-exceeds-context: the runtime refused an oversize input (HTTP ${status})`);
+		this.name = "EmbeddingRuntimeRefusedLength";
+	}
+}
+
+/**
+ * Does an error body from the runtime say "input longer than the context"?
+ * Phrases read from the installed Ollama 0.32.3 binary (2026-11-26): "the input
+ * length exceeds the context length", "input length (%d tokens) exceeds the
+ * model's maximum context length (%d tokens)", "input exceeds maximum context
+ * length and cannot be truncated further", "input after truncation exceeds
+ * maximum context length". Matched on the `error` field of a JSON body, else on
+ * the raw text.
+ */
+export function isContextLengthRefusal(bodyText: string): boolean {
+	let msg = bodyText;
+	try {
+		const j = JSON.parse(bodyText) as { error?: unknown };
+		if (j && typeof j.error === "string") msg = j.error;
+	} catch {
+		/* not JSON: use the raw text */
+	}
+	return /exceeds (the )?(model's )?(maximum )?context length/i.test(msg);
+}
+
+/** The native request body: no truncation, the profile's context, no dimensions knob. */
+export function nativeEmbedBody(p: EmbeddingProfile, inputs: readonly string[]): Record<string, unknown> {
+	return { model: p.model, input: [...inputs], truncate: false, options: { num_ctx: p.maxInputTokens } };
+}
+
+/**
+ * Map an Ollama `/api/embed` reply (`{ model, embeddings: number[][],
+ * prompt_eval_count }`) onto the shape `validateEmbeddingResponse` checks.
+ * Native embeddings are positional (no index field), so position is the index;
+ * count, dimension, finite, non-zero and model checks apply unchanged.
+ */
+export function nativeToValidatable(body: unknown): { model?: unknown; data?: unknown; usage?: { prompt_tokens?: unknown } } | unknown {
+	if (body === null || typeof body !== "object" || Array.isArray(body)) return body;
+	const b = body as { model?: unknown; embeddings?: unknown; prompt_eval_count?: unknown };
+	return {
+		...(b.model !== undefined ? { model: b.model } : {}),
+		data: Array.isArray(b.embeddings) ? b.embeddings.map((embedding, index) => ({ index, embedding })) : undefined,
+		usage: { prompt_tokens: b.prompt_eval_count },
+	};
+}
+
 /** Plan-side summary: how many texts would be refused, and the longest one. */
 export function lengthPlan(
 	p: EmbeddingProfile,
@@ -358,6 +442,12 @@ export interface StampPreprocess {
 	documentInstruction: string;
 	/** The split policy the writer used (null = the store's producer split, e.g. a harvest). */
 	split: { target: number; maxCodepoints: number } | null;
+	/**
+	 * `false` when the writer's runtime was asked not to truncate (native
+	 * transport): an oversize input could not have become a vector. Absent on a
+	 * harvest and on stamps written before the field existed (same generation).
+	 */
+	truncate?: false;
 }
 
 /**
@@ -427,6 +517,7 @@ export function readStoreStamp(dbPath: string): StampRead {
 			!isStr(pre.queryInstruction) ||
 			!isStr(pre.documentInstruction) ||
 			!(pre.split === null || (typeof pre.split === "object" && Number.isInteger(pre.split?.target) && Number.isInteger(pre.split?.maxCodepoints))) ||
+			(pre.truncate !== undefined && pre.truncate !== false) ||
 			(prod !== undefined &&
 				(prod.kind !== "openclaw-harvest" || !isStr(prod.model) || !isStr(prod.provider) || prod.vectorDims !== s.dimensions || typeof prod.revisions !== "object" || prod.revisions === null))
 		) {
@@ -452,6 +543,7 @@ export function makeStamp(p: EmbeddingProfile, producer?: StampProducer, now: Da
 			queryInstruction: p.queryInstruction,
 			documentInstruction: p.documentInstruction,
 			split: producer ? null : split ? { target: split.target, maxCodepoints: split.maxCodepoints } : null,
+			...(!producer && p.transport === "ollama-native" ? { truncate: false as const } : {}),
 		},
 		...(producer ? { producer } : {}),
 		createdAt: now.toISOString(),

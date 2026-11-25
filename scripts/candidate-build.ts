@@ -66,6 +66,7 @@ import { acquireSessionsLock, SessionsLockRefused, type SessionsLockHandle } fro
 import { CANDIDATE_PROFILE, CANDIDATE_PROFILE_ID, CANDIDATE_SPLIT, checkSource, defaultPlanEnv, errorCode, readSourceOnce, type PlanEnv } from "./candidate-plan.ts";
 import {
   EmbeddingInputTooLong,
+  EmbeddingRuntimeRefusedLength,
   EmbeddingResponseInvalid,
   assertInputsFit,
   decideStoreProfile,
@@ -355,6 +356,7 @@ export function providerErrorCode(e: unknown): string {
   if (e instanceof BuildAborted || e instanceof BuildRefused) return e.code;
   if (e instanceof EmbeddingResponseInvalid) return `provider-response-invalid-${e.code}`;
   if (e instanceof EmbeddingInputTooLong) return "provider-input-too-long";
+  if (e instanceof EmbeddingRuntimeRefusedLength) return "provider-input-exceeds-context";
   const msg = e instanceof Error ? e.message : "";
   const http = /^vLLM embed \((\d{3})\)/.exec(msg);
   if (http) return `provider-http-${http[1]}`;
@@ -374,7 +376,8 @@ export type FailureClass = "timeout" | "rate-limit" | "server" | "network" | "pe
 export function classifyProviderFailure(e: unknown): FailureClass {
   if (e instanceof BuildAborted || e instanceof BuildRefused) return "permanent";
   // A wrong-shaped reply or a too-long input is permanent for that request, like a wrong dimension.
-  if (e instanceof EmbeddingResponseInvalid || e instanceof EmbeddingInputTooLong) return "permanent";
+  // The runtime's own oversize refusal (native truncate:false) is permanent too: the same text is refused again.
+  if (e instanceof EmbeddingResponseInvalid || e instanceof EmbeddingInputTooLong || e instanceof EmbeddingRuntimeRefusedLength) return "permanent";
   const code = providerErrorCode(e);
   if (code === "provider-timeout" || code === "provider-http-408") return "timeout";
   if (code === "provider-http-429") return "rate-limit";

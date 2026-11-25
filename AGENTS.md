@@ -164,8 +164,17 @@ code, configuration and data, never read by this code.
 - Every reply is validated: one vector per input, integer unique in-range
   index, exact dimension, finite, non-zero, and for loopback profiles the
   echoed model. An invalid reply is permanent (never retried).
-- Runtimes that silently truncate (Ollama `/v1`, ctx 2048) get a fail-closed
-  bound: tokens ≤ NFKC code points + 3, limit 2045. The profiled generation
+- The local profile talks to Ollama's native `/api/embed` with
+  `truncate: false` and `options.num_ctx = 2048` (loopback only), so an
+  oversize input is refused by the runtime instead of embedded truncated
+  (`/v1/embeddings` cannot say that). The runtime refusal is permanent
+  (`provider-input-exceeds-context`, never retried, at any status). The
+  transport IS part of the fingerprint (v3): a `/v1`-era store or plan carries
+  no no-truncation proof and is another generation (refused for write, query
+  only by attestation); native → native resume keeps the same pin. Stamps
+  record `preprocess.truncate: false`.
+- Independently, a fail-closed client bound refuses before any request:
+  tokens ≤ NFKC code points + 3, limit 2045. The profiled generation
   splits md chunks and session messages to fit (`withEmbedSplit`, target 1845
   + code-point ceiling); every character survives. The legacy split is
   byte-identical outside that scope.

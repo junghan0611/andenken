@@ -193,8 +193,9 @@ Usage: ./run.sh <command> [args]
   test:filename               Fixture tests for pi corpus admission by filename (API 0)
   test:corpus                 Fixture tests for corpus-backed device discovery (API 0)
   test:split                  Fixture tests for long-turn embedding split (API 0)
-  test:openclaw               Fixture tests for the OpenClaw harvest, reconcile, prune,
-                              FTS index and harvest lock (API 0, no ~/.env.local). The
+  test:openclaw               Fixture tests for the OpenClaw harvest, reconcile, export
+                              data root, prune, FTS index and harvest lock (API 0, no
+                              ~/.env.local, no real ssh). The
                               FTS test runs only inside a bwrap user/net/pid namespace
                               barrier; no bwrap → exit 3, nothing runs on the host
   test:openclaw-fts:barrier [--expect-head SHA] [--deps-from DIR]
@@ -497,6 +498,7 @@ case "${1:-help}" in
     # test runs only inside the namespace barrier (scripts/test-openclaw-fts-sandboxed.sh).
     cd "$SCRIPT_DIR" && pnpm exec tsx openclaw-import.test.ts \
       && pnpm exec tsx openclaw-reconcile.test.ts \
+      && pnpm exec tsx openclaw-export-dataroot.test.ts \
       && pnpm exec tsx openclaw-prune.test.ts \
       && bash scripts/test-openclaw-fts-sandboxed.sh ;;
   test:openclaw-fts:barrier)

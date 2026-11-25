@@ -484,7 +484,8 @@ test("B2 factory provider: HTTP request sizes follow ANDENKEN_SESSION_MAX_BATCH_
     const p = createSessionProviderFromEnv();
     ok(p);
     const w = withRateLimitRetry(p, rateLimitSliceSize(p)!, POLICY, fakeClock().clock);
-    useRoute((call) => new Response(JSON.stringify({ data: call.input.map((t, index) => ({ index, embedding: Array(1024).fill(vec(t)[0]) })) })));
+    // The profile provider speaks Ollama's native /api/embed (truncate:false).
+    useRoute((call) => new Response(JSON.stringify({ embeddings: call.input.map((t) => Array(1024).fill(vec(t)[0])) })));
     const texts = ["u0", "u1", "u2", "u3", "u4"];
     const out = await w.embedDocumentBatch(texts);
     endRoute();
@@ -492,6 +493,7 @@ test("B2 factory provider: HTTP request sizes follow ANDENKEN_SESSION_MAX_BATCH_
     deepStrictEqual(calls.map((c) => c.input), [["u0", "u1"], ["u2", "u3"], ["u4"]].map((s) => s.map((t) => instr + t)));
     deepStrictEqual(out, texts.map((t) => Array(1024).fill(vec(instr + t)[0])));
     strictEqual(calls[0].auth, null); // no key configured anywhere in this process
+    ok(calls.every((c) => c.url.endsWith("/api/embed")), "native transport");
   } finally {
     endRoute();
     for (const k of Object.keys(process.env)) if (k.startsWith("ANDENKEN_SESSION_")) delete process.env[k];

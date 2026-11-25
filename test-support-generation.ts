@@ -8,7 +8,7 @@
  * - `isolatedEnv()`: a subprocess env with a temp HOME (so ~/.env.local is
  *   never read) and a synthetic ~/.current-device (so authority gates do not
  *   depend on this host). Nothing ANDENKEN_* or credential-shaped is inherited.
- * - `startMockOllama()`: /api/tags (pinned digest) + 1024d /v1/embeddings on
+ * - `startMockOllama()`: /api/tags (pinned digest) + 1024d native /api/embed on
  *   127.0.0.1:<random>. It lives in the test process, so it can only answer
  *   children started with async spawn (spawnSync would block it).
  *
@@ -61,14 +61,18 @@ export function isolatedEnv(home: string, over: Record<string, string> = {}): No
 
 export interface MockOllama {
   endpoint: string;
-  /** Every input text sent to /v1/embeddings, in arrival order. */
+  /** Every input text sent to /api/embed, in arrival order. */
   received: string[];
-  /** /v1/embeddings requests. */
+  /** /api/embed requests. */
   requests: number;
+  /** /api/embed requests that did NOT say truncate:false with num_ctx 2048 (must stay 0). */
+  truncatable: number;
   /** /api/tags requests. */
   tags: number;
   /** When set, every embedding request answers 400 (non-retryable in the provider). */
   failEmbeds: boolean;
+  /** When it returns true for a request's inputs, that request answers 400 with Ollama's oversize error. */
+  refuseWhen: ((inputs: string[]) => boolean) | null;
   reset(): void;
   close(): Promise<void>;
 }
@@ -88,14 +92,17 @@ export async function startMockOllama(): Promise<MockOllama> {
         mock.tags++;
         return json(200, { models: [{ name: PROFILE.model, digest: PROFILE.digest }] });
       }
-      if (req.method === "POST" && req.url === "/v1/embeddings") {
+      if (req.method === "POST" && req.url === "/api/embed") {
         mock.requests++;
         if (mock.failEmbeds) return json(400, { error: "synthetic failure" });
-        const body = JSON.parse(Buffer.concat(parts).toString("utf-8")) as { model?: string; input: string[] };
+        const body = JSON.parse(Buffer.concat(parts).toString("utf-8")) as { model?: string; input: string[]; truncate?: unknown; options?: { num_ctx?: unknown } };
+        if (body.truncate !== false || body.options?.num_ctx !== PROFILE.maxInputTokens) mock.truncatable++;
+        if (mock.refuseWhen?.(body.input)) return json(400, { error: "the input length exceeds the context length" });
         mock.received.push(...body.input);
         return json(200, {
           model: PROFILE.model,
-          data: body.input.map((t, index) => ({ index, embedding: Array.from({ length: DIM }, (_, k) => ((t.length + k) % 7) / 7 + 0.01) })),
+          embeddings: body.input.map((t) => Array.from({ length: DIM }, (_, k) => ((t.length + k) % 7) / 7 + 0.01)),
+          prompt_eval_count: body.input.length,
         });
       }
       json(404, { error: "not found" });
@@ -107,13 +114,17 @@ export async function startMockOllama(): Promise<MockOllama> {
     endpoint: `http://127.0.0.1:${port}`,
     received: [],
     requests: 0,
+    truncatable: 0,
     tags: 0,
     failEmbeds: false,
+    refuseWhen: null,
     reset() {
       mock.received = [];
       mock.requests = 0;
+      mock.truncatable = 0;
       mock.tags = 0;
       mock.failEmbeds = false;
+      mock.refuseWhen = null;
     },
     close: () => new Promise<void>((r) => server.close(() => r())),
   };

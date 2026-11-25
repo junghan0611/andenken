@@ -2,9 +2,10 @@
 # export-openclaw.sh — pull OpenClaw's OWN embedding index rows to this machine.
 #
 # This is a HARVEST, not a sync. OpenClaw embeds its agents' memory and sessions
-# itself, with `qwen/qwen3-embedding-8b` at 4096d — the same model and
-# the same dimension andenken uses. So the rows already carry both the text and
-# the vector, and importing them costs zero embedding API calls. We do not decide
+# itself (since the 2026-11-25 rebuild: OpenRouter `baai/bge-m3`, 1024d — the
+# `openrouter-bge-m3-1024` store generation; the importer pins that producer).
+# So the rows already carry both the text and the vector, and importing them
+# costs zero embedding API calls. We do not decide
 # its chunking, its model, or its scope; that is OpenClaw's configuration (GLG
 # ruling 2026-09-03). We fetch, and we make it findable.
 #
@@ -66,8 +67,6 @@ cd "$(dirname "$0")/.."
 
 HOST="${ANDENKEN_OPENCLAW_HOST:-oracle}"
 REMOTE_AGENTS="${ANDENKEN_OPENCLAW_AGENTS_DIR:-\$HOME/openclaw/config/agents}"
-STAGE="data/openclaw-staging"
-WATERMARK="data/openclaw-watermark.json"
 FULL=0
 # Plain `memory status` only. ANDENKEN_OPENCLAW_STATUS_CMD=off skips it; the
 # board then reports every agent's identity as unknown, never as fresh.
@@ -114,6 +113,47 @@ if [ "$LOCAL_DEVICE" != "$INDEX_AUTHORITY" ] && [ "${ANDENKEN_ALLOW_REPLICA_INDE
   echo "   (nothing was fetched; no ssh was made)" >&2
   exit 1
 fi
+
+# --- Data root ---
+#
+# Staging and watermark live in the SAME absolute data directory that the
+# importer / reconcile read (store.ts getDataDir: ANDENKEN_DATA, else
+# $HOME/repos/gh/andenken/data) and that the harvest lock sits in
+# (scripts/lib/openclaw-lock.sh: ANDENKEN_DATA, else this repo's data/). A
+# repo-relative `data/` here once let an export clean and fill one directory
+# while the importer read another. Resolved and checked BEFORE the lock and the
+# staging cleanup, so a refusal touches nothing:
+#   - ANDENKEN_DATA set (non-empty, as TS and the lock read it): must be an
+#     absolute path, and if it exists, a directory;
+#   - unset: the two defaults must name the same directory, else refuse (set
+#     ANDENKEN_DATA explicitly).
+REPO_ROOT="$(pwd -P)"
+refuse_data_root() {
+  echo "❌ export-openclaw refused: $1" >&2
+  echo "   (nothing was cleaned, locked or fetched; no ssh was made)" >&2
+  exit 2
+}
+if [ -n "${ANDENKEN_DATA:-}" ]; then
+  DATA_ROOT="$ANDENKEN_DATA"
+  case "$DATA_ROOT" in
+    /*) ;;
+    *) refuse_data_root "ANDENKEN_DATA must be an absolute path (got '$DATA_ROOT'); the importer and the lock would resolve it elsewhere" ;;
+  esac
+else
+  TS_DEFAULT="$HOME/repos/gh/andenken/data"
+  LOCK_DEFAULT="$REPO_ROOT/data"
+  if [ "$(realpath -m -- "$TS_DEFAULT")" != "$(realpath -m -- "$LOCK_DEFAULT")" ]; then
+    refuse_data_root "ANDENKEN_DATA is unset and the defaults disagree: importer $TS_DEFAULT vs lock $LOCK_DEFAULT — set ANDENKEN_DATA"
+  fi
+  DATA_ROOT="$LOCK_DEFAULT"
+fi
+case "$DATA_ROOT" in *$'\n'*) refuse_data_root "data root contains a newline" ;; esac
+if [ -e "$DATA_ROOT" ] && [ ! -d "$DATA_ROOT" ]; then
+  refuse_data_root "data root $DATA_ROOT exists and is not a directory"
+fi
+STAGE="$DATA_ROOT/openclaw-staging"
+WATERMARK="$DATA_ROOT/openclaw-watermark.json"
+echo "== openclaw data root: $DATA_ROOT =="
 
 mkdir -p "$STAGE"
 

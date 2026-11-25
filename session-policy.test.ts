@@ -833,6 +833,7 @@ console.log("\n# T6 pinned writer vs a ledger it cannot vouch for, and a sanitiz
     const r = await runChild(["indexer.ts", "sessions"]);
     strictEqual(r.status, 0, r.out);
     ok(mock.requests > 0);
+    strictEqual(mock.truncatable, 0, "sessions requests go through /api/embed with truncate:false");
   });
   const dRows = (await dbRows()).filter((x) => x.sessionFile === fileD).map((x) => x.id).sort();
   const dEntry = manifestOf().files[fileD];
@@ -1050,6 +1051,91 @@ await check("no ~/.current-device, hostname = authority → sync refuses at its 
 });
 
 // --- the profiled preflight (scripts/profile-preflight.ts): mock Ollama on 127.0.0.1:<random> ---
+console.log("\n# garden (md) through the native transport: stamp, split, truncate:false (mock runtime)");
+{
+  const gData = path.join(root, "garden-data");
+  const gRoot = path.join(root, "garden-content");
+  fs.mkdirSync(path.join(gRoot, "notes"), { recursive: true });
+  // One paragraph far past the 2045 code-point window: the md split must cut it.
+  const long = Array.from({ length: 60 }, (_, i) => `가든 문단 ${i} 은 로컬 BGE 생성으로 임베딩된다 native transport check.`).join(" ");
+  fs.writeFileSync(path.join(gRoot, "notes", "20991231T000000.md"), `---\ntitle: "native transport fixture"\ntags: ["fixture"]\n---\n\n# Native\n\n${long}\n\n## Second\n\n${long}\n`);
+  const mdEnv = { ANDENKEN_DATA: gData, ANDENKEN_MD_ROOT: gRoot, ...profileEnv("MD", mock.endpoint) };
+  await check("index:md writes a fresh garden store stamped with the profile, split policy and truncate:false", async () => {
+    resetServer();
+    const r = await runChild(["indexer.ts", "md"], mdEnv);
+    strictEqual(r.status, 0, r.out);
+    ok(mock.requests > 0, "the mock runtime was reached");
+    strictEqual(mock.truncatable, 0, "every /api/embed request said truncate:false with num_ctx 2048");
+    const limit = 2045;
+    ok(mock.received.every((t) => [...t.normalize("NFKC")].length <= limit), "every input fits the window");
+    const st = readStoreStamp(path.join(gData, "md.lance"));
+    ok(st.state === "ok", "stamp present");
+    if (st.state === "ok") {
+      strictEqual(st.stamp.fingerprint, profileFingerprint(PROFILE));
+      deepStrictEqual(st.stamp.preprocess, { queryInstruction: "", documentInstruction: "", split: { target: 1845, maxCodepoints: 2045 }, truncate: false });
+      strictEqual(st.stamp.producer, undefined);
+    }
+  });
+  await check("index:md again (same pin, nothing changed): no request, stamp byte-identical", async () => {
+    const before = fs.readFileSync(path.join(gData, "md.lance", STAMP_FILE));
+    resetServer();
+    const r = await runChild(["indexer.ts", "md"], mdEnv);
+    strictEqual(r.status, 0, r.out);
+    strictEqual(mock.requests, 0);
+    ok(Buffer.compare(before, fs.readFileSync(path.join(gData, "md.lance", STAMP_FILE))) === 0);
+  });
+}
+
+console.log("\n# garden (md) partial failure, then native same-pin resume (mock runtime)");
+{
+  const pData = path.join(root, "garden-partial-data");
+  const pRoot = path.join(root, "garden-partial-content");
+  fs.mkdirSync(path.join(pRoot, "notes"), { recursive: true });
+  const body = (tag: string) => Array.from({ length: 12 }, (_, i) => `${tag} 문단 ${i}: 가든 부분 실패 재개 검증 문장.`).join(" ");
+  const fileA = path.join(pRoot, "notes", "20991231T000001--a.md");
+  const fileB = path.join(pRoot, "notes", "20991231T000002--b.md");
+  fs.writeFileSync(fileA, `---\ntitle: "partial a"\n---\n\n# A\n\n${body("ALPHAOKMARK")}\n`);
+  fs.writeFileSync(fileB, `---\ntitle: "partial b"\n---\n\n# B\n\n${body("BETAFAILMARK")}\n`);
+  const env = { ANDENKEN_DATA: pData, ANDENKEN_MD_ROOT: pRoot, ...profileEnv("MD", mock.endpoint) };
+  const manifestFiles = () => Object.keys((JSON.parse(fs.readFileSync(path.join(pData, "md-manifest.json"), "utf-8")) as { files: Record<string, unknown> }).files).sort();
+  const indexedFiles = async () => {
+    const s = new VectorStore(path.join(pData, "md.lance"), DIM, { readOnly: true });
+    await s.init();
+    const f = [...(await s.getIndexedFiles())].sort();
+    await s.close();
+    return f;
+  };
+  await check("first run: file A committed, file B refused by the runtime (oversize) → run fails, B not checkpointed", async () => {
+    resetServer();
+    mock.refuseWhen = (inputs) => inputs.some((t) => t.includes("BETAFAILMARK"));
+    const r = await runChild(["indexer.ts", "md"], env);
+    ok(r.status !== 0, `the run fails (${r.status})`);
+    ok(r.out.includes("runtime-input-exceeds-context"), "the runtime refusal is named");
+    ok(!r.out.includes("the input length exceeds the context length"), "the runtime body text is not echoed");
+    strictEqual(mock.truncatable, 0);
+    deepStrictEqual(manifestFiles(), [fileA], "only the completed file is in the manifest");
+    deepStrictEqual(await indexedFiles(), [fileA], "only the completed file has rows");
+    const st = readStoreStamp(path.join(pData, "md.lance"));
+    ok(st.state === "ok" && st.stamp.fingerprint === profileFingerprint(PROFILE));
+  });
+  await check("native same-pin resume: only B is sent, A is never resent; manifest and rows complete; verify md passes", async () => {
+    const stampBefore = fs.readFileSync(path.join(pData, "md.lance", STAMP_FILE));
+    resetServer();
+    const r = await runChild(["indexer.ts", "md"], env);
+    strictEqual(r.status, 0, r.out);
+    ok(mock.received.length > 0 && mock.received.every((t) => !t.includes("ALPHAOKMARK")), "file A was not resent");
+    ok(mock.received.some((t) => t.includes("BETAFAILMARK")), "file B was sent");
+    strictEqual(mock.truncatable, 0);
+    deepStrictEqual(manifestFiles(), [fileA, fileB]);
+    deepStrictEqual(await indexedFiles(), [fileA, fileB]);
+    ok(Buffer.compare(stampBefore, fs.readFileSync(path.join(pData, "md.lance", STAMP_FILE))) === 0, "same pin: stamp untouched");
+    resetServer();
+    const v = await runChild(["indexer.ts", "verify", "md"], env);
+    strictEqual(v.status, 0, v.out);
+    strictEqual(mock.requests, 0, "verify makes no embedding request");
+  });
+}
+
 console.log("\n# profile preflight: digest via /api/tags + one validated 1024d probe (mock runtime)");
 {
   const PROFILE = PROFILES["ollama-bge-m3-1024"];
@@ -1064,11 +1150,16 @@ console.log("\n# profile preflight: digest via /api/tags + one validated 1024d p
         res.end(JSON.stringify({ models: [{ name: "bge-m3:latest", digest: mock.digest }] }));
         return;
       }
-      if (req.method === "POST" && req.url === "/v1/embeddings") {
+      if (req.method === "POST" && req.url === "/api/embed") {
         mock.embeds++;
-        const input = (JSON.parse(Buffer.concat(chunks).toString("utf-8")) as { input: string[] }).input;
+        const body = JSON.parse(Buffer.concat(chunks).toString("utf-8")) as { input: string[]; truncate?: unknown };
+        if (body.truncate !== false) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "mock: truncate:false required" }));
+          return;
+        }
         res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ ...(mock.echoModel ? { model: mock.echoModel } : {}), data: input.map((t, index) => ({ index, embedding: Array.from({ length: mock.dim }, (_, k) => ((t.length + k) % 7) / 7 + 0.01) })) }));
+        res.end(JSON.stringify({ ...(mock.echoModel ? { model: mock.echoModel } : {}), embeddings: body.input.map((t) => Array.from({ length: mock.dim }, (_, k) => ((t.length + k) % 7) / 7 + 0.01)) }));
         return;
       }
       res.writeHead(404);

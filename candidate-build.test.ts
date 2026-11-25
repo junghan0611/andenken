@@ -15,7 +15,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { CANDIDATE_SPLIT, parseKstInstant, parseKstWindow, runPlan, validatePlanArgs, windowDecision, type PlanEnv, type PlanWindow } from "./scripts/candidate-plan.ts";
-import { EmbeddingInputTooLong, EmbeddingResponseInvalid, PROFILES, profileFingerprint, readStoreStamp, writeStoreStamp } from "./embedding-profile.ts";
+import { EmbeddingInputTooLong, EmbeddingResponseInvalid, EmbeddingRuntimeRefusedLength, PROFILES, profileFingerprint, readStoreStamp, writeStoreStamp } from "./embedding-profile.ts";
 import {
   allowedCpus,
   backoffDelayMs,
@@ -298,6 +298,9 @@ await check("plan: sha, policy, completeness, target, six source hashes", async 
   await refusedWith("plan-not-complete", (h) => runBuild(args({ plan: inc.p, sha: inc.s }), env(), h.deps));
   const src = mutatedPlan((d) => ((d.sources as Record<string, string>)["session-indexer.ts"] = "0".repeat(64)));
   await refusedWith("plan-sources-changed-replan-required", (h) => runBuild(args({ plan: src.p, sha: src.s }), env(), h.deps));
+  // A plan pinned to the /v1-era generation (same weights, truncatable transport) is another generation.
+  const v1 = mutatedPlan((d) => ((d.profile as Record<string, unknown>).fingerprint = profileFingerprint({ ...PROFILE, transport: "openai-v1" })));
+  await refusedWith("plan-profile-fingerprint-mismatch", (h) => runBuild(args({ plan: v1.p, sha: v1.s }), env(), h.deps));
   await refusedWith("plan-target-mismatch", (h) => runBuild(args({ target: path.join(candidatesRoot, "other") }), env(), h.deps));
 });
 await check("target: exists, overlaps a protected path", async () => {
@@ -625,6 +628,11 @@ await check("backoff and classification units; Retry-After parsing", () => {
   strictEqual(classifyProviderFailure(new Error("vLLM embed (401): x")), "permanent");
   strictEqual(classifyProviderFailure(new Error("vLLM endpoint unreachable: x")), "network");
   strictEqual(classifyProviderFailure(new Error(MARK)), "permanent");
+  // The runtime's oversize refusal is permanent at any status, never "server".
+  for (const st of [400, 500]) {
+    strictEqual(classifyProviderFailure(new EmbeddingRuntimeRefusedLength(st)), "permanent");
+    strictEqual(providerErrorCode(new EmbeddingRuntimeRefusedLength(st)), "provider-input-exceeds-context");
+  }
   const p = DEFAULT_RETRY;
   for (let a = 1; a <= p.maxAttempts; a++) {
     const lo = backoffDelayMs(a, "timeout", p, () => 0);
@@ -696,6 +704,32 @@ await check("exhausted transient retries → partial with checkpoint; --resume f
   await refusedResume("candidate-already-built", first.p, first.t);
   const mr = await runMeasure(["--target", first.t], env());
   ok(mr.pairs.jsonlPairOk && mr.pairs.durablePairOk && mr.db?.rows === plan.budget.sendRows);
+});
+
+await check("runtime oversize refusal mid-build: permanent (no retry), partial kept; --resume under the same pin finishes", async () => {
+  const vc = vclock();
+  let refusedAt = 0;
+  const first = await partialRun("20991231-oversize", { ...vc.deps, retry: SMALL_RETRY, checkpointEvery: 1000 }, undefined, (p) => {
+    p.failWhen = (n) => (n === 30 ? ((refusedAt = n), new EmbeddingRuntimeRefusedLength(500)) : undefined);
+  });
+  // Like every permanent provider failure, the final checkpoint is withheld; resume re-verifies from the DB.
+  deepStrictEqual([first.r.status, first.r.code, first.rc.finalCheckpoint], ["partial", "provider-input-exceeds-context", "withheld"]);
+  strictEqual(refusedAt, 30);
+  strictEqual(first.rc.api.retries, 0, "a permanent refusal is never resubmitted");
+  strictEqual(first.rc.api.failures.permanent, 1);
+  strictEqual(first.rc.api.failures.server, 0, "a 5xx oversize is not counted as a server failure");
+  const st0 = readStoreStamp(path.join(first.t, "sessions.lance"));
+  ok(st0.state === "ok" && st0.stamp.fingerprint === profileFingerprint(PROFILE) && st0.stamp.preprocess.truncate === false, "partial carries the pinned stamp");
+  const stampBefore = fs.readFileSync(path.join(first.t, "sessions.lance", "andenken-profile.json"));
+
+  const h = harness(vclock().deps);
+  const r = await runBuild(resumeArgs(first.p, first.t), env(), h.deps);
+  const rc = JSON.parse(fs.readFileSync(path.join(first.t, "candidate-receipt.json"), "utf8"));
+  deepStrictEqual([r.status, rc.status, rc.attempt, rc.mode], ["built", "built", 2, "resume"]);
+  deepStrictEqual([rc.attempts[0].code], ["provider-input-exceeds-context"]);
+  ok(Buffer.compare(stampBefore, fs.readFileSync(path.join(first.t, "sessions.lance", "andenken-profile.json"))) === 0, "same pin: the stamp is untouched by the resume");
+  const v = await verifyCandidate(path.join(first.t, "sessions.lance"));
+  strictEqual(v.rows, plan.budget.sendRows);
 });
 
 await check("resume adopts a file complete in the DB but missing from the manifest, deletes an incomplete one (candidate only)", async () => {

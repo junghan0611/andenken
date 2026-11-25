@@ -28,7 +28,9 @@ const {
 	PROFILES,
 	EmbeddingInputTooLong,
 	EmbeddingResponseInvalid,
+	EmbeddingRuntimeRefusedLength,
 	StoreProfileRefused,
+	isContextLengthRefusal,
 	assertInputsFit,
 	decideStoreAccess,
 	getProfile,
@@ -81,6 +83,12 @@ const okBody = (n: number, dim: number, model?: string, reorder = true) => {
 	const data = Array.from({ length: n }, (_, index) => ({ index, embedding: vec(index, dim) }));
 	return { ...(model ? { model } : {}), data: reorder ? data.reverse() : data };
 };
+/** Ollama `/api/embed` reply: positional `embeddings`, `prompt_eval_count`. */
+const nativeBody = (n: number, dim: number, model?: string) => ({
+	...(model ? { model } : {}),
+	embeddings: Array.from({ length: n }, (_, i) => vec(i, dim)),
+	prompt_eval_count: n * 3,
+});
 
 // ---------------------------------------------------------------------------
 // P — profiles
@@ -190,19 +198,22 @@ test("V1 profile provider: batch ≤ 4, order kept, wrong model/dim refused afte
 	const tagsOk = () => json({ models: [{ name: "bge-m3:latest", digest: BGE.digest }] });
 	route = (url, init) => {
 		if (url.endsWith("/api/tags")) return tagsOk();
-		strictEqual(url, "http://127.0.0.1:11435/v1/embeddings");
-		const body = JSON.parse(String(init?.body)) as { model: string; input: string[]; dimensions?: number };
+		strictEqual(url, "http://127.0.0.1:11435/api/embed", "native transport, not /v1");
+		const body = JSON.parse(String(init?.body)) as { model: string; input: string[]; dimensions?: number; truncate?: unknown; options?: { num_ctx?: unknown } };
 		strictEqual(body.model, "bge-m3:latest");
 		strictEqual(body.dimensions, undefined);
+		strictEqual(body.truncate, false, "the runtime is told never to truncate");
+		strictEqual(body.options?.num_ctx, 2048, "explicit context = profile window");
 		sizes.push(body.input.length);
-		return json(okBody(body.input.length, 1024, "bge-m3:latest"));
+		return json(nativeBody(body.input.length, 1024, "bge-m3:latest"));
 	};
 	const out = await p.embedDocumentBatch(["a", "b", "c", "d", "e", "f"]);
 	deepStrictEqual(sizes, [4, 2]);
 	strictEqual(out.length, 6);
 	deepStrictEqual(out[5], vec(1, 1024));
+	strictEqual(p.getStats().reportedPromptTokens, 18, "prompt_eval_count is the reported usage");
 
-	for (const bad of [okBody(1, 1024, "bge-m3:other"), okBody(1, 1023, "bge-m3:latest"), { data: [] }]) {
+	for (const bad of [nativeBody(1, 1024, "bge-m3:other"), nativeBody(1, 1023, "bge-m3:latest"), { embeddings: [] }, { data: okBody(1, 1024).data }, nativeBody(2, 1024, "bge-m3:latest")]) {
 		fetchCalls = 0;
 		route = () => json(bad);
 		await rejects(p.embedQuery("q"), EmbeddingResponseInvalid);
@@ -216,7 +227,7 @@ test("V3 digest-pinned provider proves runtime identity before its FIRST request
 	const seen: string[] = [];
 	route = (url) => {
 		seen.push(new URL(url).pathname);
-		return url.endsWith("/api/tags") ? json({ models: [{ name: "bge-m3:latest", digest: "0".repeat(64) }] }) : json(okBody(1, 1024, "bge-m3:latest"));
+		return url.endsWith("/api/tags") ? json({ models: [{ name: "bge-m3:latest", digest: "0".repeat(64) }] }) : json(nativeBody(1, 1024, "bge-m3:latest"));
 	};
 	const bad = mk();
 	await rejects(bad.embedQuery("q"), (e: unknown) => (e as { code?: string }).code === "runtime-identity-digest-mismatch");
@@ -225,13 +236,101 @@ test("V3 digest-pinned provider proves runtime identity before its FIRST request
 	seen.length = 0;
 	route = (url) => {
 		seen.push(new URL(url).pathname);
-		return url.endsWith("/api/tags") ? json({ models: [{ name: "bge-m3:latest", digest: BGE.digest }] }) : json(okBody(1, 1024, "bge-m3:latest"));
+		return url.endsWith("/api/tags") ? json({ models: [{ name: "bge-m3:latest", digest: BGE.digest }] }) : json(nativeBody(1, 1024, "bge-m3:latest"));
 	};
 	const good = mk();
 	await good.embedQuery("q");
 	await good.embedQuery("r");
-	deepStrictEqual(seen, ["/api/tags", "/v1/embeddings", "/v1/embeddings"]);
+	deepStrictEqual(seen, ["/api/tags", "/api/embed", "/api/embed"]);
 	route = null;
+});
+
+// ---------------------------------------------------------------------------
+// N — native transport: no truncation, runtime oversize refusal is permanent
+// ---------------------------------------------------------------------------
+
+test("N1 runtime oversize refusal (any status) → EmbeddingRuntimeRefusedLength after ONE attempt; body text never in the error", async () => {
+	const p = new VLLMProvider({ endpoint: BGE.endpoint!, model: BGE.model, dimensions: 1024, profile: BGE });
+	route = (url) => (url.endsWith("/api/tags") ? json({ models: [{ name: "bge-m3:latest", digest: BGE.digest }] }) : json(nativeBody(1, 1024, "bge-m3:latest")));
+	await p.embedQuery("warm"); // identity proven once
+	const bodies: Array<[number, string]> = [
+		[400, "the input length exceeds the context length"],
+		[500, "input length (2101 tokens) exceeds the model's maximum context length (2048 tokens)"],
+		[400, "input exceeds maximum context length and cannot be truncated further"],
+		[500, "input after truncation exceeds maximum context length"],
+	];
+	for (const [status, error] of bodies) {
+		fetchCalls = 0;
+		route = () => json({ error: `${error} SECRETMARK` }, status);
+		await rejects(p.embedDocumentBatch(["a"]), (e: unknown) => {
+			ok(e instanceof EmbeddingRuntimeRefusedLength, String(e));
+			strictEqual((e as { code?: string }).code, "runtime-input-exceeds-context");
+			strictEqual((e as { status?: number }).status, status);
+			ok(!String((e as Error).message).includes("SECRETMARK"), "no body text in the message");
+			return true;
+		});
+		strictEqual(fetchCalls, 1, `HTTP ${status}: no retry (a 5xx oversize is not transient)`);
+	}
+	// Another 400 is NOT an oversize refusal; another 5xx keeps the transport retry.
+	fetchCalls = 0;
+	route = () => json({ error: "model not found" }, 400);
+	await rejects(p.embedQuery("q"), (e: unknown) => !(e instanceof EmbeddingRuntimeRefusedLength) && (e as { status?: number }).status === 400);
+	strictEqual(fetchCalls, 1);
+	route = null;
+});
+
+test("N2 isContextLengthRefusal: JSON error field or raw text; unrelated errors are not oversize", () => {
+	ok(isContextLengthRefusal(JSON.stringify({ error: "the input length exceeds the context length" })));
+	ok(isContextLengthRefusal("input length (9 tokens) exceeds the model's maximum context length (8 tokens)"));
+	ok(!isContextLengthRefusal(JSON.stringify({ error: "model 'x' not found" })));
+	ok(!isContextLengthRefusal(""));
+});
+
+test("N3 native transport is loopback-only even when constructed by hand; zero requests", async () => {
+	const p = new VLLMProvider({ endpoint: "http://stub.invalid:11435", model: BGE.model, dimensions: 1024, profile: { ...BGE, digest: null } });
+	fetchCalls = 0;
+	route = () => json(nativeBody(1, 1024, "bge-m3:latest"));
+	await rejects(p.embedQuery("q"), (e: unknown) => (e as { code?: string }).code === "native-transport-not-loopback");
+	strictEqual(fetchCalls, 0);
+	// The hosted profile keeps the OpenAI-compatible transport.
+	strictEqual(OR_BGE.transport, "openai-v1");
+	strictEqual(BGE.transport, "ollama-native");
+	route = null;
+});
+
+test("N4 transport is part of the generation: a /v1 store is refused for native writes and queries; native → native stays", async () => {
+	ok(profileFingerprint(BGE) !== profileFingerprint({ ...BGE, transport: "openai-v1" }), "v1 and native never share a fingerprint");
+	// A store written by the /v1-era twin of the same weights.
+	const V1 = { ...A, transport: "openai-v1" as const };
+	const db = newDb();
+	const w = new VectorStore(db, 4, { profile: V1 });
+	await w.ensureTable();
+	await w.addChunks([row(1)]);
+	await w.close();
+	deepStrictEqual(decideStoreAccess(db, A, 1, 4, "write"), { ok: false, code: "store-profile-mismatch" });
+	deepStrictEqual(decideStoreAccess(db, A, 1, 4, "query"), { ok: false, code: "query-generation-not-attested" }, "a /v1 store is another generation: only a human attestation could open it for queries");
+	const nw = new VectorStore(db, 4, { profile: A });
+	await nw.init();
+	await rejects(nw.assertCompatibleDim(), (e: unknown) => e instanceof StoreProfileRefused && e.code === "store-profile-mismatch");
+	await rejects(nw.reset(), StoreProfileRefused);
+	await nw.close();
+	// native → native: same pin, the store keeps growing.
+	const ndb = newDb();
+	const n1 = new VectorStore(ndb, 4, { profile: A });
+	await n1.ensureTable();
+	await n1.addChunks([row(1)]);
+	await n1.close();
+	const n2 = new VectorStore(ndb, 4, { profile: A });
+	await n2.init();
+	await n2.assertCompatibleDim();
+	await n2.addChunks([row(2)]);
+	strictEqual(await n2.getCount(), 2);
+	await n2.close();
+	const st = JSON.parse(fs.readFileSync(stampPath(ndb), "utf-8"));
+	strictEqual(st.preprocess.truncate, false);
+	st.preprocess.truncate = true;
+	fs.writeFileSync(stampPath(ndb), JSON.stringify(st));
+	strictEqual(readStoreStamp(ndb).state, "invalid", "truncate: true can never be recorded");
 });
 
 test("V2 legacy auto-detect provider still validates the whole reply against the first vector", async () => {
@@ -481,7 +580,7 @@ test("S8 stamp v2 records provider / revision / preprocess; harvest producer mer
 	ok(st.state === "ok");
 	if (st.state === "ok") {
 		deepStrictEqual([st.stamp.kind, st.stamp.provider, st.stamp.digest], ["andenken-store-profile-v2", "ollama", A.digest]);
-		deepStrictEqual(st.stamp.preprocess, { queryInstruction: "", documentInstruction: "", split: { target: 1845, maxCodepoints: 2045 } });
+		deepStrictEqual(st.stamp.preprocess, { queryInstruction: "", documentInstruction: "", split: { target: 1845, maxCodepoints: 2045 }, truncate: false });
 	}
 	const hdb = newDb();
 	const prod = { kind: "openclaw-harvest" as const, model: "baai/bge-m3", provider: "openai", vectorDims: 4, revisions: { a: 1 }, chunkingVersions: { a: 6 } };
@@ -491,6 +590,7 @@ test("S8 stamp v2 records provider / revision / preprocess; harvest producer mer
 	const merged = writeStoreStamp(hdb, B, 1, { ...prod, revisions: { b: 7 }, chunkingVersions: { b: 6 } });
 	deepStrictEqual(merged.producer?.revisions, { a: 1, b: 7 });
 	strictEqual(merged.preprocess.split, null, "a harvest records the producer's split, not ours");
+	strictEqual(merged.preprocess.truncate, undefined, "a harvest records no truncation claim of ours");
 	throws(() => writeStoreStamp(hdb, B, 1, { ...prod, model: "other" }), (e: unknown) => (e as { code?: string }).code === "store-producer-mismatch");
 	// a v1 stamp (pre-2026-11-26 format) is unreadable, not silently accepted
 	const v1 = newDb();
