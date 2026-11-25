@@ -911,7 +911,7 @@ console.log("\n# wrappers refuse before gather, preflight or destroy");
 // A copy of the wrapper layout in the fake repo; pnpm resolves `indexer.ts policy`
 // to the real reader against data/, every other call is recorded and fails.
 fs.mkdirSync(path.join(fakeRepo, "scripts", "lib"), { recursive: true });
-for (const f of ["rebuild-sessions-full.sh", "sync-sessions.sh", "lib/sessions-policy.sh", "lib/sessions-lock.sh", "lib/corpus-custody.sh"]) {
+for (const f of ["rebuild-sessions-full.sh", "sync-sessions.sh", "lib/sessions-policy.sh", "lib/sessions-lock.sh", "lib/corpus-custody.sh", "lib/env-mode.sh"]) {
   fs.copyFileSync(path.join(REPO, "scripts", f), path.join(fakeRepo, "scripts", f));
 }
 const calls = path.join(root, "calls");

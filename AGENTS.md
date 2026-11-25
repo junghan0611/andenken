@@ -178,6 +178,9 @@ code, configuration and data, never read by this code.
   splits md chunks and session messages to fit (`withEmbedSplit`, target 1845
   + code-point ceiling); every character survives. The legacy split is
   byte-identical outside that scope.
+- `ANDENKEN_ENV_MODE=process-only` makes the process environment the whole
+  configuration: `~/.env.local` is not sourced (run.sh, child scripts) nor
+  opened (providers, pi extension). Unset = default; any other value refuses.
 - OpenClaw queries use `ANDENKEN_OPENCLAW_QUERY_*` when set, otherwise the
   sessions provider; the generation check (stamp or attestation) refuses rather
   than silently falling back to FTS.

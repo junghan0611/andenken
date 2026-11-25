@@ -36,7 +36,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."   # repo root
 
-if [ -z "${ANDENKEN_SESSION_CORPUS:-}" ] && [ -f "$HOME/.env.local" ]; then
+. scripts/lib/env-mode.sh
+if [ -z "${ANDENKEN_SESSION_CORPUS:-}" ] && ! andenken_env_process_only && [ -f "$HOME/.env.local" ]; then
   ANDENKEN_SESSION_CORPUS="$(set -a; . "$HOME/.env.local" >/dev/null 2>&1; printf %s "${ANDENKEN_SESSION_CORPUS:-}")"
 fi
 CORPUS="${ANDENKEN_SESSION_CORPUS:-$HOME/repos/gh/session}"

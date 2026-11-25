@@ -829,8 +829,24 @@ import {
 
 const PLACEHOLDER_RE = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/;
 
+/**
+ * `ANDENKEN_ENV_MODE`: unset/empty = default (the ~/.env.local fallback below);
+ * `process-only` = the dotenv is never opened, the process environment is the
+ * whole configuration; any other value throws, so a typo cannot silently fall
+ * back to reading the dotenv. Same contract as scripts/lib/env-mode.sh.
+ */
+export function envMode(): "default" | "process-only" {
+  const m = process.env.ANDENKEN_ENV_MODE ?? "";
+  if (m === "") return "default";
+  if (m === "process-only") return "process-only";
+  throw new Error(`ANDENKEN_ENV_MODE='${m}' is not a known mode (only: process-only) — refused`);
+}
+
 let _cachedEnvFileShared: Record<string, string> | undefined;
 function getEnvFile(): Record<string, string> {
+  // Checked on every read, so process-only can never be satisfied from a cache
+  // loaded earlier in default mode.
+  if (envMode() === "process-only") return {};
   return (_cachedEnvFileShared ??= loadEnvFile());
 }
 

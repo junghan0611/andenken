@@ -171,7 +171,7 @@ console.log("\n# real writers race the lock (subprocess)");
   // Run byte-identical copies from a temp tree; the repo's own flock file is
   // only ever stat'ed, before and after.
   const tree = path.join(tmp, "sync-tree");
-  const copied = ["scripts/sync-sessions.sh", "scripts/lib/sessions-lock.sh", "scripts/lib/sessions-policy.sh", "scripts/lib/corpus-custody.sh"];
+  const copied = ["scripts/sync-sessions.sh", "scripts/lib/sessions-lock.sh", "scripts/lib/sessions-policy.sh", "scripts/lib/corpus-custody.sh", "scripts/lib/env-mode.sh"];
   for (const rel of copied) {
     fs.mkdirSync(path.dirname(path.join(tree, rel)), { recursive: true });
     fs.copyFileSync(path.join(repo, rel), path.join(tree, rel));

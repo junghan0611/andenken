@@ -57,7 +57,8 @@ cd "$(dirname "$0")/.."   # repo root
 # machine's live stores, which would rebuild the wrong, smaller corpus without
 # saying so. Read it in a subshell so nothing else from that file leaks into
 # this script's carefully scoped SESSION_* environment.
-if [ -z "${ANDENKEN_SESSION_CORPUS:-}" ] && [ -f "$HOME/.env.local" ]; then
+. scripts/lib/env-mode.sh
+if [ -z "${ANDENKEN_SESSION_CORPUS:-}" ] && ! andenken_env_process_only && [ -f "$HOME/.env.local" ]; then
   ANDENKEN_SESSION_CORPUS="$(set -a; . "$HOME/.env.local" >/dev/null 2>&1; printf %s "${ANDENKEN_SESSION_CORPUS:-}")"
   [ -n "$ANDENKEN_SESSION_CORPUS" ] && export ANDENKEN_SESSION_CORPUS || unset ANDENKEN_SESSION_CORPUS
 fi

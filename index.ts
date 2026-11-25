@@ -22,6 +22,7 @@ import {
   createSessionProviderFromEnv,
   createMdProviderFromEnv,
   CachingProvider,
+  envMode,
   type EmbeddingProvider,
 } from "./embedding-provider.js";
 import { VectorStore, getMdDbPath, getSessionsDbPath, getDataDir, describeAxisAbsence, type SearchFilters } from "./store.js";
@@ -114,6 +115,8 @@ function dictcliExpandRaw(query: string): string[] {
  * Cannot rely on env-loader extension — session_start race condition.
  */
 function loadEnvLocal(): void {
+  // ANDENKEN_ENV_MODE=process-only: never read the dotenv (an unknown mode throws).
+  if (envMode() === "process-only") return;
   // Skip if key env vars already set
   if (process.env.GOOGLE_AI_API_KEY || process.env.GEMINI_API_KEY || process.env.ANDENKEN_PROVIDER) return;
 

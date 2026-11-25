@@ -8,7 +8,15 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="$HOME/.env.local"
 
+. "$SCRIPT_DIR/scripts/lib/env-mode.sh"
+
+# ANDENKEN_ENV_MODE=process-only: ~/.env.local is never sourced; the caller's
+# process environment is the whole configuration (children inherit the mode).
 load_env() {
+  if andenken_env_process_only; then
+    echo "env: process-only — $ENV_FILE not read" >&2
+    return 0
+  fi
   if [ -f "$ENV_FILE" ]; then
     set -a; source "$ENV_FILE"; set +a
   else
@@ -205,6 +213,9 @@ Usage: ./run.sh <command> [args]
                               --deps-from: run this checkout against the node_modules
                               of the installed checkout DIR (same lock); only DIR's
                               node_modules is bound, read-only; nothing else of DIR
+  test:env-mode               ANDENKEN_ENV_MODE=process-only: a poisoned ~/.env.local is never
+                              sourced, opened or used by run.sh, child scripts or providers;
+                              unset = unchanged; unknown value refuses (API 0)
   test:absent                 Fixture tests for the absent-axis invariant — a read never creates (API 0)
   test:parity                 Credential regex parity: python ↔ typescript (API 0)
   test:diagnostics            Type fence (tsconfig.diagnostics.json) + tests for the
@@ -503,6 +514,9 @@ case "${1:-help}" in
       && bash scripts/test-openclaw-fts-sandboxed.sh ;;
   test:openclaw-fts:barrier)
     shift; cd "$SCRIPT_DIR" && bash scripts/test-openclaw-fts-sandboxed.sh --barrier-only "$@" ;;
+  test:env-mode)
+    # API 0: temp HOME with a poisoned ~/.env.local; no runtime, stub ssh.
+    cd "$SCRIPT_DIR" && pnpm exec tsx env-mode.test.ts ;;
   test:absent)
     cd "$SCRIPT_DIR" && pnpm exec tsx axis-absent.test.ts ;;
   test:parity)
