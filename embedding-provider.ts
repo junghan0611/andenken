@@ -80,6 +80,20 @@ export class CachingProvider implements EmbeddingProvider {
 
   get name() { return this.inner.name; }
   get dimensions() { return this.inner.dimensions; }
+  // Identity and cost facts of the wrapped provider. Callers read these by
+  // duck type (profileOfProvider, paid gates, the store generation check); a
+  // wrapper that hid them would make a profiled provider look unprofiled — a
+  // stamped store would refuse it and the profiled split would be skipped —
+  // and would make a paid endpoint look free to the /memory --force gate.
+  get profile(): EmbeddingProfile | undefined {
+    return (this.inner as { profile?: EmbeddingProfile }).profile;
+  }
+  get model(): string | undefined {
+    return (this.inner as { model?: string }).model;
+  }
+  get isPaidRemote(): boolean {
+    return (this.inner as { isPaidRemote?: boolean }).isPaidRemote === true;
+  }
 
   async embedQuery(text: string): Promise<number[]> {
     const cached = this.queryCache.get(text);
@@ -213,6 +227,12 @@ export interface VLLMProviderConfig {
    * price obvious in stats).
    */
   pricePerMillionInputTokens?: number;
+  /**
+   * Embedding generation identity. When set, the provider enforces it:
+   * fixed model/dimension, input-length bound (fail-closed against silent
+   * runtime truncation), and — for loopback profiles — the response `model`.
+   */
+  profile?: EmbeddingProfile;
 }
 
 // Retry for local — simpler, shorter delays (GPU restart, etc.)
@@ -474,7 +494,23 @@ export class VLLMProvider implements EmbeddingProvider {
     return this._dimensions;
   }
 
+  /** The configured endpoint base (first one when several are given). */
+  get endpoint(): string {
+    return this._endpoints[0] ?? this.config.endpoint;
+  }
+
+  /** The exact model string sent to the endpoint. */
+  get model(): string {
+    return this.config.model;
+  }
+
+  /** The enforced embedding profile, when this provider was built from one. */
+  get profile(): EmbeddingProfile | undefined {
+    return this.config.profile;
+  }
+
   async embedQuery(text: string): Promise<number[]> {
+    if (this.config.profile) assertInputsFit(this.config.profile, "query", [text]);
     const input = this.config.queryInstruction
       ? `${this.config.queryInstruction}${text}`
       : text;
@@ -483,6 +519,7 @@ export class VLLMProvider implements EmbeddingProvider {
   }
 
   async embedDocument(text: string): Promise<number[]> {
+    if (this.config.profile) assertInputsFit(this.config.profile, "document", [text]);
     const input = this.config.documentInstruction
       ? `${this.config.documentInstruction}${text}`
       : text;
@@ -492,6 +529,7 @@ export class VLLMProvider implements EmbeddingProvider {
 
   async embedDocumentBatch(texts: string[]): Promise<number[][]> {
     if (texts.length === 0) return [];
+    if (this.config.profile) assertInputsFit(this.config.profile, "document", texts);
 
     const prefix = this.config.documentInstruction ?? "";
     const inputs = prefix ? texts.map((t) => `${prefix}${t}`) : texts;
@@ -587,7 +625,33 @@ export class VLLMProvider implements EmbeddingProvider {
 
   // --- Internal ---
 
+  /** Runtime identity proven for this process (digest profiles only). */
+  private _identity: Promise<void> | null = null;
+
+  /**
+   * A digest-pinned profile proves WHICH weights answer before the first
+   * embedding request of this process (Ollama `/api/tags`), not only in a
+   * separate preflight. Any failure is permanent for the process and no
+   * embedding request is made. Profiles without a digest skip this.
+   */
+  private ensureRuntimeIdentity(): Promise<void> {
+    const p = this.config.profile;
+    if (!p || p.digest === null) return Promise.resolve();
+    if (!this._identity) {
+      this._identity = verifyRuntimeIdentity(p, this._endpoints[0]).then((r) => {
+        if (!r.ok) {
+          throw Object.assign(new Error(`runtime-identity-${r.code}: ${p.model} at ${this._endpoints[0]}`), {
+            nonRetryable: true,
+            code: `runtime-identity-${r.code}`,
+          });
+        }
+      });
+    }
+    return this._identity;
+  }
+
   private async embed(inputs: string[]): Promise<number[][]> {
+    await this.ensureRuntimeIdentity();
     this._calls++;
     const chars = inputs.reduce((sum, t) => sum + t.length, 0);
     this._tokenEstimate += Math.ceil(chars / 2.5);
@@ -660,20 +724,27 @@ export class VLLMProvider implements EmbeddingProvider {
         }
 
         const data = (await res.json()) as {
-          data: Array<{ embedding: number[]; index: number }>;
+          data?: unknown;
+          model?: unknown;
           usage?: { prompt_tokens?: unknown };
         };
 
-        if (!data.data || data.data.length === 0) {
-          throw new Error("vLLM returned empty embedding data");
+        // Legacy auto-detect (dimensions unset, org/legacy env only): learn the
+        // dim from the first vector, then validate the whole reply against it.
+        // Profile- and namespaced-env providers always carry a fixed dim.
+        let expectedDim = this._dimensions;
+        if (expectedDim === 0) {
+          const first = Array.isArray(data?.data) ? (data.data[0] as { embedding?: unknown } | undefined) : undefined;
+          expectedDim = Array.isArray(first?.embedding) ? first.embedding.length : 0;
         }
-
-        // Sort by index (API may return unordered)
-        const sorted = data.data.sort((a, b) => a.index - b.index);
-
-        // Auto-detect dimensions from first response
-        if (this._dimensions === 0 && sorted[0].embedding.length > 0) {
-          this._dimensions = sorted[0].embedding.length;
+        // One vector per input, in input order, finite, non-zero, expected
+        // dim — else EmbeddingResponseInvalid (nonRetryable: a wrong-shaped
+        // answer is not transient).
+        const expectedModel =
+          this.config.profile?.endpointClass === "loopback" ? this.config.profile.model : undefined;
+        const vectors = validateEmbeddingResponse(data, inputs.length, expectedDim, expectedModel);
+        if (this._dimensions === 0) {
+          this._dimensions = expectedDim;
           process.stderr.write(`📡 vLLM auto-detected ${this._dimensions}d\n`);
         }
 
@@ -685,7 +756,7 @@ export class VLLMProvider implements EmbeddingProvider {
         } else {
           this._okWithoutUsage++;
         }
-        return sorted.map((d) => d.embedding);
+        return vectors;
       } catch (err) {
         this._httpFailed++;
         const msg = err instanceof Error ? err.message : String(err);
@@ -732,6 +803,14 @@ export class VLLMProvider implements EmbeddingProvider {
 // --- Model Presets ---
 
 import { getModelPreset } from "./model-presets.js";
+import {
+  assertInputsFit,
+  getProfile,
+  isLoopbackEndpoint,
+  validateEmbeddingResponse,
+  verifyRuntimeIdentity,
+  type EmbeddingProfile,
+} from "./embedding-profile.js";
 
 // --- Factory ---
 
@@ -877,7 +956,10 @@ export function resolveProviderType(raw: string | undefined): ResolvedProviderTy
 function buildVllmFromNamespacedEnv(
   read: (suffix: string) => string | undefined,
   nameTag: string,
+  providerType: "vllm" | "openrouter",
 ): VLLMProvider | null {
+  const profileId = read("PROFILE");
+  if (profileId !== undefined) return buildVllmFromProfile(read, nameTag, profileId, providerType);
   const endpoint = read("ENDPOINT");
   const model = read("MODEL");
   if (!endpoint || !model) {
@@ -898,10 +980,20 @@ function buildVllmFromNamespacedEnv(
   const timeoutStr = read("TIMEOUT_MS");
   const priceStr = read("PRICE_PER_M_TOKENS");
   const parsedPrice = priceStr !== undefined ? parseFloat(priceStr) : NaN;
+  // A namespaced (sessions / md) provider never learns its dimension from the
+  // reply: an unset, zero or garbage DIMENSIONS with no preset is refused here,
+  // before any store is opened or any request is made.
+  const dimensions = dimStr !== undefined ? parsePositiveInt(dimStr) : preset?.dimensions;
+  if (dimensions === undefined || dimensions === null || !(dimensions > 0)) {
+    process.stderr.write(
+      `⚠ ${nameTag} provider: DIMENSIONS ${dimStr === undefined ? "unset and no preset for this model" : "is not a positive integer"} — refused\n`,
+    );
+    return null;
+  }
   return new VLLMProvider({
     endpoint,
     model,
-    dimensions: dimStr ? parseInt(dimStr, 10) : preset?.dimensions,
+    dimensions,
     queryInstruction: read("QUERY_INSTRUCTION") ?? preset?.queryInstruction,
     documentInstruction: read("DOCUMENT_INSTRUCTION") ?? preset?.documentInstruction,
     maxBatchSize: batchStr ? parseInt(batchStr, 10) : preset?.maxBatchSize,
@@ -917,91 +1009,79 @@ function buildVllmFromNamespacedEnv(
   });
 }
 
+function parsePositiveInt(v: string): number | null {
+  return /^[1-9][0-9]*$/.test(v.trim()) ? parseInt(v.trim(), 10) : null;
+}
+
 /**
- * Create provider from environment variables (LEGACY surface).
- *
- * vLLM env vars:
- *   ANDENKEN_PROVIDER=vllm
- *   ANDENKEN_VLLM_ENDPOINT=http://localhost:18000   # gpu1i tunnel (gpu2i is VOS, do not embed against it)
- *   ANDENKEN_VLLM_MODEL=Qwen/Qwen3-Embedding-8B
- *   ANDENKEN_VLLM_DIMENSIONS=4096  (optional)
- *   ANDENKEN_VLLM_QUERY_INSTRUCTION="Instruct: ...\nQuery: "  (optional)
- *   ANDENKEN_VLLM_DOCUMENT_INSTRUCTION="..."  (optional)
- *   ANDENKEN_VLLM_MAX_BATCH_SIZE=64  (optional)
- *
- * Gemini env vars (existing):
- *   GOOGLE_AI_API_KEY / GEMINI_API_KEY / GOOGLE_API_KEY
- *
- * Falls back to Gemini if ANDENKEN_PROVIDER not set.
- *
- * NOTE: as of PR-A, this function is preserved for backward-compat. New code
- * should prefer createSessionProviderFromEnv() / createOrgProviderFromEnv()
- * which read from ANDENKEN_SESSION_* / ANDENKEN_ORG_* respectively.
+ * `ANDENKEN_<NS>_PROFILE=<id>`: the provider is fully defined by a known
+ * embedding profile. Every geometry-deciding env key that is also set must
+ * AGREE with the profile — a conflicting MODEL or DIMENSIONS is a refusal, not
+ * an override, so one stale line in ~/.env.local cannot mix generations.
+ * Loopback profiles take their fixed endpoint and refuse any other host.
  */
-export function createProviderFromEnv(): EmbeddingProvider | null {
-  const getEnv = readEnvWithFileFallback;
-
-  const rawType = getEnv("ANDENKEN_PROVIDER");
-  const providerType = resolveProviderType(rawType);
-
-  // Legacy global slot must not select paid-remote providers. The "openrouter"
-  // alias is only valid in the namespaced surfaces (ANDENKEN_SESSION_PROVIDER /
-  // ANDENKEN_ORG_PROVIDER) so a single global misconfiguration cannot push
-  // BOTH tracks onto a paid endpoint at once.
-  if (providerType === "openrouter") {
-    process.stderr.write(
-      "⚠ ANDENKEN_PROVIDER=openrouter rejected on the legacy global slot. " +
-      "Use ANDENKEN_SESSION_PROVIDER (or ANDENKEN_ORG_PROVIDER) to opt one " +
-      "track into OpenRouter without affecting the other. Returning null.\n",
-    );
+function buildVllmFromProfile(
+  read: (suffix: string) => string | undefined,
+  nameTag: string,
+  profileId: string,
+  providerType: "vllm" | "openrouter",
+): VLLMProvider | null {
+  const profile = getProfile(profileId);
+  const refuse = (why: string) => {
+    process.stderr.write(`⚠ ${nameTag} provider: profile ${profileId} — ${why} — refused\n`);
     return null;
+  };
+  if (!profile) return refuse("unknown profile");
+  if (profile.endpointClass === "loopback" && providerType !== "vllm") return refuse(`PROVIDER=${providerType} contradicts a loopback profile (use vllm)`);
+  const model = read("MODEL");
+  if (model !== undefined && model !== profile.model) return refuse(`MODEL ${model} ≠ ${profile.model}`);
+  const dimStr = read("DIMENSIONS");
+  if (dimStr !== undefined && parsePositiveInt(dimStr) !== profile.dimensions) {
+    return refuse(`DIMENSIONS ${dimStr} ≠ ${profile.dimensions}`);
   }
-
-  if (providerType === "vllm") {
-    const endpoint = getEnv("ANDENKEN_VLLM_ENDPOINT");
-    const model = getEnv("ANDENKEN_VLLM_MODEL");
-    if (!endpoint || !model) {
-      process.stderr.write("⚠ ANDENKEN_PROVIDER=vllm but ANDENKEN_VLLM_ENDPOINT or ANDENKEN_VLLM_MODEL not set\n");
-      return null;
-    }
-
-    // Auto-apply model preset if available
-    // ANDENKEN_VLLM_PRESET overrides model name for preset lookup
-    // (useful when model path differs from HF name, e.g., /storage/models/vllm/default)
-    const presetName = getEnv("ANDENKEN_VLLM_PRESET") ?? model;
-    const preset = getModelPreset(presetName);
-    if (preset && getEnv("ANDENKEN_LOG_PRESET") === "1") {
-      process.stderr.write(`📋 Preset: ${presetName} (${preset.dimensions}d, batch=${preset.maxBatchSize})\n`);
-    }
-
-    const dimStr = getEnv("ANDENKEN_VLLM_DIMENSIONS");
-    const batchStr = getEnv("ANDENKEN_VLLM_MAX_BATCH_SIZE");
-    const timeoutStr = getEnv("ANDENKEN_VLLM_TIMEOUT_MS");
-    return new VLLMProvider({
-      endpoint,
-      model,
-      dimensions: dimStr ? parseInt(dimStr, 10) : preset?.dimensions,
-      queryInstruction: getEnv("ANDENKEN_VLLM_QUERY_INSTRUCTION") ?? preset?.queryInstruction,
-      documentInstruction: getEnv("ANDENKEN_VLLM_DOCUMENT_INSTRUCTION") ?? preset?.documentInstruction,
-      maxBatchSize: batchStr ? parseInt(batchStr, 10) : preset?.maxBatchSize,
-      apiKey: getEnv("ANDENKEN_VLLM_API_KEY"),
-      // Preserves prior behavior: legacy env path keeps reading the global
-      // ANDENKEN_VLLM_TIMEOUT_MS at request time. Setting timeoutMs here is
-      // belt-and-suspenders so explicit config wins over env if both exist.
-      timeoutMs: timeoutStr ? parseInt(timeoutStr, 10) : undefined,
-      // Legacy slot intentionally has no nameTag — it can only select "vllm"
-      // (openrouter alias is rejected above), so the default "vllm" name is
-      // correct for stats/logs.
-    });
+  for (const k of ["QUERY_INSTRUCTION", "DOCUMENT_INSTRUCTION"] as const) {
+    const v = read(k);
+    const want = k === "QUERY_INSTRUCTION" ? profile.queryInstruction : profile.documentInstruction;
+    if (v !== undefined && v !== want) return refuse(`${k} differs from the profile`);
   }
-
-  // Default: Gemini
-  const apiKey = loadGeminiKey();
-  if (!apiKey) return null;
-  return new GeminiProvider({
-    apiKey,
-    model: "gemini-embedding-2-preview",
-    dimensions: 768,
+  if (read("TRUNCATE_DIMENSIONS") !== undefined) return refuse("TRUNCATE_DIMENSIONS is not allowed with a profile");
+  const endpoint = read("ENDPOINT") ?? profile.endpoint;
+  if (!endpoint) return refuse("ENDPOINT not set");
+  // Loopback profiles: any loopback host:port. WHICH weights answer is proven
+  // by the runtime digest before the first request (ensureRuntimeIdentity),
+  // so the port is a placement fact, not an identity claim.
+  if (profile.endpointClass === "loopback" && !isLoopbackEndpoint(endpoint)) return refuse("endpoint is not loopback");
+  const paid = read("PAID_REMOTE");
+  if (paid !== undefined && (paid === "1") !== profile.paidRemote) return refuse("PAID_REMOTE disagrees with the profile");
+  const batchStr = read("MAX_BATCH_SIZE");
+  let maxBatchSize = profile.maxBatchSize;
+  if (batchStr !== undefined) {
+    const b = parsePositiveInt(batchStr);
+    if (b === null || b > profile.maxBatchSize) return refuse(`MAX_BATCH_SIZE must be 1..${profile.maxBatchSize}`);
+    maxBatchSize = b;
+  }
+  const timeoutStr = read("TIMEOUT_MS");
+  let timeoutMs = profile.timeoutMs;
+  if (timeoutStr !== undefined) {
+    const t = parsePositiveInt(timeoutStr);
+    if (t === null || t > profile.timeoutMs) return refuse(`TIMEOUT_MS must be 1..${profile.timeoutMs}`);
+    timeoutMs = t;
+  }
+  const priceStr = read("PRICE_PER_M_TOKENS");
+  const parsedPrice = priceStr !== undefined ? parseFloat(priceStr) : NaN;
+  return new VLLMProvider({
+    endpoint,
+    model: profile.model,
+    dimensions: profile.dimensions,
+    queryInstruction: profile.queryInstruction,
+    documentInstruction: profile.documentInstruction,
+    maxBatchSize,
+    apiKey: profile.endpointClass === "loopback" ? undefined : read("API_KEY"),
+    timeoutMs,
+    nameTag: `${nameTag}:${profile.id}`,
+    paidRemote: profile.paidRemote,
+    pricePerMillionInputTokens: Number.isFinite(parsedPrice) ? parsedPrice : undefined,
+    profile,
   });
 }
 
@@ -1043,6 +1123,7 @@ export function createSessionProviderFromEnv(): EmbeddingProvider | null {
     return buildVllmFromNamespacedEnv(
       read,
       providerType === "openrouter" ? "sessions:openrouter" : "sessions:vllm",
+      providerType,
     );
   }
   if (providerType === "gemini") {
@@ -1091,6 +1172,7 @@ export function createMdProviderFromEnv(): EmbeddingProvider | null {
     return buildVllmFromNamespacedEnv(
       read,
       providerType === "openrouter" ? "md:openrouter" : "md:vllm",
+      providerType,
     );
   }
   if (providerType === "gemini") {
@@ -1109,46 +1191,23 @@ export function createMdProviderFromEnv(): EmbeddingProvider | null {
 }
 
 /**
- * Create the ORG-track embedding provider from `ANDENKEN_ORG_*`.
- *
- * Falls back to the legacy `ANDENKEN_VLLM_*` reader when the ORG namespace
- * is empty. Org keeps backward-compat indefinitely because existing
- * operators run their full rebuild against gpu1i with the legacy env.
+ * OpenClaw QUERY provider from `ANDENKEN_OPENCLAW_QUERY_*` (vllm | openrouter
+ * only). Null when the namespace is absent; the caller may then fall back to
+ * the sessions provider, and the store generation check decides whether that
+ * provider may query the harvest at all.
  */
-export function createOrgProviderFromEnv(): EmbeddingProvider | null {
+export function createOpenclawQueryProviderFromEnv(): EmbeddingProvider | null {
   const read = (suffix: string) =>
-    readEnvWithFileFallback("ANDENKEN_ORG_" + suffix);
+    readEnvWithFileFallback("ANDENKEN_OPENCLAW_QUERY_" + suffix);
   const rawType = read("PROVIDER");
+  if (rawType === undefined) return null;
   const providerType = resolveProviderType(rawType);
-
-  // Fail-fast on EXPLICIT-but-INVALID config (mirrors sessions). If the
-  // operator typed a namespace value (e.g. ANDENKEN_ORG_PROVIDER=anthropic),
-  // do NOT silently fall through to the legacy slot — that would mask a typo
-  // and could push org onto a wrong dim/track. resolveProviderType already
-  // wrote the warning.
-  if (rawType && !providerType) return null;
-
-  if (providerType === "vllm" || providerType === "openrouter") {
-    return buildVllmFromNamespacedEnv(
-      read,
-      providerType === "openrouter" ? "org:openrouter" : "org:vllm",
-    );
+  if (providerType !== "vllm" && providerType !== "openrouter") {
+    throw new Error(`ANDENKEN_OPENCLAW_QUERY_PROVIDER=${rawType} refused (vllm | openrouter)`);
   }
-  if (providerType === "gemini") {
-    const apiKey = loadGeminiKey();
-    if (!apiKey) return null;
-    return new GeminiProvider({
-      apiKey,
-      model: read("GEMINI_MODEL") ?? "gemini-embedding-2-preview",
-      dimensions: 768,
-    });
-  }
-
-  // ORG namespace ABSENT (no rawType) → legacy fallback (no warning; this is
-  // the supported backward-compat path for org indexing until that track also
-  // migrates). Explicit-but-invalid values were rejected by the fail-fast
-  // guard above.
-  return createProviderFromEnv();
+  const p = buildVllmFromNamespacedEnv(read, `openclaw-query:${providerType}`, providerType);
+  if (!p) throw new Error("ANDENKEN_OPENCLAW_QUERY_* is set but does not build a provider — refused");
+  return p;
 }
 
 // --- Env file loader with variable expansion ---

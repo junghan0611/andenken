@@ -7,23 +7,14 @@
  *   npx tsx doctor.ts --json
  *   Checks API / local DBs / oracle / stale / cost pre-flight.
  *
- * Org triage mode (stage 1):
- *   npx tsx doctor.ts --org
- *   npx tsx doctor.ts --org --json
- *   npx tsx doctor.ts --org --no-smoke
- *   npx tsx doctor.ts --org --save-baseline
- *   Read-only, local-only. Triage surface for retrieval / chunk / org structure
- *   — NOT a replacement for `./run.sh verify all` or golden-queries.
  */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { execSync } from "node:child_process";
-import { VectorStore, getSessionsDbPath, getOrgDbPath } from "./store.js";
+import { VectorStore, getSessionsDbPath, getMdDbPath } from "./store.js";
 import { findSessionFiles } from "./session-indexer.js";
-import { findOrgFiles, shouldIndexOrgFile } from "./org-chunker.js";
-import { createProviderFromEnv } from "./embedding-provider.js";
-import { runOrgDoctor } from "./doctor-org.js";
+import { createSessionProviderFromEnv } from "./embedding-provider.js";
 import { runMdDoctor } from "./doctor-md.js";
 import { runSessionsDoctor } from "./doctor-sessions.js";
 
@@ -71,8 +62,8 @@ function getKST(): string {
 // --- Checks ---
 
 async function checkAPI(): Promise<CheckResult> {
-  // Use createProviderFromEnv() so auth (including ~/.env.local $VAR expansion) is handled identically to production.
-  const provider = createProviderFromEnv();
+  // Use createSessionProviderFromEnv() so auth (including ~/.env.local $VAR expansion) is handled identically to production.
+  const provider = createSessionProviderFromEnv();
   if (!provider) {
     return { name: "API", status: "WARN", detail: "no provider configured (set ANDENKEN_PROVIDER=vllm + env vars)" };
   }
@@ -118,9 +109,7 @@ async function checkLocalDB(label: string, dbPath: string, providerDim?: number)
 
 function checkOracleDB(label: string): CheckResult {
   // Oracle uses same andenken path structure
-  const cmd = label === "Sessions"
-    ? `cd ~/repos/gh/andenken && source ~/.env.local && npx tsx cli.ts status 2>/dev/null`
-    : `ls -la ~/repos/gh/andenken/data/org-lancedb/ 2>/dev/null | head -3`;
+  const cmd = `cd ~/repos/gh/andenken && source ~/.env.local && npx tsx cli.ts status 2>/dev/null`;
 
   const result = runSSH(cmd);
   if (result === null) {
@@ -168,48 +157,11 @@ async function checkStaleFiles(): Promise<CheckResult> {
 
   const staleSessions = allSessions - indexedSessions;
 
-  // Org
-  const orgDbPath = getOrgDbPath();
-  const allOrg = findOrgFiles().filter((f) => shouldIndexOrgFile(f));
-  let indexedOrg = 0;
-
-  if (fs.existsSync(orgDbPath)) {
-    try {
-      const store = new VectorStore(orgDbPath);
-      await store.init();
-      indexedOrg = (await store.getIndexedFiles()).size;
-      await store.close();
-    } catch { /* */ }
-  }
-
-  const staleOrg = allOrg.length - indexedOrg;
-  const totalStale = staleSessions + staleOrg;
-
-  const status: Status = totalStale > 100 ? "WARN" : totalStale > 0 ? "OK" : "OK";
   return {
     name: "Stale files",
-    status,
-    detail: `sessions: ${staleSessions} unindexed/${allSessions} total, org: ${staleOrg} unindexed/${allOrg.length} total`,
-    value: totalStale,
-  };
-}
-
-function checkCostPreflight(): CheckResult {
-  // Quick org estimate without full chunk computation
-  const allOrg = findOrgFiles().filter((f) => shouldIndexOrgFile(f));
-
-  // Rough estimate: avg 3 chunks/file, 800 chars/chunk, 4 chars/token, $0.20/1M tokens
-  const estChunks = allOrg.length * 3;
-  const estTokens = (estChunks * 800) / 4;
-  const estUSD = (estTokens / 1_000_000) * 0.20;
-  const estKRW = Math.round(estUSD * 1450);
-
-  const status: Status = estKRW > 50000 ? "WARN" : "OK";
-  return {
-    name: "Cost (full reindex)",
-    status,
-    detail: `~${estChunks.toLocaleString()} chunks, ~$${estUSD.toFixed(2)} (₩${estKRW.toLocaleString()})`,
-    value: estKRW,
+    status: staleSessions > 100 ? "WARN" : "OK",
+    detail: `sessions: ${staleSessions} unindexed/${allSessions} total`,
+    value: staleSessions,
   };
 }
 
@@ -220,18 +172,9 @@ async function main() {
   const device = getDevice();
   const time = getKST();
 
-  // Org triage mode — stage 1 dispatch (read-only, local-only).
   if (process.argv.includes("--org")) {
-    const smoke = !process.argv.includes("--no-smoke");
-    const saveBaseline = process.argv.includes("--save-baseline");
-    const exitCode = await runOrgDoctor({
-      smoke,
-      json: jsonMode,
-      saveBaseline,
-      device,
-      time,
-    });
-    process.exit(exitCode);
+    console.error("REFUSED: org doctor is retired.");
+    process.exit(2);
   }
 
   // MD triage mode — V1 dispatch (read-only, local-only). Explains the
@@ -265,10 +208,10 @@ async function main() {
   checks.push(await checkAPI());
 
   // 2. Local DBs — pass active provider dim for parity check
-  const provider = createProviderFromEnv();
+  const provider = createSessionProviderFromEnv();
   const providerDim = provider?.dimensions;
   checks.push(await checkLocalDB("Sessions", getSessionsDbPath(), providerDim));
-  checks.push(await checkLocalDB("Knowledge", getOrgDbPath(), providerDim));
+  checks.push(await checkLocalDB("Knowledge", getMdDbPath()));
 
   // 3. Oracle (single SSH call)
   checks.push(checkOracleDB("Sessions"));
@@ -276,8 +219,6 @@ async function main() {
   // 4. Stale files
   checks.push(await checkStaleFiles());
 
-  // 5. Cost pre-flight
-  checks.push(checkCostPreflight());
 
   if (jsonMode) {
     console.log(JSON.stringify({ device, time, checks }, null, 2));

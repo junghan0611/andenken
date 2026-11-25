@@ -34,7 +34,7 @@ import {
   type OpenOptions,
 } from "./durable-reader.js";
 import { DURABLE_POLICY, rootLineage, type DurablePlan } from "./durable-plan.js";
-import { splitForEmbedding } from "./session-indexer.js";
+import { splitForActiveEmbedding } from "./session-indexer.js";
 import { sanitizeSessionChunkText } from "./session-sanitize.js";
 
 export const DURABLE_SEGMENTS = [".pi", "agent", "experimental", "durable-sessions"] as const;
@@ -396,7 +396,7 @@ export async function extractDurableRows(
       sanitizeDrops.empty = (sanitizeDrops.empty ?? 0) + 1;
       continue;
     }
-    const parts = splitForEmbedding(text);
+    const parts = splitForActiveEmbedding(text);
     const type = c.role === "user" ? "user_message" : c.role === "assistant" ? "assistant_response" : "compaction";
     const group: DurableExtraction["groups"][number] = { entryId: e.entryId, text, chunks: [] };
     groups.push(group);

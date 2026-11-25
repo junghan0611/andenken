@@ -19,8 +19,16 @@
  * ahead of HEAD), the global path (checkpoint → corpus rsync under the replica
  * lock → canonical.bundle → receive → reverse bundle → merge-log, both sides
  * then record both copies, sources are pointers in Git, no remote configured,
- * job dirs removed), a lost descriptor (75), and a real restore failure (19)
- * surfacing through sync --global as 19.
+ * job dirs removed), a lost descriptor (75), and a real restore failure (19).
+ *
+ * Since 2026-11-25 `sync-sessions.sh --global` is closed (the profiled
+ * generation's publish is a separate gate), so the archive acts that sync
+ * chained — `gather-corpus.sh --strict --checkpoint`, then
+ * `replicate-corpus.sh --strict` — are driven DIRECTLY against the real helper,
+ * and sync --global is asserted to refuse before any of them. DORMANT until a
+ * publish gate opens: the index rsync / verify after the corpus, the
+ * "checkpoint before status/probe/indexer" ordering inside sync, and the
+ * restore-failure rc propagating through sync (19 stays 19 there).
  *
  * Run: ./run.sh test:archive-real
  */
@@ -160,11 +168,12 @@ if [ -n "$lock" ]; then exec flock -n "$lock" ${realRsync} "\${args[@]}"; fi
 exec ${realRsync} "\${args[@]}"`);
 stub("pnpm", `case "$*" in
   "exec tsx indexer.ts policy") exec "${TSX}" "${REPO}/indexer.ts" policy ;;
-  "exec tsx indexer.ts status --json") echo "pnpm status" >>"${calls}"; echo '{"sessions":{"actual_dim":4096,"to_index":1,"count":5}}' ;;
+  "exec tsx indexer.ts status --json") echo "pnpm status" >>"${calls}"; echo '{"sessions":{"actual_dim":1024,"to_index":1,"count":5}}' ;;
+  "exec tsx scripts/profile-preflight.ts sessions") echo "pnpm preflight" >>"${calls}" ;;
   "exec tsx indexer.ts verify sessions") echo "pnpm verify" >>"${calls}" ;;
   *) echo "pnpm $*" >>"${calls}"; exit 99 ;;
 esac`);
-stub("curl", `echo "curl" >>"${calls}"; python3 -c 'import json; print(json.dumps({"data":[{"embedding":[0]*4096}]}))'`);
+stub("curl", `echo "curl" >>"${calls}"; exit 99`);
 stub("node", `if [ "$1 $2" = "--import tsx" ] && [[ "$3" == *.ts ]]; then
   c=missing
   if [ "$(stat -L -c %d:%i /proc/$$/fd/8 2>/dev/null)" = "$(stat -c %d:%i "$ANDENKEN_SESSION_CORPUS/.git/corpus-custody.lock" 2>/dev/null)" ] && flock -n 8; then c=held; fi
@@ -260,15 +269,25 @@ await check("a descriptor that is not the custody lock → the real helper refus
 });
 
 // ============================================================================
-console.log("\n# sync --global: checkpoint → replicate (receive, reverse merge-log) → index publish");
-await check("--global commits once, ships the corpus and the archive, both sides end with two copies, nothing left behind", () => {
+console.log("\n# sync --global is closed; the archive acts it chained run directly: checkpoint → replicate (receive, reverse merge-log)");
+await check("sync --global → exit 2 API 0: nothing gathered or committed, custody not taken, no status / preflight / indexer / index rsync", () => {
+  const head = git(corpus, "rev-parse", "HEAD");
   const r = run("sync-sessions.sh", ["--global"]);
-  strictEqual(r.status, 0, r.out);
+  strictEqual(r.status, 2, r.out);
+  ok(r.out.includes("publishes to the replica") && r.out.includes("separate gate"), r.out);
+  strictEqual(git(corpus, "rev-parse", "HEAD"), head, "no checkpoint");
+  deepStrictEqual(lines(calls), []);
+  ok(!fs.existsSync(path.join(fakeRepo, "data", ".sync-sessions.lock.gather")), "gather never ran");
+});
+await check("gather --strict --checkpoint then replicate --strict: commits once, ships the corpus and the archive, both sides end with two copies, nothing left behind", () => {
+  const g = run("gather-corpus.sh", ["--strict", "--checkpoint"]);
+  strictEqual(g.status, 0, g.out);
   // canonical: exactly one checkpoint on top of the bootstrap, sources as annex pointers
   strictEqual(git(corpus, "rev-list", "--count", `${C0}..HEAD`), "1");
   ok(git(corpus, "cat-file", "-p", `HEAD:${firstPath}`).startsWith("/annex/objects/"), "source is a pointer in Git, not raw content");
-  const gatherLog = fs.readFileSync(path.join(fakeRepo, "data", ".sync-sessions.lock.gather"), "utf-8");
-  strictEqual(helperJson(gatherLog, "checkpoint").result, "committed");
+  strictEqual(helperJson(g.out, "checkpoint").result, "committed");
+  const r = run("replicate-corpus.sh", ["--strict"]);
+  strictEqual(r.status, 0, r.out);
   // replica: received and adopted the same main
   const recv = helperJson(r.out, "receive", "replica corpus-archive");
   strictEqual(recv.result, "adopted", JSON.stringify(recv));
@@ -284,14 +303,15 @@ await check("--global commits once, ships the corpus and the archive, both sides
   }
   deepStrictEqual(fs.readdirSync(path.join(replicaHome, ".cache", "andenken")), [], "replica job dir removed");
   deepStrictEqual(fs.readdirSync(tmpdir).filter((n) => n.startsWith("tmp.")), [], "local bundle dir removed (mktemp dirs; tsx keeps its own cache here)");
-  // the index publish followed, recorded only (never run against a real host)
+  // the corpus acts never touch the index: no index rsync, status, preflight or indexer
   const c = lines(calls);
-  ok(c.some((l) => l.startsWith("rsync") && l.includes("oracle:/home/junghan/repos/gh/andenken/data/sessions.lance/")), c.join("\n"));
-  ok(c.indexOf("node indexer sessions custody=held") >= 0, c.join("\n"));
+  ok(!c.some((l) => l.includes("oracle:") || l.startsWith("node ") || l.startsWith("pnpm ")), c.join("\n"));
 });
-await check("a second --global with no new session: at most one ledger-only commit (`generated` moves), replica follows", () => {
+await check("a second gather --checkpoint + replicate with no new session: at most one ledger-only commit (`generated` moves), replica follows", () => {
   const head = git(corpus, "rev-parse", "HEAD");
-  const r = run("sync-sessions.sh", ["--global"]);
+  const g = run("gather-corpus.sh", ["--strict", "--checkpoint"]);
+  strictEqual(g.status, 0, g.out);
+  const r = run("replicate-corpus.sh", ["--strict"]);
   strictEqual(r.status, 0, r.out);
   const n = Number(git(corpus, "rev-list", "--count", `${head}..HEAD`));
   ok(n <= 1, `commits: ${n}`);
@@ -301,8 +321,8 @@ await check("a second --global with no new session: at most one ledger-only comm
 });
 
 // ============================================================================
-console.log("\n# a real restore failure (19), through sync --global");
-await check("checkpoint whose staging AND restore fail → helper 19 → sync exits 19 (`corpus-archive-restore-failed`), indexer never launched, nothing shipped", () => {
+console.log("\n# a real restore failure (19), through the checkpoint gather");
+await check("checkpoint whose staging AND restore fail → helper 19 → gather exits 19 (`corpus-archive-restore-failed`), nothing committed, replicate not run", () => {
   // The owner's own technique (test-corpus-archive.py fake_bin): annex add reports one failed
   // record, then the git wrapper refuses the restoring update-index. Passed as --annex-bin.
   const fb = path.join(root, "fakebin");
@@ -312,13 +332,13 @@ await check("checkpoint whose staging AND restore fail → helper 19 → sync ex
   fs.writeFileSync(path.join(fb, "git"), `#!/bin/sh\nfor a in "$@"; do if [ "$a" = update-index ] && [ -e "${mark}" ]; then echo "fixture: update-index refused" >&2; exit 1; fi; done\nexec "${which("git")}" "$@"\n`, { mode: 0o755 });
   newSession();
   const head = git(corpus, "rev-parse", "HEAD");
-  const r = run("sync-sessions.sh", ["--global"], { ANDENKEN_CORPUS_ANNEX_BIN: fb });
-  strictEqual(r.status, 19, r.out);
-  ok(r.out.includes("REFUSED corpus-archive-restore-failed"), r.out);
-  strictEqual(helperJson(fs.readFileSync(path.join(fakeRepo, "data", ".sync-sessions.lock.gather"), "utf-8"), "checkpoint").error, "restore");
+  const g = run("gather-corpus.sh", ["--strict", "--checkpoint"], { ANDENKEN_CORPUS_ANNEX_BIN: fb });
+  strictEqual(g.status, 19, g.out);
+  ok(g.out.includes("REFUSED corpus-archive-restore-failed"), g.out);
+  strictEqual(helperJson(g.out, "checkpoint").error, "restore");
   strictEqual(git(corpus, "rev-parse", "HEAD"), head, "no commit");
   const c = lines(calls);
-  ok(!c.some((l) => l.startsWith("node ") || l.includes("oracle") || l.includes("corpus-custody.lock")), c.join("\n"));
+  ok(!c.some((l) => l.startsWith("node ") || l.includes("oracle")), c.join("\n"));
 });
 
 strictEqual(sha256(helper), PINNED_SHA256, "helper copy unchanged at the end");

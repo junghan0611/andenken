@@ -91,12 +91,12 @@ queries plus sessions/md cannot make the meaning→time turn.
 | **sessions** | Recover decisions and continuity inside canonical time windows | Load-bearing for agent continuity. OpenClaw parity remains a technical baseline, not the product goal. Stored timestamp/project/role/source/session-file signals must support timeline-grounded recall. |
 | **md (public garden)** | Recover durable interpretation attached to dated notes and events | Current production knowledge axis. Direct Markdown embedding over `~/repos/gh/notes/content`. **English tags are a controlled vocabulary (~1,243)**: the doomemacs-config export drops org-side tags and emits only English tags registered in meta notes, so the unnormalized org tag soup never reaches md. Korean stays free-form; English is constrained in pairs. Tags land in the stored `text` (FTS/display), never in `embeddingInput`. Ports OpenClaw builtin md memory logic (`~/repos/3rd/openclaw/packages/memory-host-sdk/src/host/`) onto the same LanceDB backend used by sessions. First production cut closed on 2026-05-12; current work is time-grounded retrieval quality. |
 | **openclaw (harvest)** | Recover what the bots said and kept, nameable as its own axis | Landed 2026-09-03. A HARVEST, not a sync: OpenClaw embeds its own agents' sessions and memory with `qwen/qwen3-embedding-8b` at 4096d — the same model and dimension we use, picked independently on both sides — so rows arrive with text AND vector and the import costs **zero embedding API calls**. We do not own their chunking, model, retention, or their `openclaw-agent.sqlite`, which the export opens `sqlite3 -readonly` and never compacts. We DO own `data/openclaw.lance` — our schema, ids and FTS index — so its defrag is ours, by name. Append-only (their deletes are never mirrored), authority-harvested then explicitly published to the private Oracle replica, and never a search fallback. See INVARIANT §7.3. |
-| **org** | Currently disabled | Source track over 3,000+ Denote notes. Doctor / chunker / incremental work is upstream R&D. Not consumed by agents in production. Do not run `index:org` unless explicitly working on the org track. Removed from the golden gate on 2026-07-27: `ANDENKEN_ORG_*` is commented out, so `createOrgProviderFromEnv()` falls through to a legacy 768d Gemini provider that dim-mismatches the 2560d index — the default `./run.sh golden` aborted before running one query. |
+| **org** | **Code removed (2026-11-25)** | The disabled org track (chunker, doctor, indexer/cli/run.sh routes, the legacy `ANDENKEN_VLLM_*` / `createOrgProviderFromEnv` fallback) was removed from the active codebase; git history keeps it. `data/org.lance` is not deleted by code. `all` in verify / compact / cleanup now means sessions + md; `index:org` and `doctor --org` refuse by name. |
 
-**Split of effort.** The agent-in-charge separates *what we ship to agents now*
-(sessions + md) from *upstream development* (org). Org is rich but messy;
-garden export is a controlled surface and far easier to tune. md is what GLG
-hands agents as their knowledge axis today; org gets time to mature on its own.
+**Split of effort.** The agent-in-charge ships sessions + md to agents. The org
+track was disabled for months and its code was removed on 2026-11-25 so no
+`all` command or legacy provider can reach it; reviving it is a new design, not
+a toggle.
 
 When a change affects multiple live tracks, sessions gets the stricter review.
 The qmd path attempted between 2026-05-09 and 2026-05-11 was retired on
@@ -107,15 +107,16 @@ The qmd path attempted between 2026-05-09 and 2026-05-11 was retired on
 ## What I own
 
 ```
+embedding-profile.ts    Embedding generation identity: profiles, fingerprint, reply
+                        validation, input-length bound, Ollama digest, store stamp
 embedding-provider.ts   EmbeddingProvider interface + vLLM impl + factory
 model-presets.ts        Qwen3-Embedding-4B/8B / bge-m3 / Gemini presets
-store.ts                LanceDB vector store (sessions.lance + md.lance + org.lance)
+store.ts                LanceDB vector store (sessions.lance + md.lance + openclaw.lance)
 retriever.ts            Hybrid retrieval (weighted/RRF + MMR; decay off in prod)
 md-search.ts            md retrieval core + display contract, shared by cli.ts
                         search-md, knowledge_search, and golden
 session-indexer.ts      pi + Claude Code JSONL parser
 md-chunker.ts           Markdown-aware chunker + analyzeMdFile SSOT classifier
-org-chunker.ts          Org-aware 2-tier chunker (disabled track — upstream R&D)
 indexer.ts              Indexing driver (manifest + hard guard + zero-chunk clear)
 write-buffer.ts         Single-writer serialization (in-process)
 sessions-lock.ts        Cross-process sessions.lance writer lock (+ scripts/lib/sessions-lock.sh)
@@ -126,7 +127,6 @@ durable-index.ts        pi-durable incremental indexing + durable-manifest.json
 session-excerpt-dispatch.ts  Hit excerpt dispatch: JSONL lines or durable entries
 doctor.ts               Operator triage dispatch
 doctor-md.ts            MD production triage — provider / DB / manifest / gap
-doctor-org.ts           Org triage (upstream R&D only)
 openclaw-importer.ts    OpenClaw harvest import (append-only, unchanged-skip)
 openclaw-reconcile.ts   OpenClaw freshness board + reconcile dry-run (read-only)
 openclaw-prune.ts       OpenClaw stage-C prune: dream + sup✓ only, backup + receipt
@@ -134,8 +134,36 @@ index.ts                pi extension entry
 cli.ts                  Claude Code / OpenCode CLI entry
 ```
 
-Three separate LanceDB files — `sessions.lance`, `md.lance`, `org.lance`. Each
+Separate LanceDB files — `sessions.lance`, `md.lance`, `openclaw.lance`. Each
 is keyed to its own provider/dim. No DB is a fallback for another.
+
+### Embedding generations (embedding-profile.ts)
+
+Equal dimension is not equal model. A **generation** is named by a profile
+(`openrouter-qwen3-8b-4096` legacy, `ollama-bge-m3-1024` local,
+`openrouter-bge-m3-1024` hosted documents) and fingerprinted over endpoint
+class, model, runtime digest, dimension and instructions.
+
+- A store written by a profiled writer carries `<db>.lance/andenken-profile.json`
+  (it travels with every copy of the store). Write, `reset` and query refuse a
+  different fingerprint — `reset` refuses BEFORE dropping rows.
+- A pre-stamp (unstamped, non-empty) store is accepted only by the legacy 4096d
+  profile. Existing stores are never stamped retroactively; a new generation
+  goes to a new data directory.
+- `ANDENKEN_<NS>_PROFILE=<id>` builds the provider from the profile; a
+  conflicting MODEL / DIMENSIONS / instruction / endpoint / batch / timeout is a
+  refusal. Namespaced providers without a usable DIMENSIONS are refused.
+- Every reply is validated: one vector per input, integer unique in-range
+  index, exact dimension, finite, non-zero, and for loopback profiles the
+  echoed model. An invalid reply is permanent (never retried).
+- Runtimes that silently truncate (Ollama `/v1`, ctx 2048) get a fail-closed
+  bound: tokens ≤ NFKC code points + 3, limit 2045. The profiled generation
+  splits md chunks and session messages to fit (`withEmbedSplit`, target 1845
+  + code-point ceiling); every character survives. The legacy split is
+  byte-identical outside that scope.
+- OpenClaw queries use `ANDENKEN_OPENCLAW_QUERY_*` when set, otherwise the
+  sessions provider — and the generation check refuses rather than silently
+  falling back to FTS when that provider is not the harvest's generation.
 
 The md track is no longer "under construction" in the old sense: first
 production cut is closed. Current md work is quality measurement and
@@ -173,10 +201,10 @@ queryable only by a provider that emits the same dimension.
 
 | Track | Model / dim | Endpoint | When |
 |-------|-------------|----------|------|
-| **Sessions** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `https://openrouter.ai/api` via `ANDENKEN_SESSION_*` → `data/sessions.lance` | incremental via `scripts/sync-sessions.sh --local` (this device, ssh 0) / `--global` (all devices + publish); corpus `~/repos/gh/session`; full rebuild via `scripts/rebuild-sessions-full.sh`; admitted pi-durable snapshots via `./run.sh index:durable`; gated by `ANDENKEN_INDEX_AUTHORITY` |
-| **MD** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `https://openrouter.ai/api` via `ANDENKEN_MD_*` → `data/md.lance` | incremental driven by `./run.sh sync:md`; full index via `./run.sh index:md`; corpus `~/repos/gh/notes/content`; Oracle replication via `./run.sh sync:md:oracle` |
+| **Sessions (legacy, READ-ONLY since 2026-11-25)** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `ANDENKEN_SESSION_*` → `data/sessions.lance` (unstamped) | query + rollback only. Every writer refuses this generation (`writerRefusal`); `sync-sessions.sh` refuses the unstamped store before gather; `rebuild-sessions-full.sh` is retired. |
+| **MD (legacy, READ-ONLY since 2026-11-25)** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `ANDENKEN_MD_*` → `data/md.lance` (unstamped) | query + rollback only; `index:md` / `sync:md` refuse the Qwen generation before any request. `sync:md:oracle` still replicates the existing store. |
 | **OpenClaw** | `qwen/qwen3-embedding-8b` / 4096d — **embedded by OpenClaw, not by us** | `ANDENKEN_OPENCLAW_HOST` (default `oracle`), `sqlite3 -readonly` snapshot of each bot's `openclaw-agent.sqlite` → `data/openclaw.lance` | explicit authority call only: `./run.sh sync:openclaw` (delta by per-agent watermark, `--full` from zero), then `./run.sh sync:openclaw:oracle` to publish the completed private store. **API 0** — the vectors come already computed. |
-| **Org** | Qwen3-Embedding-4B / 2560d | `ANDENKEN_ORG_*` / legacy vLLM path → `data/org.lance` | **disabled in production.** Upstream R&D only. Do not run from operator workflow. |
+| **Local generation (readiness, not adopted)** | Ollama `bge-m3:latest` / 1024d, digest-pinned | loopback `127.0.0.1:11435` via `ANDENKEN_<NS>_PROFILE=ollama-bge-m3-1024` → a NEW data directory | sessions: `candidate:sessions:plan/build` (window `--since-kst/--until-kst`) and `ANDENKEN_SYNC_PROFILE=ollama-bge-m3-1024 scripts/sync-sessions.sh --local`; md: `ANDENKEN_MD_PROFILE`. Never published to Oracle by `--global` / `sync:md:oracle` (stamped stores refused). |
 
 ### Session corpus sources
 
@@ -309,12 +337,8 @@ create duplicate memory. JSONL discovery chooses only `pi`, `claude`, and `all`
   baseline): OpenClaw-style Markdown chunking emits larger, denser
   CJK-weighted chunks instead of org's heading/body two-tier fragments. Treat
   this as density improvement, not missing corpus.
-- **Org** stays 4B/2560d but is **disabled in production**. Doctor WARN
-  cleanup, chunker improvements, and source policy refinement are upstream R&D
-  and live behind explicit operator invocation. Agents do not consume org
-  today.
 - Query providers are track-specific. Never use a sessions vector against the
-  md or org DB, or vice versa.
+  md DB, or vice versa — and never one generation against another (stamp).
 
 ### Cost discipline (mandatory)
 
@@ -325,7 +349,8 @@ create duplicate memory. JSONL discovery chooses only `pi`, `claude`, and `all`
   full rebuilds) and the same wrong-dim preflight. Incremental is the default
   cadence.
 - Indexing/search paths must check DB/provider dimension compatibility before
-  any paid embedding call. Sessions and md expect 4096d; org expects 2560d.
+  any paid embedding call. Sessions and md expect 4096d (legacy) or their
+  profile's dimension; the generation stamp is checked as well.
 - `memory-sync` skill (agent-config side) covers the sessions fast path. md
   full indexing requires GLG confirmation; md Oracle replication should reuse
   the completed local DB via `./run.sh sync:md:oracle` rather than paying for a
@@ -386,27 +411,25 @@ Specific operations worth knowing by name:
   `./run.sh status` + `./run.sh verify md` by default (API 0). `--smoke` adds
   one remote `search:md` query. This script is part of the md production
   contract; do not leave ad-hoc rsync snippets outside `run.sh` / AGENTS.md.
-- `scripts/sync-sessions.sh` — sessions-only incremental path through
-  OpenRouter Qwen3-Embedding-8B 4096d. Wrong-dim aborts before API; no-work
-  exits with API 0. **Two modes since 2026-09-03.** `--local` (default) indexes
-  only this device's live sessions, uses no ssh and does not touch the replica —
-  cheap enough for a timer. `--global` gathers every device with `--strict`,
-  embeds, verifies, then publishes index **and** manifest **and** corpus in one
-  act (INVARIANT 6.6: the DB and its manifest always ship together, and pushing
-  an index without its corpus is what produced the 2026-09-03 oracle orphans).
-  `--push` is a deprecated alias. Used by the agent-config `memory-sync` skill;
-  nothing here is automated by default.
-- `scripts/rebuild-sessions-full.sh` — sessions-only full rebuild. Estimate →
-  explicit confirmation → 4096d preflight → destroy sessions index → rebuild
-  → verify. Human-driven and paid-remote gated.
-- `scripts/rebuild-incremental.sh` / `scripts/rebuild-full.sh` — deprecated
-  mixed sessions+org paths. Do not use for normal operations.
-- `./run.sh verify all` — integrity check after indexing (skips disabled org).
+- `scripts/sync-sessions.sh` — sessions-only incremental for the local Ollama
+  BGE-M3 1024d generation (`ANDENKEN_SYNC_PROFILE`, default and only value
+  `ollama-bge-m3-1024`; placement via `ANDENKEN_SYNC_ENDPOINT`). The generation
+  is resolved before Step 0 gather: a Qwen profile, `--global`, or an existing
+  UNSTAMPED `sessions.lance` (the preserved legacy store) refuse with API 0 and
+  nothing gathered. Preflight is `scripts/profile-preflight.ts` (digest + one
+  validated probe). `--global` publish is dormant until its own gate (the
+  INVARIANT 6.6 pairing still applies when it reopens).
+- `scripts/rebuild-sessions-full.sh` — RETIRED 2026-11-25 (in-place Qwen 4096d
+  paid rebuild); refuses at once. A new generation is built into a fresh target
+  by `candidate:sessions:plan/build`.
+- `scripts/rebuild-incremental.sh` / `scripts/rebuild-full.sh` — retired; they
+  refuse.
+- `./run.sh verify all` — integrity check after indexing (sessions + md). Strict
+  for sessions/md: a configured/stored dimension delta, a foreign or unreadable
+  generation stamp, or a bad vector sample FAILS.
 - `./run.sh doctor --md` — production md triage. Explains provider / DB /
   manifest state and accounts for manifest↔indexed gaps via `analyzeMdFile`
   skip reasons (`noembed_tag`, `min_body`, etc.).
-- `./run.sh doctor --org` — org triage (read-only, local-only). Upstream R&D
-  only since the org track is disabled in production.
 - `./run.sh golden` — the current component-level search baseline. It covers
   the two live tracks independently: `--db session` and `--db md`; the org
   track is retired from the gate. The md track calls `searchMdCore()` from

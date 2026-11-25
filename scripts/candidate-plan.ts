@@ -14,6 +14,10 @@
  * incomplete. Empty discovery is `status: "empty"`, never a complete zero.
  * No automatic retry.
  *
+ * Window: --since-kst/--until-kst (both required, half-open KST) select files by latest eligible send
+ * timestamp; profile ollama-bge-m3-1024 is required and recorded with its fingerprint; lengthPlan is
+ * reported for the send set.
+ *
  * Admitted closed pi-durable snapshots pass the same boundary, are pinned by
  * size + sha256 before AND after, and are planned through the existing
  * `runDurableIndex` dry run against the (absent) candidate durable manifest,
@@ -23,7 +27,7 @@
  * The output carries counts, coordinates (file, line, chunk id) and fixed
  * codes — never a reason detail or exception message.
  *
- *   tsx scripts/candidate-plan.ts --target <abs dir> --out <abs file>
+ *   tsx scripts/candidate-plan.ts --target <abs dir> --out <abs file> --since-kst <ISO> --until-kst <ISO>
  */
 
 import * as crypto from "node:crypto";
@@ -35,16 +39,21 @@ import { fileURLToPath } from "node:url";
 import {
   extractSessionChunksDetailed,
   findSessionFiles,
+  withEmbedSplit,
   type SelectionDecision,
 } from "../session-indexer.ts";
 import { partitionMessagesForEmbedding, type MessageGroup, type SafetyKind } from "../session-selection.ts";
 import { runDurableIndex } from "../durable-index.ts";
 import { findDurableSnapshots } from "../durable-source.ts";
 import type { DurableRefusalReason } from "../durable-reader.ts";
+import { PROFILES, codepointsNfkc, embedSplitFor, getProfile, lengthPlan, maxInputCodepoints, profileFingerprint, type EmbeddingProfile } from "../embedding-profile.ts";
 
 export const PLAN_KIND = "andenken-candidate-plan";
 export const PLAN_POLICY = "control-v1" as const;
-const VECTOR_BYTES_PER_ROW = 4096 * 4;
+/** The ONLY embedding generation this candidate may be built with (local Ollama BGE-M3, 1024d). */
+export const CANDIDATE_PROFILE_ID = "ollama-bge-m3-1024";
+export const CANDIDATE_PROFILE: EmbeddingProfile = PROFILES[CANDIDATE_PROFILE_ID];
+const VECTOR_BYTES_PER_ROW = CANDIDATE_PROFILE.dimensions * 4;
 const GiB = 1024 ** 3;
 /** Draft budget (coordinator 13:56): candidate ≤ 5 GiB, ≥ 8 GiB left on the target fs. Confirmed only after the plan. */
 const DRAFT_CANDIDATE_CAP = 5 * GiB;
@@ -53,6 +62,8 @@ const DRAFT_ROOT_RESERVE = 8 * GiB;
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 export interface PlanEnv {
+  /** `ANDENKEN_SESSION_PROFILE`; must be the candidate profile. */
+  profileId?: string;
   home: string;
   corpus: string | undefined;
   dataDir: string;
@@ -64,6 +75,7 @@ export function defaultPlanEnv(env: NodeJS.ProcessEnv = process.env): PlanEnv {
   const corpusRaw = env.ANDENKEN_SESSION_CORPUS;
   const expanded = corpusRaw ? corpusRaw.replace(/^~(?=\/|$)/, home) : undefined;
   return {
+    profileId: env.ANDENKEN_SESSION_PROFILE,
     home,
     // String normalization only (trailing slash, `..`); a relative value stays as-is for the guard to refuse.
     corpus: expanded && path.isAbsolute(expanded) ? path.resolve(expanded) : expanded,
@@ -72,7 +84,46 @@ export function defaultPlanEnv(env: NodeJS.ProcessEnv = process.env): PlanEnv {
   };
 }
 
-export type PlanArgs = { ok: true; target: string; out: string } | { ok: false; code: string };
+// ---------------------------------------------------------------------------
+// Date window — fixed KST, half-open [since, until), both explicit
+// ---------------------------------------------------------------------------
+
+export interface PlanWindow {
+  sinceKst: string;
+  untilKst: string;
+  sinceMs: number;
+  untilMs: number;
+}
+
+const KST_OFFSET_MS = 9 * 3600_000;
+const KST_RE = /^(\d{4}-\d{2}-\d{2})(?:T(\d{2}:\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?)?(\+09:00)?$/;
+
+/** `YYYY-MM-DD[THH:MM[:SS[.mmm]]][+09:00]`, always read as KST; any other offset or `Z` is refused. */
+export function parseKstInstant(s: string): number | null {
+  const m = KST_RE.exec(s);
+  if (!m) return null;
+  const iso = `${m[1]}T${m[2] ?? "00:00"}:${m[3] ?? "00"}.${(m[4] ?? "0").padEnd(3, "0")}+09:00`;
+  const ms = Date.parse(iso);
+  if (!Number.isFinite(ms)) return null;
+  // Reject rolled-over dates such as 2026-02-30.
+  if (new Date(ms + KST_OFFSET_MS).toISOString().slice(0, 10) !== m[1]) return null;
+  return ms;
+}
+
+export function kstIso(ms: number): string {
+  return new Date(ms + KST_OFFSET_MS).toISOString().replace("Z", "+09:00");
+}
+
+export function parseKstWindow(since: string | undefined, until: string | undefined): { ok: true; window: PlanWindow } | { ok: false; code: string } {
+  if (since === undefined || until === undefined) return { ok: false, code: "window-required" };
+  const a = parseKstInstant(since);
+  const b = parseKstInstant(until);
+  if (a === null || b === null) return { ok: false, code: "window-invalid" };
+  if (!(a < b)) return { ok: false, code: "window-empty-or-inverted" };
+  return { ok: true, window: { sinceKst: kstIso(a), untilKst: kstIso(b), sinceMs: a, untilMs: b } };
+}
+
+export type PlanArgs = { ok: true; target: string; out: string; window: PlanWindow } | { ok: false; code: string };
 
 function within(child: string, parent: string): boolean {
   const rel = path.relative(parent, child);
@@ -92,7 +143,7 @@ function ancestorsCanonical(p: string): boolean {
 
 /** Metadata-only guard. Creates nothing, opens no session. */
 export function validatePlanArgs(argv: string[], env: PlanEnv): PlanArgs {
-  const known = new Set(["--target", "--out"]);
+  const known = new Set(["--target", "--out", "--since-kst", "--until-kst"]);
   const values: Record<string, string> = {};
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -106,6 +157,9 @@ export function validatePlanArgs(argv: string[], env: PlanEnv): PlanArgs {
   const target = values["--target"];
   const out = values["--out"];
   if (!target || !out) return { ok: false, code: "target-and-out-required" };
+  const w = parseKstWindow(values["--since-kst"], values["--until-kst"]);
+  if (!w.ok) return w;
+  if (env.profileId !== CANDIDATE_PROFILE_ID) return { ok: false, code: "profile-not-ollama-bge-m3-1024" };
   if (!env.corpus) return { ok: false, code: "corpus-env-required" };
   if (!path.isAbsolute(env.corpus)) return { ok: false, code: "corpus-not-absolute" };
   if (!fs.existsSync(env.corpus) || !fs.statSync(env.corpus).isDirectory()) return { ok: false, code: "corpus-missing" };
@@ -125,7 +179,7 @@ export function validatePlanArgs(argv: string[], env: PlanEnv): PlanArgs {
   if (path.dirname(target) !== env.candidatesRoot) return { ok: false, code: "target-not-directly-under-candidates-root" };
   if (within(out, target)) return { ok: false, code: "out-inside-target" };
   if (!fs.existsSync(path.dirname(out))) return { ok: false, code: "out-parent-missing" };
-  return { ok: true, target, out };
+  return { ok: true, target, out, window: w.window };
 }
 
 function isSymlink(p: string): boolean {
@@ -289,14 +343,58 @@ function inc(o: Record<string, number>, k: string, n = 1): void {
 
 type HeldCoord = { id: string; kinds: SafetyKind[]; chars: number };
 
+/** Length plan over the SEND set (S0-held chunks never leave, so they are not measured). */
+interface LengthAcc {
+  total: number;
+  over: number;
+  maxCodepoints: number;
+  overCoords: Array<{ id: string; codepoints: number }>;
+}
+const OVER_COORDS_CAP = 200;
+const newLengthAcc = (): LengthAcc => ({ total: 0, over: 0, maxCodepoints: 0, overCoords: [] });
+function addLength(acc: LengthAcc, chunks: ReadonlyArray<{ id: string; text: string }>, corpus: string): void {
+  const limit = maxInputCodepoints(CANDIDATE_PROFILE, "document");
+  const r = lengthPlan(CANDIDATE_PROFILE, "document", chunks.map((c) => c.text));
+  acc.total += r.total;
+  acc.over += r.over;
+  acc.maxCodepoints = Math.max(acc.maxCodepoints, r.maxCodepoints);
+  if (r.over > 0 && limit !== null) {
+    for (const c of chunks) {
+      const n = codepointsNfkc(c.text);
+      if (n > limit && acc.overCoords.length < OVER_COORDS_CAP) acc.overCoords.push({ id: path.relative(corpus, c.id), codepoints: n });
+    }
+  }
+}
+
+/** Latest parseable timestamp among send chunks, or null (no chunks / none parseable). */
+export function latestSendMs(send: ReadonlyArray<{ timestamp: string }>): number | null {
+  let latest: number | null = null;
+  for (const c of send) {
+    const t = Date.parse(c.timestamp);
+    if (Number.isFinite(t) && (latest === null || t > latest)) latest = t;
+  }
+  return latest;
+}
+
+export type ExcludeCode = "outside-window" | "no-send-chunks" | "no-parseable-timestamp";
+/** Window rule over a send set: half-open [since, until). */
+export function windowDecision(send: ReadonlyArray<{ timestamp: string }>, w: PlanWindow): { include: true; latestMs: number } | { include: false; code: ExcludeCode; latestMs: number | null } {
+  if (send.length === 0) return { include: false, code: "no-send-chunks", latestMs: null };
+  const latest = latestSendMs(send);
+  if (latest === null) return { include: false, code: "no-parseable-timestamp", latestMs: null };
+  if (latest >= w.sinceMs && latest < w.untilMs) return { include: true, latestMs: latest };
+  return { include: false, code: "outside-window", latestMs: latest };
+}
+
 /** S0 over message groups: send/held tallies, kinds once per held message, coordinates per held chunk. */
 function applyS0<T extends { id: string; text: string }>(
   groups: ReadonlyArray<MessageGroup<T>>,
   corpus: string,
-  sink: { held: Tally; toSend: Tally; heldMessages: number; kinds: Record<string, number>; coords: HeldCoord[] },
+  sink: { held: Tally; toSend: Tally; heldMessages: number; kinds: Record<string, number>; coords: HeldCoord[]; length?: LengthAcc },
 ): void {
   const { send, held } = partitionMessagesForEmbedding(groups);
   add(sink.toSend, send);
+  if (sink.length) addLength(sink.length, send, corpus);
   for (const h of held) {
     sink.heldMessages += 1;
     for (const k of h.kinds) inc(sink.kinds, k);
@@ -305,7 +403,16 @@ function applyS0<T extends { id: string; text: string }>(
   }
 }
 
-export async function runPlan(target: string, env: PlanEnv) {
+/** The profile-scoped split in force for every extraction of this generation. */
+export const CANDIDATE_SPLIT = embedSplitFor(CANDIDATE_PROFILE)!;
+
+/** Every extraction (JSONL and durable) runs inside the profile's split scope, identically in plan, build and resume. */
+export function runPlan(target: string, env: PlanEnv, window: PlanWindow) {
+  return withEmbedSplit(CANDIDATE_SPLIT, () => runPlanScoped(target, env, window));
+}
+
+async function runPlanScoped(target: string, env: PlanEnv, window: PlanWindow) {
+  if (env.profileId !== CANDIDATE_PROFILE_ID) throw new Error("profile-not-ollama-bge-m3-1024");
   const corpus = env.corpus!;
   const totals = {
     discovered: 0,
@@ -329,6 +436,9 @@ export async function runPlan(target: string, env: PlanEnv) {
     attention: [] as Array<{ file: string; line: number; outcome: string; retainedChars: number; legacyChunks: number }>,
   };
   const perFile: Array<Record<string, unknown>> = [];
+  const excludedFiles: Array<{ file: string; size: number; code: ExcludeCode; latestSendKst: string | null }> = [];
+  const excludedByCode: Record<string, number> = {};
+  const lengthJsonl = newLengthAcc();
   const refused: Array<{ file: string; source: "jsonl" | "durable"; code: string }> = [];
   const changed: Array<{ file: string; source: "jsonl" | "durable"; pre: unknown; post: unknown }> = [];
   const errors: Array<{ file: string; code: string }> = [];
@@ -341,7 +451,7 @@ export async function runPlan(target: string, env: PlanEnv) {
   if (discoveryCorpus !== corpus) errors.push({ file: "<discovery>", code: "discovery-corpus-mismatch" });
   totals.discovered = files.length;
 
-  const jsonlSafety = { held: totals.safetyHeld, toSend: totals.toSend, heldMessages: 0, kinds: totals.safetyKinds, coords: coords.safetyHeld };
+  const jsonlSafety = { held: totals.safetyHeld, toSend: totals.toSend, heldMessages: 0, kinds: totals.safetyKinds, coords: coords.safetyHeld, length: lengthJsonl };
   for (const file of files) {
     const rel = relOf(file);
     try {
@@ -356,6 +466,14 @@ export async function runPlan(target: string, env: PlanEnv) {
       }
       const sha = crypto.createHash("sha256").update(r.bytes).digest("hex");
       const det = await extractSessionChunksDetailed(Readable.from([r.bytes]), file, PLAN_POLICY);
+
+      // Window rule over the SEND set (control-v1 selection, whole-message S0 applied).
+      const decision = windowDecision(partitionMessagesForEmbedding(det.selectedGroups).send, window);
+      if (!decision.include) {
+        excludedByCode[decision.code] = (excludedByCode[decision.code] ?? 0) + 1;
+        excludedFiles.push({ file: rel, size: r.stat.size, code: decision.code, latestSendKst: decision.latestMs === null ? null : kstIso(decision.latestMs) });
+        continue;
+      }
       pinLines.push(`${rel}\t${r.stat.size}\t${sha}`);
 
       const before = { held: totals.safetyHeld.chunks, toSend: totals.toSend.chunks };
@@ -386,6 +504,7 @@ export async function runPlan(target: string, env: PlanEnv) {
         control: f.control,
         safetyHeldChunks: totals.safetyHeld.chunks - before.held,
         toSendChunks: totals.toSend.chunks - before.toSend,
+        latestSendKst: kstIso(decision.latestMs),
         outcomes: f.outcomes,
       });
     } catch (e) {
@@ -395,7 +514,9 @@ export async function runPlan(target: string, env: PlanEnv) {
   totals.safetyHeldMessages = jsonlSafety.heldMessages;
 
   // --- pi-durable: admitted closed snapshots, pinned, B.1 as-is, message-level S0 ---
-  const durableSafety = { held: tally(), toSend: tally(), heldMessages: 0, kinds: {} as Record<string, number>, coords: [] as HeldCoord[] };
+  const lengthDurable = newLengthAcc();
+  const durableSafety = { held: tally(), toSend: tally(), heldMessages: 0, kinds: {} as Record<string, number>, coords: [] as HeldCoord[], length: lengthDurable };
+  const durableLatest = new Map<string, ReturnType<typeof windowDecision>>();
   const durablePinFiles: Array<{ file: string; size: number; mtimeNs: string; sha256: string }> = [];
   let durable: { ran: boolean; skipped?: string; policy?: string; files?: Array<Record<string, unknown>>; aliases?: number } = { ran: false };
   const snapshots = discoveryCorpus === corpus ? findDurableSnapshots(corpus) : [];
@@ -423,7 +544,10 @@ export async function runPlan(target: string, env: PlanEnv) {
         corpus,
         manifestPath: path.join(target, "durable-manifest.json"),
         dryRun: true,
-        inspectExtraction: (_file, x) => applyS0(x.groups, corpus, durableSafety),
+        inspectExtraction: (file, x) => {
+          applyS0(x.groups, corpus, durableSafety);
+          durableLatest.set(relOf(file), windowDecision(partitionMessagesForEmbedding(x.groups).send, window));
+        },
       });
       durable = {
         ran: true,
@@ -464,7 +588,28 @@ export async function runPlan(target: string, env: PlanEnv) {
   const st = fs.statfsSync(fsProbe);
   const availBytes = Number(st.bavail) * Number(st.bsize);
 
-  const complete = files.length > 0 && refused.length === 0 && changed.length === 0 && errors.length === 0;
+  // Durable snapshots: the SAME window rule is applied (latest eligible send entry), but runDurableIndex
+  // takes every admitted snapshot and has no file filter, so a snapshot the rule would exclude cannot be
+  // left out of the build. The plan counts them; the build refuses by name when any is outside the window.
+  const durableWindow = { inWindow: 0, outsideWindow: 0, noSendChunks: 0, noParseableTimestamp: 0, notExtracted: 0 };
+  const durableWindowFiles: Array<{ file: string; decision: string; latestSendKst: string | null }> = [];
+  for (const p of durablePinFiles) {
+    const d = durableLatest.get(p.file);
+    durableWindowFiles.push({ file: p.file, decision: !d ? "not-extracted" : d.include ? "in-window" : d.code, latestSendKst: d && d.latestMs !== null ? kstIso(d.latestMs) : null });
+    if (!d) durableWindow.notExtracted += 1;
+    else if (d.include) durableWindow.inWindow += 1;
+    else if (d.code === "outside-window") durableWindow.outsideWindow += 1;
+    else if (d.code === "no-send-chunks") durableWindow.noSendChunks += 1;
+    else durableWindow.noParseableTimestamp += 1;
+  }
+  const lengthTotal = {
+    limit: maxInputCodepoints(CANDIDATE_PROFILE, "document"),
+    total: lengthJsonl.total + lengthDurable.total,
+    over: lengthJsonl.over + lengthDurable.over,
+    maxCodepoints: Math.max(lengthJsonl.maxCodepoints, lengthDurable.maxCodepoints),
+  };
+
+  const complete = files.length > 0 && perFile.length > 0 && refused.length === 0 && changed.length === 0 && errors.length === 0;
   const status = complete ? "complete" : refused.length + changed.length + errors.length > 0 ? "incomplete" : "empty";
   const pinOf = (lines: string[]) => crypto.createHash("sha256").update([...lines].sort().join("\n")).digest("hex");
 
@@ -476,6 +621,40 @@ export async function runPlan(target: string, env: PlanEnv) {
     target,
     status,
     complete,
+    profile: {
+      id: CANDIDATE_PROFILE.id,
+      fingerprint: profileFingerprint(CANDIDATE_PROFILE),
+      model: CANDIDATE_PROFILE.model,
+      digest: CANDIDATE_PROFILE.digest,
+      dimensions: CANDIDATE_PROFILE.dimensions,
+      maxInputTokens: CANDIDATE_PROFILE.maxInputTokens,
+      maxBatchSize: CANDIDATE_PROFILE.maxBatchSize,
+      endpoint: CANDIDATE_PROFILE.endpoint ?? null,
+      paidRemote: CANDIDATE_PROFILE.paidRemote,
+    },
+    split: { target: CANDIDATE_SPLIT.target, maxCodepoints: CANDIDATE_SPLIT.maxCodepoints },
+    window: {
+      sinceKst: window.sinceKst,
+      untilKst: window.untilKst,
+      sinceMs: window.sinceMs,
+      untilMs: window.untilMs,
+      rule: "file included iff the LATEST parseable timestamp among its eligible SEND chunks (control-v1 selection, whole-message S0 applied) lies in the half-open KST window [since, until); no send chunk or no parseable timestamp → excluded",
+      durable: { rule: "same rule per snapshot, but all-or-nothing: the build refuses when any admitted snapshot is outside the window or undated (no per-file filter in runDurableIndex)", ...durableWindow, files: durableWindowFiles },
+    },
+    selection: {
+      discovered: files.length,
+      included: perFile.length,
+      excluded: excludedFiles.length,
+      excludedByCode,
+      excludedFiles,
+    },
+    lengthPlan: {
+      basis: "NFKC code points of each SEND text vs the profile bound; the build refuses before any request when over > 0 (no silent truncation)",
+      jsonl: { total: lengthJsonl.total, over: lengthJsonl.over, maxCodepoints: lengthJsonl.maxCodepoints },
+      durable: { total: lengthDurable.total, over: lengthDurable.over, maxCodepoints: lengthDurable.maxCodepoints },
+      ...lengthTotal,
+      overCoords: [...lengthJsonl.overCoords, ...lengthDurable.overCoords].slice(0, OVER_COORDS_CAP),
+    },
     notes: {
       complete:
         "every discovered JSONL passed the input boundary and was read once with unchanged identity; any discovered durable snapshots passed the boundary, were pinned before and after their dry run, and remained unchanged; JSONL discovery was not empty. It does NOT mean every line was valid JSON: see totals.invalidJsonLines / blankLines (skipped silently by the production parser too).",
@@ -503,7 +682,7 @@ export async function runPlan(target: string, env: PlanEnv) {
     budget: {
       note: "draft caps; confirm after this plan",
       basis:
-        "arithmetic only: send rows × 4096 × 4 B (f32 vector) + UTF-8 text bytes. Excludes FTS index, metadata columns, LanceDB versions/manifests and temporaries — not a disk-usage prediction and not a ceiling.",
+        "arithmetic only: send rows × profile dimensions × 4 B (f32 vector) + UTF-8 text bytes. Excludes FTS index, metadata columns, LanceDB versions/manifests and temporaries — not a disk-usage prediction and not a ceiling.",
       sendRows,
       vectorBytes: sendRows * VECTOR_BYTES_PER_ROW,
       sendTextBytes,
@@ -563,7 +742,7 @@ async function main(): Promise<number> {
     console.error(`REFUSED candidate-plan: ${args.code}`);
     return 2;
   }
-  const plan = await runPlan(args.target, env);
+  const plan = await runPlan(args.target, env, args.window);
   const prev = process.umask(0o077);
   try {
     fs.writeFileSync(args.out, JSON.stringify(plan, null, 1) + "\n", { flag: "wx", mode: 0o600 });
@@ -572,6 +751,8 @@ async function main(): Promise<number> {
   }
   const t = plan.totals;
   console.log(`candidate plan (${plan.policy}) → ${args.out}`);
+  console.log(`  profile=${plan.profile.id} window=[${plan.window.sinceKst}, ${plan.window.untilKst}) included=${plan.selection.included} excluded=${plan.selection.excluded} ${JSON.stringify(plan.selection.excludedByCode)}`);
+  console.log(`  length limit=${plan.lengthPlan.limit} send=${plan.lengthPlan.total} over=${plan.lengthPlan.over} max=${plan.lengthPlan.maxCodepoints}`);
   console.log(`  status=${plan.status} discovered=${t.discovered} files=${t.files} refused=${plan.refused.length} changed=${plan.changed.length} errors=${plan.errors.length}`);
   console.log(`  lines=${t.lines} invalidJson=${t.invalidJsonLines} blank=${t.blankLines}`);
   console.log(`  legacy  chunks=${t.legacy.chunks} chars=${t.legacy.chars}`);

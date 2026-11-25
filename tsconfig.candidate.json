@@ -6,7 +6,7 @@
   },
   "include": [
     "scripts/candidate-build.ts", "scripts/candidate-measure.ts", "candidate-build.test.ts",
-    "scripts/candidate-plan.ts", "session-selection.ts", "session-indexer.ts", "durable-index.ts"
+    "scripts/candidate-plan.ts", "embedding-profile.ts", "session-selection.ts", "session-indexer.ts", "durable-index.ts"
   ],
   "exclude": ["node_modules"]
 }

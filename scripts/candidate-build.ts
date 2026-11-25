@@ -4,17 +4,26 @@
  * API-0 plan (scripts/candidate-plan.ts). Production data, manifests, corpus,
  * backups and archives are never written.
  *
+ * Embedding generation: the LOCAL Ollama BGE-M3 1024d profile (embedding-profile.ts,
+ * ollama-bge-m3-1024) — nothing else. The plan records profile id + fingerprint, a KST
+ * date window and the pinned selected file list; build and --resume refuse by name when
+ * the env / provider profile, the fingerprint or the target store stamp differ. The
+ * runtime digest is verified (verifyRuntimeIdentity) before the one validated probe.
+ * Any send text over the profile's input bound refuses the build before a request.
+ *
  * Order — every refusal before the confirmation is API 0 and creates nothing:
  *   1. arguments, index authority, production sync lock held by an ancestor
  *   2. plan file: sha256 == --plan-sha, policy, complete, target, and the six
  *      plan source hashes == the files in this tree (else the plan is void)
  *   3. corpus + fresh target guards (canonical, same filesystem as the plan
  *      probe, no overlap with corpus / production data / repo / backups)
- *   4. CPU affinity ≤ 8, Qwen3-Embedding-8B / 4096 config, space budget
- *   5. JSONL file set == plan file set (size, boundary); durable pin set
- *   6. ANDENKEN_ALLOW_PAID_FULL_REBUILD=1 and an interactive TTY "yes"
- * Then: create target, take the candidate writer lock, provider + one 4096d
- * probe, and per file: read once → sha/count == plan → whole-message S0 →
+ *   4. CPU affinity ≤ 8, profile config (ANDENKEN_SESSION_PROFILE), plan profile
+ *      + fingerprint + window + length plan, space budget
+ *   5. JSONL file set == plan selected ∪ excluded set (sizes, boundary); durable pin set
+ *   6. an interactive TTY "yes" (and ANDENKEN_ALLOW_PAID_FULL_REBUILD=1 only if the
+ *      profile is paid-remote; the local loopback profile is not)
+ * Then: create target, take the candidate writer lock, provider + runtime digest +
+ * one validated 1024d probe, and per file: read once → sha/count == plan → whole-message S0 →
  * embed the send set → append; manifest only after flush. Durable B.1 as-is
  * with its S0 re-checked (any hold aborts). FTS, then integrity checks.
  *
@@ -47,26 +56,40 @@ import * as path from "node:path";
 import * as readline from "node:readline";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
-import { extractSessionChunksDetailed, findSessionFiles, type SessionChunk } from "../session-indexer.ts";
+import { extractSessionChunksDetailed, findSessionFiles, withEmbedSplit, type SessionChunk } from "../session-indexer.ts";
 import { partitionMessagesForEmbedding, scanHighSignal, type SafetyKind } from "../session-selection.ts";
 import { runDurableIndex, type DurableManifest } from "../durable-index.ts";
 import { findDurableSnapshots, type DurableRow } from "../durable-source.ts";
 import { VectorStore } from "../store.ts";
 import { WriteBuffer, type BufferedRecord } from "../write-buffer.ts";
 import { acquireSessionsLock, SessionsLockRefused, type SessionsLockHandle } from "../sessions-lock.ts";
-import { checkSource, defaultPlanEnv, errorCode, readSourceOnce, type PlanEnv } from "./candidate-plan.ts";
+import { CANDIDATE_PROFILE, CANDIDATE_PROFILE_ID, CANDIDATE_SPLIT, checkSource, defaultPlanEnv, errorCode, readSourceOnce, type PlanEnv } from "./candidate-plan.ts";
+import {
+  EmbeddingInputTooLong,
+  EmbeddingResponseInvalid,
+  assertInputsFit,
+  decideStoreProfile,
+  profileFingerprint,
+  readStoreStamp,
+  validateEmbeddingResponse,
+  verifyRuntimeIdentity,
+  type EmbeddingProfile,
+  type RuntimeIdentity,
+} from "../embedding-profile.ts";
 
 export const BUILD_KIND = "andenken-candidate-build";
 export const CANDIDATE_POLICY = "control-v1";
-export const CANDIDATE_DIM = 4096;
+/** The candidate's vector dimension — read from the profile, never a literal. */
+export const CANDIDATE_DIM = CANDIDATE_PROFILE.dimensions;
+export const CANDIDATE_FINGERPRINT = profileFingerprint(CANDIDATE_PROFILE);
 const GiB = 1024 ** 3;
 export const SPACE_CAP_BYTES = 5 * GiB;
 export const ROOT_RESERVE_BYTES = 8 * GiB;
 export const MAX_CPUS = 8;
 export const MAX_API_CONCURRENCY = 4;
 const CHECKPOINT_FILES = 100;
-/** Texts per provider request; workers re-check the abort flag between requests. */
-const REQUEST_BATCH = 64;
+/** Texts per provider request come from the profile (≤ maxBatchSize); workers re-check the abort flag between requests. */
+const REQUEST_BATCH = CANDIDATE_PROFILE.maxBatchSize;
 const DB_WRITE_BATCH = 2000;
 const PROBE_TEXT = "andenken candidate dimension probe";
 const TABLE = "session_chunks";
@@ -119,7 +142,7 @@ export interface BuildEnv extends PlanEnv {
   /** The production `data/.sync-sessions.lock` the wrapper holds (flock). */
   syncLockPath: string;
   allowPaid: boolean;
-  providerConfig: { provider?: string; model?: string; dimensions?: string };
+  providerConfig: { profile?: string; provider?: string; model?: string; dimensions?: string };
   apiConcurrency: number;
 }
 
@@ -143,6 +166,7 @@ export function defaultBuildEnv(env: NodeJS.ProcessEnv = process.env): BuildEnv 
     syncLockPath: path.join(REPO, "data", ".sync-sessions.lock"),
     allowPaid: env.ANDENKEN_ALLOW_PAID_FULL_REBUILD === "1",
     providerConfig: {
+      profile: env.ANDENKEN_SESSION_PROFILE,
       provider: env.ANDENKEN_SESSION_PROVIDER,
       model: env.ANDENKEN_SESSION_MODEL,
       dimensions: env.ANDENKEN_SESSION_DIMENSIONS,
@@ -156,6 +180,8 @@ export function defaultBuildEnv(env: NodeJS.ProcessEnv = process.env): BuildEnv 
 export interface CandidateProvider {
   readonly name: string;
   readonly dimensions: number;
+  /** The profile the provider enforces (VLLMProvider.profile); must be the candidate's. */
+  readonly profile?: EmbeddingProfile;
   readonly isPaidRemote?: boolean;
   embedDocumentBatch(texts: string[]): Promise<number[][]>;
   getStats?(): { calls: number; estimatedTokens: number; estimatedCostUSD: number };
@@ -170,6 +196,8 @@ export interface BuildDeps {
   confirm: (summary: string[]) => Promise<string>;
   /** Called only after the confirmation; never before. */
   createProvider: () => Promise<CandidateProvider | null>;
+  /** fetch used for the runtime-identity (digest) check; the suite injects a fake. */
+  fetch?: typeof fetch;
   log: (line: string) => void;
   now: () => Date;
   /** Files between manifest checkpoints (default 100). */
@@ -309,19 +337,24 @@ export function syncLockHeldByAncestor(lockPath: string): boolean {
   }
 }
 
-const QWEN3_8B_MODELS = new Set(["qwen/qwen3-embedding-8b"]);
+/**
+ * The env must name the candidate profile; any geometry key that is also set must agree with it
+ * (the same rule buildVllmFromProfile enforces, checked here before anything is created).
+ */
 export function providerConfigOk(c: BuildEnv["providerConfig"]): boolean {
   return (
-    (c.provider === "openrouter" || c.provider === "vllm") &&
-    typeof c.model === "string" &&
-    QWEN3_8B_MODELS.has(c.model.toLowerCase()) &&
-    c.dimensions === String(CANDIDATE_DIM)
+    c.profile === CANDIDATE_PROFILE_ID &&
+    (c.provider === undefined || c.provider === "vllm") &&
+    (c.model === undefined || c.model === CANDIDATE_PROFILE.model) &&
+    (c.dimensions === undefined || c.dimensions === String(CANDIDATE_DIM))
   );
 }
 
 /** A provider failure reduced to a code; never the upstream body or message. */
 export function providerErrorCode(e: unknown): string {
   if (e instanceof BuildAborted || e instanceof BuildRefused) return e.code;
+  if (e instanceof EmbeddingResponseInvalid) return `provider-response-invalid-${e.code}`;
+  if (e instanceof EmbeddingInputTooLong) return "provider-input-too-long";
   const msg = e instanceof Error ? e.message : "";
   const http = /^vLLM embed \((\d{3})\)/.exec(msg);
   if (http) return `provider-http-${http[1]}`;
@@ -340,6 +373,8 @@ export type FailureClass = "timeout" | "rate-limit" | "server" | "network" | "pe
 /** Transient classes are retried; `permanent` stops the build. Decided on the code, never logged raw. */
 export function classifyProviderFailure(e: unknown): FailureClass {
   if (e instanceof BuildAborted || e instanceof BuildRefused) return "permanent";
+  // A wrong-shaped reply or a too-long input is permanent for that request, like a wrong dimension.
+  if (e instanceof EmbeddingResponseInvalid || e instanceof EmbeddingInputTooLong) return "permanent";
   const code = providerErrorCode(e);
   if (code === "provider-timeout" || code === "provider-http-408") return "timeout";
   if (code === "provider-http-429") return "rate-limit";
@@ -426,6 +461,7 @@ export function resilientProvider(
   return {
     name: p.name,
     dimensions: p.dimensions,
+    profile: p.profile,
     isPaidRemote: p.isPaidRemote,
     getStats: p.getStats?.bind(p),
     async embedDocumentBatch(texts: string[]): Promise<number[][]> {
@@ -574,6 +610,11 @@ interface PlanDoc {
   totals: { toSend: { chunks: number }; safetyHeld: { chunks: number } };
   durable: { ran: boolean; files?: Array<{ file: string; status: string; rows: number }>; safety: { held: { chunks: number }; toSend: { chunks: number } } };
   budget: { sendRows: number; estimateBytes: number; probedPath: string };
+  profile: { id: string; fingerprint: string; model: string; digest: string | null; dimensions: number; maxBatchSize: number };
+  split?: { target: number; maxCodepoints: number };
+  window: { sinceKst: string; untilKst: string; sinceMs: number; untilMs: number; durable: { outsideWindow: number; noSendChunks: number; noParseableTimestamp: number; notExtracted: number; inWindow: number } };
+  selection: { discovered: number; included: number; excluded: number; excludedFiles: Array<{ file: string; size: number; code: string }> };
+  lengthPlan: { limit: number | null; total: number; over: number; maxCodepoints: number };
   coords: { safetyHeld: Array<{ id: string; kinds: SafetyKind[]; chars: number }> };
   perFile: PlanFile[];
 }
@@ -764,6 +805,10 @@ async function reconcileTarget(
   const rp = receipt.plan as { path?: string; sha256?: string } | undefined;
   if (receipt.target !== target || rp?.sha256 !== args.planSha || rp?.path !== args.plan) throw new BuildRefused("candidate-plan-mismatch");
   if (JSON.stringify(receipt.planSources) !== JSON.stringify(plan.sources)) throw new BuildRefused("candidate-plan-mismatch");
+  const rprof = receipt.profile as { id?: string; fingerprint?: string } | undefined;
+  if (rprof?.id !== plan.profile.id || rprof?.fingerprint !== plan.profile.fingerprint) throw new BuildRefused("candidate-profile-mismatch");
+  const rsplit = receipt.split as { target?: number; maxCodepoints?: number } | undefined;
+  if (rsplit?.target !== CANDIDATE_SPLIT.target || rsplit?.maxCodepoints !== CANDIDATE_SPLIT.maxCodepoints) throw new BuildRefused("candidate-split-mismatch");
 
   const manifestBytes = readCanonicalFile(path.join(target, "session-manifest.json"));
   let mfiles: Record<string, ManifestEntry> = {};
@@ -776,6 +821,12 @@ async function reconcileTarget(
   }
   const db = await scanCandidateDb(path.join(target, "sessions.lance"));
   if (db.dim !== null && db.dim !== CANDIDATE_DIM) throw new BuildRefused("candidate-db-wrong-dim");
+  {
+    // The store stamp names the generation of the rows already there (embedding-profile.ts).
+    const decision = decideStoreProfile(path.join(target, "sessions.lance"), CANDIDATE_PROFILE, db.rows, db.dim);
+    if (!decision.ok) throw new BuildRefused(`candidate-${decision.code}`);
+    // Rows without a stamp are an unknown generation even if the dimension agrees (the legacy exemption is not this profile's).
+  }
   if (db.duplicateIds > 0) throw new BuildRefused("candidate-db-duplicate-id");
 
   const byAbs = new Map(files.map((f) => [f.abs, f]));
@@ -886,6 +937,22 @@ export async function preflight(argv: string[], env: BuildEnv, deps: BuildDeps):
   if (plan.kind !== "andenken-candidate-plan" || plan.policy !== CANDIDATE_POLICY) throw new BuildRefused("plan-policy-mismatch");
   if (plan.status !== "complete" || plan.complete !== true) throw new BuildRefused("plan-not-complete");
   if (plan.target !== args.target) throw new BuildRefused("plan-target-mismatch");
+  // Profile: env, plan and the code's own profile definition must all be the same generation.
+  if (!providerConfigOk(env.providerConfig) || env.profileId !== CANDIDATE_PROFILE_ID) throw new BuildRefused("provider-config-not-ollama-bge-m3-1024");
+  if (plan.profile?.id !== env.providerConfig.profile) throw new BuildRefused("plan-profile-mismatch");
+  if (plan.split?.target !== CANDIDATE_SPLIT.target || plan.split?.maxCodepoints !== CANDIDATE_SPLIT.maxCodepoints) throw new BuildRefused("plan-split-mismatch");
+  if (plan.profile.fingerprint !== CANDIDATE_FINGERPRINT || plan.profile.dimensions !== CANDIDATE_DIM) throw new BuildRefused("plan-profile-fingerprint-mismatch");
+  const pw = plan.window;
+  if (!pw || !Number.isFinite(pw.sinceMs) || !Number.isFinite(pw.untilMs) || !(pw.sinceMs < pw.untilMs) || !plan.selection) throw new BuildRefused("plan-window-missing");
+  if (plan.selection.included !== plan.perFile.length || plan.selection.excluded !== plan.selection.excludedFiles.length || plan.selection.included === 0) {
+    throw new BuildRefused("plan-selection-mismatch");
+  }
+  // Fail closed on length: nothing that could be truncated by the runtime is ever sent.
+  const lp = plan.lengthPlan;
+  if (!lp || typeof lp.over !== "number") throw new BuildRefused("plan-length-plan-missing");
+  if (lp.over > 0) throw new BuildRefused("input-too-long-in-plan");
+  const dw = pw.durable;
+  if (dw && dw.outsideWindow + dw.noParseableTimestamp + dw.notExtracted > 0) throw new BuildRefused("durable-snapshot-outside-window");
   for (const name of PLAN_SOURCES) {
     let cur: string;
     try {
@@ -935,23 +1002,32 @@ export async function preflight(argv: string[], env: BuildEnv, deps: BuildDeps):
   // 4. CPU, provider config, space
   const cpus = deps.cpuList();
   if (cpus.length === 0 || cpus.length > MAX_CPUS) throw new BuildRefused("cpu-affinity-not-bounded");
-  if (!providerConfigOk(env.providerConfig)) throw new BuildRefused("provider-config-not-qwen3-8b-4096");
   const avail = deps.availBytes(nearestExisting(t));
   if (!args.resume && (plan.budget.estimateBytes > SPACE_CAP_BYTES || avail - plan.budget.estimateBytes < ROOT_RESERVE_BYTES)) {
     throw new BuildRefused("space-insufficient");
   }
 
   // 5. JSONL file set and durable pin set (metadata only)
+  // The pinned selected list plus the recorded exclusions must be EXACTLY what discovery finds now:
+  // a new, vanished or resized file (selected or not) is drift, never a silent re-selection.
   const planRels = new Map(plan.perFile.map((f) => [f.file, f]));
+  const excludedSizes = new Map(plan.selection.excludedFiles.map((f) => [f.file, f.size]));
   const discovered = findSessionFiles();
-  if (discovered.length !== planRels.size) throw new BuildRefused("corpus-file-set-mismatch");
+  if (discovered.length !== planRels.size + excludedSizes.size || planRels.size + excludedSizes.size !== plan.selection.discovered) {
+    throw new BuildRefused("corpus-file-set-mismatch");
+  }
   const files: Preflight["files"] = [];
   for (const abs of discovered) {
     const code = checkSource(abs, corpus);
     if (code) throw new BuildRefused("corpus-file-refused");
     const rel = path.relative(corpus, abs);
     const pf = planRels.get(rel);
-    if (!pf) throw new BuildRefused("corpus-file-set-mismatch");
+    if (!pf) {
+      const ex = excludedSizes.get(rel);
+      if (ex === undefined) throw new BuildRefused("corpus-file-set-mismatch");
+      if (fs.statSync(abs).size !== ex) throw new BuildRefused("corpus-file-size-mismatch");
+      continue;
+    }
     if (fs.statSync(abs).size !== pf.size) throw new BuildRefused("corpus-file-size-mismatch");
     files.push({ abs, rel, plan: pf });
   }
@@ -988,23 +1064,27 @@ export async function preflight(argv: string[], env: BuildEnv, deps: BuildDeps):
   }
 
   // 6. human gate
-  if (!env.allowPaid) throw new BuildRefused("paid-gate-closed");
+  // A paid-remote profile keeps the explicit paid flag. The local loopback profile spends no money, so the
+  // flag does not apply to it; the interactive TTY "yes" below is required either way.
+  if (CANDIDATE_PROFILE.paidRemote && !env.allowPaid) throw new BuildRefused("paid-gate-closed");
   if (!deps.isTTY) throw new BuildRefused("confirmation-needs-tty");
 
   const policy = deps.retry ?? DEFAULT_RETRY;
   const common = [
     `  plan     ${args.plan}`,
     `  plan sha ${args.planSha} (sources verified, policy ${CANDIDATE_POLICY})`,
+    `  profile  ${CANDIDATE_PROFILE_ID} fingerprint ${CANDIDATE_FINGERPRINT.slice(0, 16)}… (plan == code == env); runtime digest ${CANDIDATE_PROFILE.digest!.slice(0, 12)}… verified before the probe`,
+    `  window   [${plan.window.sinceKst}, ${plan.window.untilKst}) KST; ${plan.selection.included} files selected, ${plan.selection.excluded} excluded (pinned; any drift refuses); length plan: limit ${lp.limit}, over ${lp.over}, max ${lp.maxCodepoints}`,
   ];
   const tail = [
-    `  model    ${env.providerConfig.model} ${CANDIDATE_DIM}d; 1 probe call first; API concurrency ${env.apiConcurrency}; CPUs ${cpus.length} (${cpus.join(",")})`,
+    `  model    ${CANDIDATE_PROFILE.model} ${CANDIDATE_DIM}d at ${CANDIDATE_PROFILE.endpoint} (LOCAL, no paid API); request batch ≤ ${REQUEST_BATCH}; 1 probe call first; concurrency ${env.apiConcurrency}; CPUs ${cpus.length} (${cpus.join(",")})`,
     `  retry    timeout/429/5xx/network only: ≤ ${policy.maxAttempts} attempts per request, backoff ${policy.baseMs / 1000}s→${policy.capMs / 1000}s with jitter (Retry-After honoured), ≤ ${policy.budgetMs / 60000} min per request, one pause shared by all workers; other 4xx/dim/S0/space/source stop at once`,
     `  space    raw vector+text ${plan.budget.estimateBytes} B (arithmetic, excludes FTS/metadata/versions); stop at ${SPACE_CAP_BYTES} B candidate or < ${ROOT_RESERVE_BYTES} B free (checked at each flush/FTS — not a filesystem quota)`,
     "  on failure: new batches stop; files complete at that point are checkpointed (not after space/S0/dim failures); the partial target is kept; continue it with --resume; nothing is deleted outside the candidate",
   ];
   const summary = resume
     ? [
-        "Proceed with the PAID control-v1 candidate RESUME?",
+        "Proceed with the LOCAL (Ollama BGE-M3, no paid API) control-v1 candidate RESUME?",
         ...common,
         `  target   ${t} (existing partial candidate, attempt ${resume.priorAttempt} → ${resume.priorAttempt + 1}; production data, manifests, corpus and backups untouched)`,
         `  verified reuse ${resume.reuse.size} files / ${resume.reusedRows} rows (manifest == DB ids and text hashes == extraction); adopt ${resume.adopt.size} files / ${resume.adoptedRows} rows (complete in DB, not yet in manifest); discard ${resume.discard.size} files / ${resume.discardRows} rows (incomplete; deleted from the candidate only)`,
@@ -1012,7 +1092,7 @@ export async function preflight(argv: string[], env: BuildEnv, deps: BuildDeps):
         ...tail,
       ]
     : [
-        "Proceed with the PAID control-v1 candidate build?",
+        "Proceed with the LOCAL (Ollama BGE-M3, no paid API) control-v1 candidate build?",
         ...common,
         `  target   ${t} (fresh; production data, manifests, corpus and backups untouched)`,
         `  rows     ${plan.totals.toSend.chunks} JSONL + ${durableRows} durable = ${plan.budget.sendRows}; S0-held JSONL rows ${plan.totals.safetyHeld.chunks} never sent`,
@@ -1025,20 +1105,32 @@ export async function preflight(argv: string[], env: BuildEnv, deps: BuildDeps):
 // Guards around provider and store
 // ---------------------------------------------------------------------------
 
-/** Every text is S0-scanned again before it can leave; every vector must be 4096d. */
-export function guardProvider(p: CandidateProvider, onCall: (n: number) => void): CandidateProvider {
+/**
+ * Every text is S0-scanned and length-checked against the profile BEFORE any request of the call leaves
+ * (a too-long text is refused whole, never truncated); requests carry ≤ maxBatchSize texts; every vector
+ * must be 1024d, finite and non-zero (validateEmbeddingResponse) — else a permanent failure.
+ */
+export function guardProvider(p: CandidateProvider, onCall: (n: number) => void, profile: EmbeddingProfile = CANDIDATE_PROFILE): CandidateProvider {
   return {
     name: p.name,
     dimensions: p.dimensions,
+    profile: p.profile,
     isPaidRemote: p.isPaidRemote,
     getStats: p.getStats?.bind(p),
     async embedDocumentBatch(texts: string[]): Promise<number[][]> {
       for (const t of texts) if (scanHighSignal(t).length > 0) throw new BuildAborted("s0-guard-tripped");
-      onCall(texts.length);
-      const vectors = await p.embedDocumentBatch(texts);
-      if (vectors.length !== texts.length) throw new BuildAborted("provider-vector-count-mismatch");
-      for (const v of vectors) if (!Array.isArray(v) || v.length !== CANDIDATE_DIM) throw new BuildAborted("provider-wrong-dim");
-      return vectors;
+      assertInputsFit(profile, "document", texts);
+      const out: number[][] = [];
+      for (let i = 0; i < texts.length; i += profile.maxBatchSize) {
+        const slice = texts.slice(i, i + profile.maxBatchSize);
+        onCall(slice.length);
+        const vectors = await p.embedDocumentBatch(slice);
+        if (vectors.length !== slice.length) throw new BuildAborted("provider-vector-count-mismatch");
+        for (const v of vectors) if (!Array.isArray(v) || v.length !== profile.dimensions) throw new BuildAborted("provider-wrong-dim");
+        validateEmbeddingResponse({ data: vectors.map((embedding, index) => ({ index, embedding })) }, slice.length, profile.dimensions);
+        out.push(...vectors);
+      }
+      return out;
     },
   };
 }
@@ -1077,7 +1169,12 @@ export interface BuildResult {
   receipt: string;
 }
 
-export async function runBuild(argv: string[], env: BuildEnv, deps: BuildDeps): Promise<BuildResult> {
+/** Preflight (incl. resume reconciliation re-reads), JSONL extraction and the durable index all run inside the profile split scope. */
+export function runBuild(argv: string[], env: BuildEnv, deps: BuildDeps): Promise<BuildResult> {
+  return withEmbedSplit(CANDIDATE_SPLIT, () => runBuildScoped(argv, env, deps));
+}
+
+async function runBuildScoped(argv: string[], env: BuildEnv, deps: BuildDeps): Promise<BuildResult> {
   const preflightStartedAt = deps.now();
   const pf = await preflight(argv, env, deps);
   const promptedAt = deps.now();
@@ -1160,7 +1257,7 @@ async function build(pf: Preflight, env: BuildEnv, deps: BuildDeps, timing: Timi
   }
 
   const buildSources: Record<string, string> = {};
-  for (const f of ["scripts/candidate-build.ts", "store.ts", "write-buffer.ts", "sessions-lock.ts", "embedding-provider.ts"]) {
+  for (const f of ["scripts/candidate-build.ts", "store.ts", "write-buffer.ts", "sessions-lock.ts", "embedding-provider.ts", "embedding-profile.ts"]) {
     buildSources[f] = sha256(fs.readFileSync(path.join(deps.repo, f)));
   }
   const policy = deps.retry ?? DEFAULT_RETRY;
@@ -1173,6 +1270,10 @@ async function build(pf: Preflight, env: BuildEnv, deps: BuildDeps, timing: Timi
       "Candidate index for measurement only. Not a production index: legacy writers (sync, index:sessions, pi /memory) know nothing of this policy and must not be pointed here. No cutover.",
     plan: { path: pf.args.plan, sha256: pf.args.planSha, corpusPin: pf.plan.corpusPin, durablePin: pf.plan.durablePin },
     planSources: pf.plan.sources,
+    profile: { id: CANDIDATE_PROFILE_ID, fingerprint: CANDIDATE_FINGERPRINT, model: CANDIDATE_PROFILE.model, digest: CANDIDATE_PROFILE.digest, dimensions: CANDIDATE_DIM, maxBatchSize: CANDIDATE_PROFILE.maxBatchSize, localNoPaidApi: !CANDIDATE_PROFILE.paidRemote },
+    window: { sinceKst: pf.plan.window.sinceKst, untilKst: pf.plan.window.untilKst, selectedFiles: pf.plan.selection.included, excludedFiles: pf.plan.selection.excluded },
+    lengthPlan: pf.plan.lengthPlan,
+    split: { target: CANDIDATE_SPLIT.target, maxCodepoints: CANDIDATE_SPLIT.maxCodepoints },
     buildSources,
     target,
     attempt: resume ? resume.priorAttempt + 1 : 1,
@@ -1347,6 +1448,13 @@ async function build(pf: Preflight, env: BuildEnv, deps: BuildDeps, timing: Timi
     const raw = await deps.createProvider();
     if (!raw) return finish("partial", "provider-unavailable");
     if (raw.dimensions !== CANDIDATE_DIM) return finish("partial", "provider-config-dim-mismatch");
+    // The provider must speak for exactly this generation, not merely this dimension.
+    if (!raw.profile || raw.profile.id !== CANDIDATE_PROFILE_ID || profileFingerprint(raw.profile) !== CANDIDATE_FINGERPRINT) {
+      return finish("partial", "provider-profile-mismatch");
+    }
+    // Weights actually served by the runtime (Ollama /api/tags digest) — before the first embedding request.
+    const identity: RuntimeIdentity = await verifyRuntimeIdentity(CANDIDATE_PROFILE, CANDIDATE_PROFILE.endpoint!, deps.fetch ?? fetch);
+    if (!identity.ok) return finish("partial", `runtime-identity-${identity.code}`);
     provider = guardProvider(
       resilientProvider(raw, policy, clock, tele, () => aborted !== null),
       (n) => {
@@ -1360,7 +1468,7 @@ async function build(pf: Preflight, env: BuildEnv, deps: BuildDeps, timing: Timi
     return finish("partial", providerErrorCode(e));
   }
 
-  const store = new VectorStore(path.join(target, "sessions.lance"), CANDIDATE_DIM);
+  const store = new VectorStore(path.join(target, "sessions.lance"), CANDIDATE_DIM, { profile: CANDIDATE_PROFILE });
   try {
     await store.init();
     await store.ensureTable();
@@ -1508,7 +1616,9 @@ async function build(pf: Preflight, env: BuildEnv, deps: BuildDeps, timing: Timi
     counts.finalRows = integrity.rows;
     const manifestChunks = Object.values(manifest.files).reduce((n, e) => n + e.chunks, 0);
     const jsonlTotal = counts.reusedRows + counts.adoptedRows + counts.jsonlRows;
-    receipt.integrity = { ...integrity, manifestChunks, manifestFiles: Object.keys(manifest.files).length };
+    const stamp = readStoreStamp(path.join(target, "sessions.lance"));
+    if (stamp.state !== "ok" || stamp.stamp.fingerprint !== CANDIDATE_FINGERPRINT) throw new BuildAborted("store-stamp-missing-or-mismatch");
+    receipt.integrity = { ...integrity, manifestChunks, manifestFiles: Object.keys(manifest.files).length, storeStamp: { profileId: stamp.stamp.profileId, fingerprint: stamp.stamp.fingerprint } };
     if (integrity.rows !== pf.plan.budget.sendRows) throw new BuildAborted("final-row-count-mismatch");
     if ((integrity.bySource["pi-durable"] ?? 0) !== counts.durableRows) throw new BuildAborted("durable-rows-not-in-db");
     if (manifestChunks !== jsonlTotal || integrity.rows - (integrity.bySource["pi-durable"] ?? 0) !== manifestChunks) {

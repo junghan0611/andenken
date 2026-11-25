@@ -63,7 +63,7 @@ understand where it fits.
   (semantic)     │ Vector + BM25 hybrid retrieval over curated corpora.
                  │ Sessions: Qwen3-Embedding-8B (4096d).
                  │ MD (public garden export): Qwen3-Embedding-8B (4096d).
-                 │ Org: 4B/2560d — currently disabled (upstream R&D).
+                 │ Org: code removed 2026-11-25 (git history keeps it).
                  │ Own embeddings: sessions and md.
                  │ OpenClaw: a separate existing-vector harvest.
 
@@ -99,7 +99,7 @@ covers all three.
 | **sessions** | Recover decisions and continuity inside canonical time windows | Core. pi + Claude Code JSONL, indexed from the device-merged corpus (`~/repos/gh/session`) with stored timestamp/project/role/source/file signals, plus closed pi-durable snapshots admitted into that corpus by an explicit act (source `pi-durable`). OpenClaw parity is a technical baseline. |
 | **md (public garden)** | Recover durable interpretation attached to dated notes and events | Current production knowledge axis. Direct Markdown embedding over exported `~/repos/gh/notes/content` (~2,200 md / ~27MB). OpenClaw builtin md memory logic + LanceDB backend. |
 | **openclaw (harvest)** | Recover what the bots said and kept, as its own nameable axis | Landed 2026-09-03. OpenClaw already embeds its agents' sessions and memory with `qwen/qwen3-embedding-8b` at 4096d — the same model we use, chosen independently — so the rows arrive carrying both text and vector and the import costs **zero embedding API calls**. Append-only, authority-harvested then explicitly published to the private Oracle replica, and never a search fallback. |
-| **org** | Currently disabled | 3,000+ Denote notes. Source track. Doctor/chunker/incremental work is upstream R&D, **not** what agents consume right now. |
+| **org** | Code removed (2026-11-25) | The long-disabled org track was removed so no `all` command or legacy provider can reach it; history keeps it. |
 
 **Split of effort.** The agent-in-charge separates *what we ship to agents now*
 from *upstream development*:
@@ -315,10 +315,10 @@ separate claims. Dated measurements and the completed recovery are in
 
 ## Stack
 
-- **Embeddings** Sessions + md: Qwen3-Embedding-8B via OpenRouter (4096d). Org (disabled): Qwen3-Embedding-4B (2560d).
+- **Embeddings** Sessions + md: Qwen3-Embedding-8B via OpenRouter (4096d, current production). Prepared, not adopted: local Ollama BGE-M3 (1024d, `ollama-bge-m3-1024` profile, digest-pinned, loopback) as a separate stamped generation.
 - **Vector store** LanceDB (`@lancedb/lancedb` pinned to `0.40.0`; file-based, one file per track)
 - **Retrieval** Weighted merge + RRF + MMR. Temporal decay is implemented but off in both live tracks; recency is `--mode recent`.
-- **Chunking** Track-specific. Sessions: message-aware (pi-durable rows reuse the same sanitize + split). MD: Markdown-aware. Org (disabled): org 2-tier (heading + direct body).
+- **Chunking** Track-specific. Sessions: message-aware (pi-durable rows reuse the same sanitize + split). MD: Markdown-aware. A profiled generation with a short window (BGE-M3, 2045 code points) splits both to fit — never truncates.
 - **Query expansion** dictcli personal vocabulary graph
 - **Runtime** TypeScript on Node 24. `run.sh` runs sources through `tsx`; pi loads the compiled `dist/` (`pnpm run build`). The Nix flake (`nixos-26.05`) provides Node and pnpm; dependencies install with `pnpm install --frozen-lockfile`.
 
@@ -335,7 +335,7 @@ ordinary invocation emits compiled files.
 | **Sessions** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `ANDENKEN_SESSION_*` → `data/sessions.lance` | Live. Device-merged Pi/Claude Code corpus plus explicitly admitted closed pi-durable snapshots. |
 | **MD** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `ANDENKEN_MD_*` → `data/md.lance` | Live production knowledge axis. `doctor --md` accounts for the manifest↔indexed gap. |
 | **OpenClaw** | `qwen/qwen3-embedding-8b` / 4096d, **embedded by OpenClaw** | `sqlite3 -readonly` harvest → `data/openclaw.lance` | Live harvest axis; import reuses vectors without embedding calls. CLI search is explicitly named, never a fallback; query cost is separate from import. |
-| **Org** | Qwen3-Embedding-4B / 2560d | `ANDENKEN_ORG_*` → `data/org.lance` | **Disabled.** Upstream R&D only. Do not run `index:org` in production. |
+| **Local generation** | Ollama `bge-m3:latest` / 1024d | `ANDENKEN_<NS>_PROFILE=ollama-bge-m3-1024` → a new data directory | **Readiness only.** Candidate plan/build + `ANDENKEN_SYNC_PROFILE` local sync; never published by `--global` / `sync:md:oracle`. |
 
 For current counts use `./run.sh status`; dated verification snapshots belong in
 CHANGELOG, not the provider contract. Sessions indexed-file read failures or
@@ -509,6 +509,13 @@ cd ~/repos/gh/andenken
 ./run.sh golden                       # transitional component baseline; see NEXT.md
 ```
 
+> **2026-11-25:** the Qwen 4096d generation is read-only. `sync-sessions.sh` now
+> syncs only the local Ollama BGE-M3 1024d generation (`ANDENKEN_SYNC_PROFILE`,
+> default `ollama-bge-m3-1024`) into a stamped store, and refuses the unstamped
+> legacy store and `--global` before gather; `rebuild-sessions-full.sh` is
+> retired. The text below describes the machinery (custody, gather, locks),
+> which is unchanged; its Qwen/OpenRouter specifics are historical.
+
 `scripts/sync-sessions.sh` is the operating heartbeat for the sessions track and
 what the agent-config `memory-sync` skill calls. Since 2026-09-03 it has two
 modes. `--local` (the default) indexes only this device's live sessions, uses no
@@ -554,9 +561,8 @@ The current golden fixtures still contain vocabulary-heavy probes; they are
 retained only as transitional component checks while the gate is rebuilt around
 canonical timeline evidence. The md track follows the same shape (manifest-driven
 incremental). The legacy mixed-track `scripts/rebuild-incremental.sh` /
-`scripts/rebuild-full.sh` paths are deprecated; each track is run on its own. Org
-indexing is currently disabled in production — do not invoke `index:org` outside
-upstream R&D.
+`scripts/rebuild-full.sh` paths are retired and refuse; each track is run on its own.
+The org track's code was removed on 2026-11-25; `index:org` refuses by name.
 
 ### Candidate build — unattended runs and resume (issue #18)
 

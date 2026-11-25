@@ -11,13 +11,14 @@
  * - /memory reindex: rebuild session index
  */
 
+import { embedSplitFor, profileOfProvider, writerRefusal } from "./embedding-profile.js";
+import { withEmbedSplit } from "./session-indexer.js";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import * as path from "node:path";
 import * as fs from "node:fs";
 import { execSync } from "node:child_process";
 import {
-  createProviderFromEnv,
   createSessionProviderFromEnv,
   createMdProviderFromEnv,
   CachingProvider,
@@ -231,14 +232,14 @@ export default function (pi: ExtensionAPI) {
       // resolved yet (status hover, /memory before search). After
       // ensureSessionsProvider runs, store gets the real dim.
       const dim = sessionsProvider?.dimensions ?? 2560;
-      sessionStore = new VectorStore(undefined, dim);
+      sessionStore = new VectorStore(undefined, dim, sessionsProvider ? { profile: profileOfProvider(sessionsProvider) } : {});
     }
     return sessionStore;
   }
   function getMdStore(): VectorStore {
     if (!mdStore) {
       const dim = mdProvider?.dimensions ?? 4096;
-      mdStore = new VectorStore(mdDbPath, dim);
+      mdStore = new VectorStore(mdDbPath, dim, mdProvider ? { profile: profileOfProvider(mdProvider) } : {});
     }
     return mdStore;
   }
@@ -488,6 +489,8 @@ export default function (pi: ExtensionAPI) {
       // requirement instead of paying for embeddings against a stale index.
       // Empty/fresh DB passes through.
       const sessDimCheck = await getSessionStore().checkCompatibleDim();
+      const sessGen = sessDimCheck.ok ? await getSessionStore().checkProfile() : null;
+      if (sessGen && !sessGen.ok) throw new Error(`session_search refused: ${sessGen.code}`);
       if (!sessDimCheck.ok) {
         throw new Error(
           `session_search refused: ${sessDimCheck.reason ?? "sessions dim incompatible"}. ` +
@@ -647,8 +650,11 @@ export default function (pi: ExtensionAPI) {
           }
           if (mdP) {
             const dimCheck = await getMdStore().checkCompatibleDim();
+            const genCheck = dimCheck.ok ? await getMdStore().checkProfile() : null;
             if (!dimCheck.ok) {
               fallbackDiagnostic = `knowledge fallback skipped: ${dimCheck.reason ?? "md dim incompatible"}`;
+            } else if (genCheck && !genCheck.ok) {
+              fallbackDiagnostic = `knowledge fallback skipped: ${genCheck.code}`;
             } else {
               // The fallback answers from the md track, so it runs the md core
               // rather than a third copy of that pipeline. Session ordering,
@@ -765,6 +771,8 @@ export default function (pi: ExtensionAPI) {
       // returns ok for empty tables (fresh DB), so this guard does not block
       // first-run scenarios.
       const dimCheck = await getMdStore().checkCompatibleDim();
+      const mdGen = dimCheck.ok ? await getMdStore().checkProfile() : null;
+      if (mdGen && !mdGen.ok) throw new Error(`knowledge_search refused: ${mdGen.code}`);
       if (!dimCheck.ok) {
         throw new Error(
           `knowledge_search refused: ${dimCheck.reason ?? "md dim incompatible"}. ` +
@@ -916,11 +924,7 @@ export default function (pi: ExtensionAPI) {
           ctx.ui.notify("📝 MD 인덱싱은 CLI로 실행하세요: cd ~/repos/gh/andenken && ./run.sh sync:md", "info");
         }
 
-        if (target === "org") {
-          ctx.ui.notify("📚 Org semantic track is disabled in production; use md (`./run.sh sync:md`) for agent-facing knowledge.", "warning");
-        }
-
-        if (target !== "sessions" && target !== "md" && target !== "org" && target !== "all") {
+        if (target !== "sessions" && target !== "md" && target !== "all") {
           ctx.ui.notify(
             "Usage: /memory reindex [sessions|md|all] [--force]",
             "warning",
@@ -1074,6 +1078,9 @@ async function indexSessions(
   ctx: { ui: { notify: (msg: string, level: "info" | "warning" | "error") => void } },
   force: boolean = false,
 ): Promise<void> {
+  // No active Qwen build (embedding-profile.ts writerRefusal) — before any read or request.
+  const legacyWriter = writerRefusal(provider);
+  if (legacyWriter) throw new Error(`/memory reindex refused — ${legacyWriter}`);
   const files = findSessionFiles();
   const paid = (provider as { isPaidRemote?: boolean }).isPaidRemote === true;
   if (force && paid && process.env.ANDENKEN_ALLOW_PAID_FULL_REBUILD !== "1") {
@@ -1111,7 +1118,8 @@ async function indexSessions(
   let totalChunks = 0;
 
   for (let i = 0; i < toIndex.length; i++) {
-    const chunks = await extractSessionChunks(toIndex[i]);
+    // Profiled generation: split to fit the runtime window (embedding-profile.ts).
+    const chunks = await withEmbedSplit(embedSplitFor(profileOfProvider(provider)), () => extractSessionChunks(toIndex[i]));
     if (chunks.length === 0) continue;
 
     const vectors = await provider.embedDocumentBatch(chunks.map((c) => c.text));

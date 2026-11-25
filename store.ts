@@ -9,6 +9,13 @@
  */
 
 import type * as LanceDB from "@lancedb/lancedb";
+import {
+  StoreProfileRefused,
+  decideStoreAccess,
+  writeStoreStamp,
+  type EmbeddingProfile,
+  type StoreProfileDecision,
+} from "./embedding-profile.js";
 import * as path from "node:path";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -197,9 +204,7 @@ export function getSessionsDbPath(): string {
   return path.join(getDataDir(), "sessions.lance");
 }
 
-export function getOrgDbPath(): string {
-  return path.join(getDataDir(), "org.lance");
-}
+
 
 /**
  * MD track (public garden export) LanceDB path. Separate file from sessions
@@ -425,14 +430,27 @@ export class VectorStore {
    * `AxisAbsentError` from `init()` instead of connecting a fresh empty store —
    * see the "Absent axis" note above for what that silence cost.
    */
+  /**
+   * `profile` names the embedding generation the caller's vectors belong to
+   * (embedding-profile.ts). `undefined` = the caller did not say (legacy
+   * call sites, dimension-only guard); `null` = an unprofiled provider, which
+   * is refused on a stamped store. A fresh table created by a profiled writer
+   * is stamped at creation.
+   */
+  private profile: EmbeddingProfile | null | undefined;
+
   constructor(
     dbPath?: string,
     vectorDim: number = 2560,
-    opts: { readOnly?: boolean } = {},
+    opts: { readOnly?: boolean; profile?: EmbeddingProfile | null } = {},
   ) {
     this.dbPath = dbPath ?? getSessionsDbPath();
     this.vectorDim = vectorDim;
     this.readOnly = opts.readOnly ?? false;
+    this.profile = opts.profile;
+    if (this.profile && this.profile.dimensions !== vectorDim) {
+      throw new StoreProfileRefused("store-profile-dimension-disagrees");
+    }
   }
 
   private async ensureInitialized(): Promise<void> {
@@ -491,6 +509,7 @@ export class VectorStore {
       { mode: "overwrite" },
     );
     await this.table.delete("id = '__schema__'");
+    if (this.profile) writeStoreStamp(this.dbPath, this.profile, 0);
   }
 
   async init(): Promise<void> {
@@ -1158,6 +1177,28 @@ export class VectorStore {
   }
 
   /**
+   * Generation guard (model identity, not just dimension). Never throws.
+   * `undefined` profile (caller did not opt in) → dimension check only.
+   */
+  async checkProfile(): Promise<StoreProfileDecision> {
+    const dim = await this.checkCompatibleDim();
+    if (!dim.ok) return { ok: false, code: "store-dimension-mismatch" };
+    if (this.profile === undefined) return { ok: true, basis: "legacy-unstamped" };
+    try {
+      const rows = this.table ? await this.table.countRows() : 0;
+      return decideStoreAccess(this.dbPath, this.profile, rows, dim.actual ?? null);
+    } catch (err) {
+      return { ok: false, code: "store-profile-check-failed" };
+    }
+  }
+
+  /** Write-path form of `checkProfile`: throws `StoreProfileRefused`. */
+  async assertProfileForWrite(): Promise<void> {
+    const d = await this.checkProfile();
+    if (!d.ok) throw new StoreProfileRefused(d.code);
+  }
+
+  /**
    * Cross-track safety guard for the WRITE/INDEX path.
    *
    * Same comparison as `checkCompatibleDim` but THROWS on mismatch. Indexers
@@ -1174,6 +1215,9 @@ export class VectorStore {
         `this would corrupt the index. Run rebuild or check provider config.`,
       );
     }
+    // Same-dimension generations (two 1024d models) pass the check above;
+    // the stamp is what tells them apart. No-op for callers without a profile.
+    if (this.profile !== undefined) await this.assertProfileForWrite();
   }
 
   /**
@@ -1182,6 +1226,11 @@ export class VectorStore {
   async reset(): Promise<void> {
     await this.ensureInitialized();
     if (!this.db) throw new Error("DB not connected");
+    // A profiled writer may only reset its OWN generation (or an empty store).
+    // Checked BEFORE the drop: refusing after it would already have destroyed
+    // the rows of another generation — e.g. a 1024d --force run pointed at the
+    // preserved 4096d store. A new generation goes to a new data directory.
+    if (this.profile !== undefined) await this.assertProfileForWrite();
 
     const tables = await this.db.tableNames();
     if (tables.includes(TABLE_NAME)) {

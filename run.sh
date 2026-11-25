@@ -77,20 +77,21 @@ Usage: ./run.sh <command> [args]
                               index holding none of the discovered sessions + paid
                               endpoint is refused without
                               ANDENKEN_ALLOW_PAID_FULL_REBUILD=1
-  index:md [--force]          Index public garden Markdown (issue #8)
-  index:org [--force]         Index org-mode KB (disabled in production — upstream R&D)
+  index:md [--force]          Index public garden Markdown — profiled generation only
+                              (ANDENKEN_MD_PROFILE=ollama-bge-m3-1024); the Qwen 4096d
+                              generation is read-only and refused before any request
   sync:md                     md incremental (alias for index:md without --force)
-  compact [sessions|md|org|openclaw]
+  compact [sessions|md|openclaw|all]
                               Defragment LanceDB (CPU-pinned to ANDENKEN_COMPACT_CPUS, default 0-3)
-                              `all` = sessions+md+org. openclaw by name: it is our
+                              `all` = sessions+md. openclaw by name: it is our
                               own harvest DB (their vectors, our store), fragmented
                               by our own import writes. OpenClaw's sqlite is never
                               touched — the export opens it read-only. openclaw takes
                               the harvest lock and runs on the index authority only
-  cleanup [sessions|md|org]   Dedup + orphan removal + manifest repair + compact (CPU-pinned)
+  cleanup <sessions|md>   Dedup + orphan removal + manifest repair + compact (CPU-pinned)
   cleanup [target] --dry-run  Dry-run (report only)
-  verify [sessions|md|org|openclaw|all]
-                              Post-indexing integrity check (all = sessions+md+org)
+  verify [sessions|md|openclaw|all]
+                              Post-indexing integrity check (all = sessions+md)
   verify openclaw --require-fts
                               The same check, plus FAIL unless openclaw's BM25 index
                               exists and a native full-text query runs ok (index stats
@@ -98,7 +99,7 @@ Usage: ./run.sh <command> [args]
                               state is reported and never fails
   status                      Show index statistics (text)
   status:json                 Show index statistics (machine-readable JSON)
-  estimate [sessions|md|org|all] Dry-run cost estimate (Gemini-priced, legacy)
+  estimate [sessions|md|all]  Dry-run per-track cost estimate (API 0)
   estimate:sessions [--full]  PR-B: sessions OpenRouter 8B estimate (API 0)
                               Pinned data dir: control-v1 send set, S0-held reported
                               separately; --full refused
@@ -152,13 +153,13 @@ Usage: ./run.sh <command> [args]
                               flags: --dry-run --no-verify --smoke --host <ssh-host>
 
 === Sessions full rebuild / sync (PR-B) ===
-  rebuild:sessions[:dry]      scripts/rebuild-sessions-full.sh [--dry-run]
-                              estimate → confirm → preflight → destroy → rebuild
-  sync:sessions [--local|--global]
-                              scripts/sync-sessions.sh (default --local: this
-                              device only, ssh 0; --global: all devices + verify
-                              + publish index, session + durable manifests and
-                              corpus together)
+  rebuild:sessions[:dry]      RETIRED 2026-11-25 (in-place Qwen 4096d paid rebuild):
+                              refuses at once, API 0. Use candidate:sessions:plan/build.
+  sync:sessions [--local]     scripts/sync-sessions.sh — local Ollama BGE-M3 1024d
+                              generation only (ANDENKEN_SYNC_PROFILE, default
+                              ollama-bge-m3-1024) into a STAMPED store; the legacy
+                              unstamped 4096d store and --global are refused before
+                              gather (API 0). The Qwen 4096d generation is read-only.
                               wrong-dim → API0 abort
                               to_index=0 → API0 exit (or rsync-only with --push)
                               else → preflight 1 + incremental
@@ -214,6 +215,10 @@ Usage: ./run.sh <command> [args]
                               sessions 429 rescheduler, provider error diagnostics and
                               the index-run finalization seam (API 0: fetch stubbed,
                               fake clock, temp HOME/ANDENKEN_DATA, no ~/.env.local)
+  test:profile                Type fence (tsconfig.profile.json) + synthetic suite for the
+                              embedding generation contract: profiles, reply validation,
+                              input-length fail-closed, Ollama digest, env refusal, store
+                              stamps / same-dim mixing (API 0: fetch stubbed, temp LanceDB)
   test:writer                 Type fence (tsconfig.writer.json) + synthetic suites for the
                               sessions writer's crash recovery (missing-rows rediscovery,
                               strict indexed-files read, propagating deleteByFile) and its
@@ -267,10 +272,6 @@ Usage: ./run.sh <command> [args]
 
 === Doctor (operator triage) ===
   doctor                      General: API / DB / oracle / stale / cost
-  doctor --org                Org triage: retrieval smoke + chunk + structure
-  doctor --org --no-smoke     Skip retrieval probes (no API calls)
-  doctor --org --save-baseline  Record current snapshot as baseline
-  doctor --org --json         JSON output
   doctor --md                 MD triage (V1): explain manifest↔indexed gap
   doctor --md --json          MD triage JSON output
   doctor --sessions           Sessions triage (V1): gap + stored-signal distribution
@@ -325,6 +326,9 @@ Usage: ./run.sh <command> [args]
 
 === Selection candidate (issue #18, control-v1; plan only, no build) ===
   candidate:sessions:plan --target <abs dir> --out <abs file>
+                              [--since-kst <ISO> --until-kst <ISO>]
+                              Both window bounds required; KST half-open [since, until).
+                              Files are selected by latest eligible send.
                               API 0, read-only. Reads every corpus JSONL once
                               (inside the corpus, regular, no symlink on the path;
                               others refused unread) and counts legacy vs control-v1
@@ -423,7 +427,7 @@ case "${1:-help}" in
   sync:md)
     shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts md "$@" ;;
   index:org)
-    shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts org "$@" ;;
+    echo "REFUSED: org indexing is retired." >&2; exit 2 ;;
   compact)
     shift; cd "$SCRIPT_DIR" || exit 1
     if [ "${1:-all}" = "openclaw" ]; then
@@ -436,7 +440,12 @@ case "${1:-help}" in
       run_pinned pnpm exec tsx indexer.ts compact "${1:-all}"
     fi ;;
   cleanup)
-    shift; load_env; cd "$SCRIPT_DIR" && run_pinned pnpm exec tsx indexer.ts cleanup "${1:-org}" "${@:2}" ;;
+    shift
+    case "${1:-}" in
+      sessions|md) ;;
+      *) echo "REFUSED: cleanup requires an explicit sessions or md target." >&2; exit 2 ;;
+    esac
+    load_env; cd "$SCRIPT_DIR" && run_pinned pnpm exec tsx indexer.ts cleanup "$@" ;;
   verify)
     # verify openclaw, and any verify with the exact token --require-fts anywhere
     # in its arguments (the target slot included), launch with `node --import tsx`
@@ -501,6 +510,10 @@ case "${1:-help}" in
     # removes credential-shaped env names from its own process before any test.
     cd "$SCRIPT_DIR" && node node_modules/typescript/bin/tsc -p tsconfig.retry.json \
       && node --import tsx embed-retry.test.ts ;;
+  test:profile)
+    # API 0: no load_env; fetch stubbed, temp HOME/ANDENKEN_DATA, credential env removed.
+    cd "$SCRIPT_DIR" && node node_modules/typescript/bin/tsc -p tsconfig.profile.json \
+      && node --import tsx embedding-profile.test.ts ;;
   test:writer)
     # API 0: no load_env; the store is never opened (stub tables, fake stores),
     # and the recovery suite points HOME/ANDENKEN_DATA at a temp dir before import.
@@ -563,21 +576,18 @@ case "${1:-help}" in
     echo "  PAID_REMOTE: ${ANDENKEN_MD_PAID_REMOTE:-0}"
     echo "  PRICE/M:     \$${ANDENKEN_MD_PRICE_PER_M_TOKENS:-(unset, default 0.01)}"
     echo ""
-    echo "  --- legacy / org track (ANDENKEN_VLLM_* + ANDENKEN_ORG_*) ---"
-    echo "  ANDENKEN_PROVIDER (legacy):     ${ANDENKEN_PROVIDER:-(unset)}"
-    echo "  ANDENKEN_VLLM_ENDPOINT (legacy): ${ANDENKEN_VLLM_ENDPOINT:-(unset)}"
-    echo "  ANDENKEN_ORG_PROVIDER:          ${ANDENKEN_ORG_PROVIDER:-(unset — falls back to legacy ANDENKEN_VLLM_*)}"
-    echo ""
-    echo "  ↳ Sessions search (pi extension, cli.ts search-sessions) requires"
-    echo "    ANDENKEN_SESSION_* in ~/.env.local. PR-B removed the legacy"
-    echo "    ANDENKEN_VLLM_* fallback for sessions track."
-    echo "  ↳ Org indexing/search still accepts legacy ANDENKEN_VLLM_* for"
-    echo "    backward-compat."
-    echo ""
     cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts status 2>/dev/null || echo "  (indexer not available)"
     ;;
   estimate)
-    shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx estimate.ts "${1:-all}" ;;
+    shift; target="${1:-all}"
+    case "$target" in sessions|md|all) ;; *) echo "estimate: invalid target" >&2; exit 2 ;; esac
+    if [ "$#" -gt 0 ]; then shift; fi
+    load_env; cd "$SCRIPT_DIR" || exit 1
+    case "$target" in
+      sessions) pnpm exec tsx indexer.ts estimate sessions "$@" ;;
+      md) pnpm exec tsx indexer.ts estimate md "$@" ;;
+      all) pnpm exec tsx indexer.ts estimate sessions "$@" && pnpm exec tsx indexer.ts estimate md "$@" ;;
+    esac ;;
   estimate:sessions)
     shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts estimate sessions "$@" ;;
   policy:sessions)

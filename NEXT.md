@@ -4,13 +4,21 @@
 
 # RAIL — Current position
 
-- [x] **1. Establish the memory axes and source corpus** — sessions, public MD and separate OpenClaw harvest; org stays disabled.
+- [x] **1. Establish the memory axes and source corpus** — sessions, public MD and separate OpenClaw harvest; org code removed 2026-11-25.
 - [x] **2. Build the selected sessions candidate** — control-v1 / whole-message S0, explicit resume, preserved originals and old DB; 114889 rows / about 1.905 GiB allocated.
 - [x] **3. Verify policy-safe writers and archive integration** — source-only joint gate closed on November 3; code publication is not production adoption.
 - [x] **4. Complete the coordinated operational handoff** — adoption, the normal all-track increment and the minimal post-operations documentation/test review completed; compaction remains separately deferred.
 - [ ] **5. Long-lived memory and its storage** ← CURRENT: November 16 frozen-candidate adoption on both hosts and G8 warm return are complete. Await the next scoped decision; future parser/policy changes or unknown backlogs still require first-use scope/cost acceptance, not re-adoption or automatic paid/global execution.
 
-# NOW — November 16 adoption and G8 closed; future first-use gates remain
+# NOW — local BGE-M3/1024 migration readiness (code + API-0 tests; not adopted)
+
+- **State (2026-11-25, cyborg, uncommitted until the integration review passes):** profiled generations (`embedding-profile.ts`), reply validation, fail-closed length bound + profile-scoped split, store stamps / same-dim mixing refusal, strict verify, candidate plan/build on `ollama-bge-m3-1024` with a required KST window, org code removed, OpenClaw query refusal instead of silent FTS. See AGENTS.md "Embedding generations".
+- **Measured scope (API 0, external coordinator plan sha `2eae3be3…`):** window [2026-08-27, 2026-11-26) KST → 1730 files / 61149 JSONL chunks + 1 durable snapshot / 103 chunks; before the split 192 chunks were over 2045 (max 2193) — the profile split exists for that. Re-run the plan after this code to confirm `over == 0`.
+- **Live gates, none run here:** (1) Ollama runtime up on 127.0.0.1:11435 → `scripts/profile-preflight.ts` digest + 1 probe; (2) an isolated MD loopback E2E on the real code path into a fresh `ANDENKEN_DATA`; (3) candidate plan → human-gated local build → `verify` strict → measure; (4) `~/.env.local` cutover — the profile refuses the current Qwen `ANDENKEN_*_MODEL/DIMENSIONS` lines by design; (5) query-side acceptance (`andenken-acceptance`). Backfill before 2026-08-27, Oracle publish, OpenClaw harvest contract and its query disposition are separate decisions.
+- **No active Qwen writer (2026-11-25):** the Qwen 4096d generation is read-only (query + rollback). index:sessions/durable/md, cli reindex and pi `/memory reindex` refuse it; `sync-sessions.sh` defaults to the BGE profile and refuses the unstamped legacy store and `--global` before gather; `rebuild-sessions-full.sh` is retired. Consequence: agent-config's current `memory-sync` warm path over `data/` stops (refuses) until the new generation exists — cutover is agent-config's gate.
+- **Untouched by design:** existing 4096d stores, manifests, backups; OpenClaw harvest/import code.
+
+# Previous NOW — November 16 adoption and G8 closed; future first-use gates remain
 
 - **Closed:** summary-reader corrections, the 429 repair, writer recovery and the reviewed consumer/diagnostic boundaries are recorded in [CHANGELOG v2026.11.15](./CHANGELOG.md#v20261115--recover-missing-session-rows-and-recognize-summaries). The focused source/type/synthetic gates are accepted; do not rerun them or bootstrap a historical rebuild merely to refresh context.
 - **November 16 operation closed (existing coordinator receipts read here, no execution repeated):** G5 laptop and G9 Oracle check/apply/native verify/inspect accepted the frozen candidate at 133711 unique rows / 4096d / duplicates0 / orphans0, with all four live metadata hashes equal and both old datasets preserved. G8 released the warm hold at 17:55; the agreed reversal window closed then, not at the first later row. The agent-config `v2026.11.16` tag preceded adoption; the later [completion record at `687a06e`](https://github.com/junghan0611/agent-config/blob/687a06edbf52ac3512e49629af647cddc594dc2f/NEXT.md) records actual closure, not the tag alone. Private authority records: `~/repos/gh/agent-config/.agent-reports/20261116-authority-first-use/{G5-ACCEPTED.md,adoption/G9-ACCEPTED.md,COMPLETION.md}`. These are dated receipt facts, not current DB measurements, cached-reader/semantic certification or new execution permission.

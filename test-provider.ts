@@ -21,7 +21,6 @@ import {
   GeminiProvider,
   VLLMProvider,
   createProvider,
-  createProviderFromEnv,
   type EmbeddingProvider,
 } from "./embedding-provider.js";
 import { getModelPreset, listPresets } from "./model-presets.js";
@@ -111,17 +110,7 @@ async function testFactory() {
   });
   assert(v0.dimensions === 0, `vLLM no-dim: dimensions=${v0.dimensions} (auto-detect pending)`);
 
-  // createProviderFromEnv with no env
-  // Note: loadGeminiKey() also reads ~/.env.local as fallback,
-  // so if that file exists, it won't return null.
-  // We test the env-only path by temporarily setting HOME to a non-existent dir.
-  const keysToSave = ["GOOGLE_AI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "ANDENKEN_PROVIDER", "HOME"];
-  const saved: Record<string, string | undefined> = {};
-  for (const k of keysToSave) { saved[k] = process.env[k]; delete process.env[k]; }
-  process.env.HOME = "/nonexistent-home-for-test";
-  const nullProvider = createProviderFromEnv();
-  assert(nullProvider === null, "No env + no ~/.env.local → null provider");
-  for (const k of keysToSave) { if (saved[k] !== undefined) process.env[k] = saved[k]; else delete process.env[k]; }
+
 }
 
 async function testProviderInterface() {

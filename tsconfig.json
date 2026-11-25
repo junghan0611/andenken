@@ -20,7 +20,6 @@
     "session-sanitize.ts",
     "session-window.ts",
     "retriever.ts",
-    "org-chunker.ts",
     "md-chunker.ts",
     "indexer.ts",
     "openclaw-importer.ts",

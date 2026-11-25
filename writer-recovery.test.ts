@@ -345,22 +345,18 @@ const fnBody = (text: string, name: string) => {
   return next < 0 ? text.slice(start) : text.slice(start, start + 1 + next);
 };
 
-test("P1 every getStaleFiles caller reads the indexed set strictly (org status through orgStaleCounts)", () => {
+test("P1 every getStaleFiles caller reads the indexed set strictly", () => {
   const ix = src("indexer.ts");
-  const strict = ["indexSessions", "indexOrg", "collectSessionStatus", "estimate"];
+  const strict = ["indexSessions", "collectSessionStatus", "estimate"];
   for (const name of strict) {
     const body = fnBody(ix, name);
     ok(body.includes("getStaleFiles("), `${name} calls getStaleFiles`);
     ok(body.includes("getIndexedFilesStrict()"), `${name} uses getIndexedFilesStrict`);
     ok(!body.includes("getIndexedFiles()"), `${name} has no lenient read`);
   }
-  const org = fnBody(ix, "collectOrgStatus");
-  ok(org.includes("getIndexedFilesStrict()") && !org.includes("getIndexedFiles()"), "org status reads strictly");
-  ok(!org.includes("getStaleFiles("), "org status computes staleness only through orgStaleCounts");
-  ok(fnBody(ix, "orgStaleCounts").includes("getStaleFiles(files, read.indexed, manifest)"));
   // Calls with an argument only (the definition breaks the line; comments say "getStaleFiles()").
   const calls = (ix.match(/getStaleFiles\([a-zA-Z]/g) ?? []).length;
-  strictEqual(calls, strict.length + 1, "a new getStaleFiles caller must be added to this list");
+  strictEqual(calls, strict.length, "a new getStaleFiles caller must be added to this list");
 });
 
 test("P2 indexSessions: a failed strict read closes the store and rethrows before any embedding", () => {
@@ -381,11 +377,10 @@ test("P3 manifest chunks = sent count (S0-held excluded); zero sent → markFile
 
 test("P4 status and estimate expose the missing-rows count from the same getStaleFiles call", () => {
   const ix = src("indexer.ts");
-  for (const name of ["collectSessionStatus", "orgStaleCounts"]) {
+  for (const name of ["collectSessionStatus"]) {
     const body = fnBody(ix, name);
     ok(body.includes("missingCount = missingRowFiles.length") && body.includes("missing_rows: missingCount"), name);
   }
-  ok(fnBody(ix, "collectOrgStatus").includes("missing_rows: counts.missing_rows"), "org status carries the helper's count");
   const est = fnBody(ix, "estimate");
   ok(est.includes("missingRowsToEstimate = missingRowFiles.length") && est.includes("missing rows (in files to index)"));
 });
@@ -401,60 +396,9 @@ test("P5 candidate resume: a rejected discard delete ends the attempt as partial
 
 // --- L. limits (not covered by the contract) ------------------------------------------
 
-// --- O. org status on an indexed-read error --------------------------------------------
-
-type OrgCounts = (
-  files: string[],
-  read: { ok: true; indexed: Set<string> } | { ok: false; errorName: string },
-  manifest: { files: Record<string, Entry>; lastUpdated: string },
-) => Record<string, unknown>;
-const orgStaleCounts = (indexer as unknown as { orgStaleCounts: OrgCounts }).orgStaleCounts;
-
-test("O1 org read failure: the five dependent numbers are null and getStaleFiles is skipped (no missing-rows backlog)", () => {
-  const a = file(), b = file();
-  const manifest = { files: { [a]: entryOf(a, 3), [b]: entryOf(b, 2) }, lastUpdated: "" };
-  // The same inputs with an empty set would report both as missing rows (C1).
-  deepStrictEqual(orgStaleCounts([a, b], { ok: true, indexed: new Set() }, manifest).missing_rows, 2);
-  deepStrictEqual(orgStaleCounts([a, b], { ok: false, errorName: "Error" }, manifest), {
-    indexed_files: null,
-    new: null,
-    stale: null,
-    to_index: null,
-    missing_rows: null,
-    indexed_error: "indexed-files-read-failed (Error)",
-  });
-});
-
-test("O2 org read success keeps the numeric shape with no error key", () => {
-  const a = file(), b = file(), c = file();
-  const manifest = { files: { [a]: entryOf(a, 3), [b]: entryOf(b, 1) }, lastUpdated: "" };
-  deepStrictEqual(orgStaleCounts([a, b, c], { ok: true, indexed: new Set([a]) }, manifest), {
-    indexed_files: 1,
-    new: 1,
-    stale: 1,
-    to_index: 2,
-    missing_rows: 1,
-  });
-  deepStrictEqual(orgStaleCounts([a], { ok: true, indexed: new Set() }, { files: {}, lastUpdated: "" }), {
-    indexed_files: 0, new: 0, stale: 0, to_index: 0, missing_rows: 0,
-  });
-});
-
-test("O3 org error text is a fixed code plus an allowlisted class name, never a raw message", () => {
-  const out = orgStaleCounts([], { ok: false, errorName: "secret=abc /home/x: boom" }, { files: {}, lastUpdated: "" });
-  strictEqual(out.indexed_error, "indexed-files-read-failed (Error)");
-  strictEqual(orgStaleCounts([], { ok: false, errorName: "TypeError" }, { files: {}, lastUpdated: "" }).indexed_error, "indexed-files-read-failed (TypeError)");
-});
-
-test("O4 collectOrgStatus catches only the strict read, keeps the error name, closes the store; sessions status has no catch", () => {
-  const ix = src("indexer.ts");
-  const org = fnBody(ix, "collectOrgStatus");
-  ok(/try \{\s*\n\s*read = \{ ok: true, indexed: await store\.getIndexedFilesStrict\(\) \};\s*\n\s*\} catch \(e\) \{\s*\n\s*read = \{ ok: false, errorName: e instanceof Error \? e\.name : "Error" \};\s*\n\s*\}\s*\n\s*await store\.close\(\);/.test(org), "strict read in try, error name only, then close");
-  ok(org.includes("orgStaleCounts(files, read, manifest)"));
-  ok(!/message/.test(org), "no error message carried");
-  const sess = fnBody(ix, "collectSessionStatus");
-  ok(sess.includes("await store.getIndexedFilesStrict()") && !/catch\b/.test(sess), "sessions status read failure fails status (B1 then stops the sync before any API)");
-  ok(/if \(org\.indexed_error\) \{/.test(fnBody(ix, "status")), "text mode prints unknown, not numbers");
+test("sessions status strict read failure fails status", () => {
+  const sess = fnBody(src("indexer.ts"), "collectSessionStatus");
+  ok(sess.includes("await store.getIndexedFilesStrict()") && !/catch\b/.test(sess));
 });
 
 // --- G. whole-store loss meets the fresh paid guard ------------------------------------

@@ -39,6 +39,7 @@
  * excluded at file-discovery time.
  */
 
+import { splitTextToCodepoints } from "./embedding-profile.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
@@ -441,7 +442,7 @@ export interface MdAnalysis {
  */
 export function chunkMdFile(
   filePath: string,
-  opts: { root?: string; bypassFolderPolicy?: boolean } = {},
+  opts: MdChunkOpts = {},
 ): MdChunk[] {
   return analyzeMdFile(filePath, opts).chunks;
 }
@@ -456,8 +457,22 @@ export function chunkMdContent(
   content: string,
   filePath: string,
   folder: string,
+  maxEmbedCodepoints?: number,
 ): MdChunk[] {
-  return analyzeMdContent(content, filePath, folder).chunks;
+  return analyzeMdContent(content, filePath, folder, maxEmbedCodepoints).chunks;
+}
+
+export interface MdChunkOpts {
+  root?: string;
+  bypassFolderPolicy?: boolean;
+  /**
+   * Embedding-input ceiling in NFKC code points (embedding-profile.ts
+   * `maxInputCodepoints`). Set for runtimes that silently truncate (Ollama
+   * BGE-M3, ctx 2048): every `embeddingInput` is split to fit, line-first,
+   * so no text is ever cut off by the runtime. Unset = the Qwen-era chunks,
+   * byte-for-byte unchanged.
+   */
+  maxEmbedCodepoints?: number;
 }
 
 /**
@@ -477,7 +492,7 @@ export function chunkMdContent(
  */
 export function analyzeMdFile(
   filePath: string,
-  opts: { root?: string; bypassFolderPolicy?: boolean } = {},
+  opts: MdChunkOpts = {},
 ): MdAnalysis {
   const folder = getMdFolder(filePath, opts.root);
 
@@ -520,7 +535,7 @@ export function analyzeMdFile(
     };
   }
 
-  return analyzeMdContent(content, filePath, folder);
+  return analyzeMdContent(content, filePath, folder, opts.maxEmbedCodepoints);
 }
 
 /**
@@ -531,7 +546,11 @@ export function analyzeMdContent(
   content: string,
   filePath: string,
   folder: string,
+  maxEmbedCodepoints?: number,
 ): MdAnalysis {
+  if (maxEmbedCodepoints !== undefined && !(Number.isInteger(maxEmbedCodepoints) && maxEmbedCodepoints >= 64)) {
+    throw new Error(`md-chunker: maxEmbedCodepoints must be an integer >= 64 (got ${maxEmbedCodepoints})`);
+  }
   const { frontmatter, bodyOffset } = parseFrontmatter(content);
 
   // Opt-out tags: `noembed` / `tts` skip the file entirely. Mirrors org's
@@ -592,7 +611,10 @@ export function analyzeMdContent(
     const trimmed = rc.text.trim();
     if (trimmed.length < MIN_CHUNK_CHARS) continue;
 
-    for (const slice of splitOversizeChars(rc.text, HARD_MAX_CHARS)) {
+    const slices = splitOversizeChars(rc.text, HARD_MAX_CHARS).flatMap((sl) =>
+      maxEmbedCodepoints === undefined ? [sl] : splitToCodepoints(sl, maxEmbedCodepoints),
+    );
+    for (const slice of slices) {
       out.push({
         id: `${filePath}#${idx}`,
         text: buildFtsText(slice, frontmatter),
@@ -822,6 +844,9 @@ function splitOversizeChars(text: string, maxChars: number): string[] {
   }
   return out;
 }
+
+/** Shared splitter (embedding-profile.ts); re-exported under its md name. */
+export const splitToCodepoints = splitTextToCodepoints;
 
 function sha256(s: string): string {
   return createHash("sha256").update(s).digest("hex");

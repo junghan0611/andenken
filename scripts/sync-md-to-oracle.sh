@@ -34,6 +34,16 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# A stamped store is a profiled generation (embedding-profile.ts — e.g. local
+# Ollama BGE-M3 1024d). Its Oracle publish is a separate gate: the replica's
+# query provider would refuse it, so publishing it would take Oracle's md
+# search dark. Pre-stamp (4096d production) stores carry no stamp.
+if [ -f data/md.lance/andenken-profile.json ]; then
+  echo "❌ refused: data/md.lance carries a generation stamp ($(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("profileId","?"))' data/md.lance/andenken-profile.json 2>/dev/null || echo unreadable))."
+  echo "   Publishing a profiled generation to the replica is a separate gate. Nothing was sent."
+  exit 1
+fi
+
 if [ ! -d data/md.lance ]; then
   echo "❌ data/md.lance not found. Run local md indexing first:"
   echo "   ANDENKEN_ALLOW_PAID_FULL_REBUILD=1 ./run.sh index:md"

@@ -486,7 +486,9 @@ test("B2 factory provider: HTTP request sizes follow ANDENKEN_SESSION_MAX_BATCH_
     ANDENKEN_SESSION_PROVIDER: "openrouter",
     ANDENKEN_SESSION_ENDPOINT: "http://stub.invalid",
     ANDENKEN_SESSION_MODEL: "qwen/qwen3-embedding-8b",
-    ANDENKEN_SESSION_DIMENSIONS: "4096",
+    // The stub answers 1-d vectors; the provider now validates every reply
+    // against its configured dimension, so the fixture must agree with it.
+    ANDENKEN_SESSION_DIMENSIONS: "1",
     ANDENKEN_SESSION_MAX_BATCH_SIZE: "2",
   });
   try {

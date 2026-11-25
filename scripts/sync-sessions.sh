@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# sync-sessions.sh — sessions-only incremental, OpenRouter Qwen3-Embedding-8B 4096d.
+# sync-sessions.sh — sessions-only incremental for the local Ollama BGE-M3 1024d
+#   generation (ANDENKEN_SYNC_PROFILE, default ollama-bge-m3-1024), --local only.
+#   The legacy Qwen 4096d store is read-only since 2026-11-25 and refused by name.
 #
 # Operating cadence: hourly cron (30min~1h). Manifest-driven; never destroys
 # the index. Full rebuilds go through scripts/rebuild-sessions-full.sh.
@@ -85,6 +87,27 @@ while [ $# -gt 0 ]; do
   esac
 done
 MODE="${MODE:-local}"
+
+# --- Generation (embedding-profile.ts) — resolved BEFORE gather / lock / API ---
+# 2026-11-25: MD + sessions have no active Qwen build. The only sync profile is
+# the local Ollama BGE-M3 1024d generation; the legacy 4096d store is read-only
+# (query + rollback) and is refused here by name, with nothing gathered,
+# written or requested. A new generation lives in its own ANDENKEN_DATA.
+SYNC_PROFILE="${ANDENKEN_SYNC_PROFILE:-ollama-bge-m3-1024}"
+case "$SYNC_PROFILE" in
+  ollama-bge-m3-1024) EXPECTED_DIM=1024 ;;
+  *) echo "❌ refused: ANDENKEN_SYNC_PROFILE=$SYNC_PROFILE — the only sync generation is ollama-bge-m3-1024 (the Qwen 4096d generation is read-only). Nothing was done (API 0)." >&2; exit 2 ;;
+esac
+if [ "$MODE" = "global" ]; then
+  echo "❌ refused: --global publishes to the replica; the profiled generation's publish is a separate gate. Nothing was done (API 0)." >&2
+  exit 2
+fi
+SYNC_DATA_DIR="${ANDENKEN_DATA:-data}"
+if [ -d "$SYNC_DATA_DIR/sessions.lance" ] && [ ! -f "$SYNC_DATA_DIR/sessions.lance/andenken-profile.json" ]; then
+  echo "❌ refused: $SYNC_DATA_DIR/sessions.lance has no generation stamp — it is the preserved legacy 4096d store (read-only)." >&2
+  echo "   Build the new generation into a fresh ANDENKEN_DATA (candidate:sessions:plan/build). Nothing was gathered, written or requested (API 0)." >&2
+  exit 2
+fi
 
 # Needed by Step 0 (which device to gather) and by the authority gate below.
 # The GATE still runs after Step 0 on purpose — see its comment — but the value
@@ -208,16 +231,20 @@ fi
 #     it here so those paths work key-less.
 #   - The strict `:?` check happens just before Step 4 (preflight). Indexing
 #     in Step 5 reuses the same exported value.
-export ANDENKEN_SESSION_PROVIDER=openrouter
-export ANDENKEN_SESSION_ENDPOINT=https://openrouter.ai/api
-export ANDENKEN_SESSION_MODEL=qwen/qwen3-embedding-8b
-export ANDENKEN_SESSION_PRESET=Qwen/Qwen3-Embedding-8B
-export ANDENKEN_SESSION_DIMENSIONS=4096
-export ANDENKEN_SESSION_API_KEY="${OPENROUTER_API_KEY:-}"   # weak: empty allowed for API0 paths
-export ANDENKEN_SESSION_MAX_BATCH_SIZE=64
-export ANDENKEN_SESSION_TIMEOUT_MS=60000
-export ANDENKEN_SESSION_PAID_REMOTE=1
-export ANDENKEN_SESSION_PRICE_PER_M_TOKENS="${ANDENKEN_SESSION_PRICE_PER_M_TOKENS:-${OPENROUTER_QWEN_8B_PRICE:-0.01}}"
+# The profiled generation defines the whole provider: loopback Ollama, no key,
+# fixed model/digest/dim/batch, input length enforced. Any inherited Qwen-era
+# SESSION_* line is removed so it cannot conflict (the profile builder would
+# refuse it) — nothing else from the operator env leaks in.
+unset ANDENKEN_SESSION_ENDPOINT ANDENKEN_SESSION_MODEL ANDENKEN_SESSION_PRESET ANDENKEN_SESSION_DIMENSIONS \
+  ANDENKEN_SESSION_API_KEY ANDENKEN_SESSION_MAX_BATCH_SIZE ANDENKEN_SESSION_TIMEOUT_MS \
+  ANDENKEN_SESSION_PAID_REMOTE ANDENKEN_SESSION_PRICE_PER_M_TOKENS \
+  ANDENKEN_SESSION_QUERY_INSTRUCTION ANDENKEN_SESSION_DOCUMENT_INSTRUCTION
+export ANDENKEN_SESSION_PROVIDER=vllm
+export ANDENKEN_SESSION_PROFILE="$SYNC_PROFILE"
+# Placement only (identity is the runtime digest, checked before the first
+# request): ANDENKEN_SYNC_ENDPOINT, default the runtime contract's loopback.
+export ANDENKEN_SESSION_ENDPOINT="${ANDENKEN_SYNC_ENDPOINT:-http://127.0.0.1:11435}"
+echo "profile: $SYNC_PROFILE (${EXPECTED_DIM}d, loopback $ANDENKEN_SESSION_ENDPOINT)"
 
 # --- Authority: who is allowed to WRITE an index at all ---
 #
@@ -293,10 +320,10 @@ print(int(d.get("sessions", {}).get("count", 0) or 0))
 ')
 
 # --- Step 2: wrong-dim guard (API 0 abort) ---
-# DB exists with non-4096d → operator must do a destroy + full rebuild.
+# DB exists with a dimension other than the profile's → refuse (API 0).
 # This is the most important safety boundary in PR-B sessions cutover.
-if [ -n "$ACTUAL_DIM" ] && [ "$ACTUAL_DIM" != "4096" ]; then
-  echo "❌ sessions DB is ${ACTUAL_DIM}d; run scripts/rebuild-sessions-full.sh first"
+if [ -n "$ACTUAL_DIM" ] && [ "$ACTUAL_DIM" != "$EXPECTED_DIM" ]; then
+  echo "❌ sessions DB is ${ACTUAL_DIM}d, not the ${EXPECTED_DIM}d generation — build it with candidate:sessions:plan/build into a fresh ANDENKEN_DATA"
   echo "   (no API call was made)"
   exit 1
 fi
@@ -436,22 +463,13 @@ if [ "$ROWS" = "0" ] && [ "${ANDENKEN_ALLOW_PAID_FULL_REBUILD:-0}" != "1" ]; the
 fi
 
 # --- Step 4: preflight dim probe (API 1 — only when there is work) ---
-# API key strictly required from this point. No earlier failure for API0 paths.
-: "${OPENROUTER_API_KEY:?OPENROUTER_API_KEY required for preflight / indexing}"
-export ANDENKEN_SESSION_API_KEY="$OPENROUTER_API_KEY"
-
-echo "preflight probe: 1 API call"
-DIM=$(curl -sf -m 30 "$ANDENKEN_SESSION_ENDPOINT/v1/embeddings" \
-  -H "Authorization: Bearer $ANDENKEN_SESSION_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d "{\"model\":\"$ANDENKEN_SESSION_MODEL\",\"input\":\"safety probe\"}" \
-  | python3 -c 'import sys,json; print(len(json.load(sys.stdin)["data"][0]["embedding"]))' 2>/dev/null \
-  || echo "0")
-if [ "$DIM" != "4096" ]; then
-  echo "❌ preflight dim=$DIM (expected 4096) — aborting"
+# Loopback runtime: digest identity + one validated probe (no key, no cost).
+echo "preflight: runtime identity + 1 probe (local)"
+if ! pnpm exec tsx scripts/profile-preflight.ts sessions; then
+  echo "❌ profile preflight failed — aborting (nothing was written)"
   exit 1
 fi
-echo "✅ preflight dim=4096"
+echo "✅ preflight $SYNC_PROFILE"
 
 # --- Step 5: incremental indexing (manifest-driven; no --force) ---
 START=$(date --iso-8601=seconds)

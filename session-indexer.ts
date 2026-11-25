@@ -28,6 +28,8 @@
  * - Assistant text responses (key conclusions)
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
+import { splitTextToCodepoints, type EmbedSplit } from "./embedding-profile.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as readline from "node:readline";
@@ -739,7 +741,7 @@ function parsePiLine(
   // chars, so head-truncating it lost exactly the part worth keeping.
   const summary = piCompactionSummary(parsed);
   if (summary) {
-    const parts = splitForEmbedding(summary);
+    const parts = splitForActiveEmbedding(summary);
     onText?.(summary);
     return parts.map((part, i) => ({
       id: parts.length === 1
@@ -857,7 +859,7 @@ function buildMessageChunks(
   source: SessionSource,
   label?: "compaction",
 ): SessionChunk[] {
-  const parts = splitForEmbedding(text);
+  const parts = splitForActiveEmbedding(text);
   const chunkRole = label ?? role;
   const metaType = label ?? (role === "user" ? "user_message" : "assistant_response");
 
@@ -987,6 +989,37 @@ export function splitForEmbedding(
   }
 
   return parts.filter((p) => p.length > 0);
+}
+
+// --- Profiled generation split (embedding-profile.ts EmbedSplit) ---
+
+const embedSplitScope = new AsyncLocalStorage<EmbedSplit>();
+
+/**
+ * Run `fn` with a profiled split in force: every message / compaction /
+ * durable text split inside it (across awaits) uses `split.target` and then
+ * the hard code-point ceiling, so no part can exceed what the runtime embeds
+ * without truncation. `split` undefined = the historical split, unchanged —
+ * the 4096d production path never enters a scope.
+ *
+ * A scope, not a parameter, because the split sits five calls below every
+ * extraction entry point; a caller that forgets the scope gets the historical
+ * split, which a profiled build then refuses by length (fail-closed).
+ */
+export function withEmbedSplit<T>(split: EmbedSplit | undefined, fn: () => Promise<T>): Promise<T> {
+  return split ? embedSplitScope.run(split, fn) : fn();
+}
+
+/** The split currently in force (undefined outside a scope). */
+export function activeEmbedSplit(): EmbedSplit | undefined {
+  return embedSplitScope.getStore();
+}
+
+/** splitForEmbedding under the active scope (lossless; every part fits). */
+export function splitForActiveEmbedding(text: string): string[] {
+  const s = embedSplitScope.getStore();
+  if (!s) return splitForEmbedding(text);
+  return splitForEmbedding(text, s.target).flatMap((p) => splitTextToCodepoints(p, s.maxCodepoints));
 }
 
 // --- Legacy exports (backward compat with agent-config) ---

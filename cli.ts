@@ -12,15 +12,17 @@
  *   cli.ts reindex [--force]
  */
 
+import { embedSplitFor, profileOfProvider, writerRefusal } from "./embedding-profile.js";
+import { withEmbedSplit } from "./session-indexer.js";
 import * as path from "node:path";
 import * as fs from "node:fs";
 import {
   createSessionProviderFromEnv,
-  createOrgProviderFromEnv,
+  createOpenclawQueryProviderFromEnv,
   createMdProviderFromEnv,
   type EmbeddingProvider,
 } from "./embedding-provider.js";
-import { VectorStore, getSessionsDbPath, getOrgDbPath, getMdDbPath, getOpenclawDbPath, getDataDir, isAxisAbsentError, EXIT_AXIS_ABSENT, type SearchResult, type SearchFilters } from "./store.js";
+import { VectorStore, getSessionsDbPath, getMdDbPath, getOpenclawDbPath, getDataDir, isAxisAbsentError, EXIT_AXIS_ABSENT, type SearchResult, type SearchFilters } from "./store.js";
 import { findSessionFiles, extractSessionChunks, normalizeSourceFilter } from "./session-indexer.js";
 import { retrieve, expandQueryForBM25, getShortCJKTokens, sortByTimestampDesc, type MergeStrategy } from "./retriever.js";
 import { readHitExcerpt, isHitExcerpt, type HitExcerpt, type HitUnsupported } from "./session-excerpt-dispatch.js";
@@ -73,20 +75,6 @@ function getSessionsProvider(): EmbeddingProvider {
   return p;
 }
 
-function getOrgProvider(): EmbeddingProvider {
-  const p = createOrgProviderFromEnv();
-  if (!p) {
-    console.error(
-      JSON.stringify({
-        error: "No org embedding provider available — set ANDENKEN_ORG_PROVIDER " +
-               "(or the legacy ANDENKEN_PROVIDER+ANDENKEN_VLLM_* slot)",
-      }),
-    );
-    process.exit(1);
-  }
-  return p;
-}
-
 function getMdProvider(): EmbeddingProvider {
   const p = createMdProviderFromEnv();
   if (!p) {
@@ -117,7 +105,6 @@ function getProvider(): EmbeddingProvider {
 // --- Paths ---
 
 const sessionDbPath = getSessionsDbPath();
-const orgDbPath = getOrgDbPath();
 const mdDbPath = getMdDbPath();
 
 // --- Commands ---
@@ -136,8 +123,15 @@ const mdDbPath = getMdDbPath();
 async function openAxisForRead(
   dbPath: string,
   dim: number,
+  provider?: EmbeddingProvider,
 ): Promise<VectorStore> {
-  const store = new VectorStore(dbPath, dim, { readOnly: true });
+  // With a provider, the store is opened for THAT generation: the stamp (or the
+  // legacy-unstamped rule) must agree before any query is embedded — equal
+  // dimension alone does not make two models' vectors comparable.
+  const store = new VectorStore(dbPath, dim, {
+    readOnly: true,
+    ...(provider ? { profile: profileOfProvider(provider) } : {}),
+  });
   try {
     await store.init();
   } catch (err) {
@@ -146,6 +140,14 @@ async function openAxisForRead(
       process.exit(EXIT_AXIS_ABSENT);
     }
     throw err;
+  }
+  if (provider) {
+    const gen = await store.checkProfile();
+    if (!gen.ok) {
+      console.error(JSON.stringify({ error: `search refused: ${gen.code}`, db: dbPath, code: gen.code }));
+      await store.close();
+      process.exit(1);
+    }
   }
   return store;
 }
@@ -188,7 +190,7 @@ async function searchSessions(
   const hasUserFilters =
     !!(opts.dateFrom || opts.dateTo || opts.project || (opts.role && opts.role.length > 0) || opts.sessionFile || opts.sessionFileContains);
 
-  const store = await openAxisForRead(sessionDbPath, dim);
+  const store = await openAxisForRead(sessionDbPath, dim, provider);
 
   // PR-D: dim safety MUST run before any embedQuery() call.
   //
@@ -348,11 +350,12 @@ async function searchSessions(
       fallbackDiagnostic = fallbackDiagnostic ?? "knowledge fallback skipped: no md provider";
     } else {
       const mdDim = mdProvider.dimensions || 4096;
-      const mdStore = new VectorStore(mdDbPath, mdDim, { readOnly: true });
+      const mdStore = new VectorStore(mdDbPath, mdDim, { readOnly: true, profile: profileOfProvider(mdProvider) });
       await mdStore.init();
       const dimCheck = await mdStore.checkCompatibleDim();
-      if (!dimCheck.ok) {
-        fallbackDiagnostic = `knowledge fallback skipped: ${dimCheck.reason ?? "md dim incompatible"}`;
+      const genCheck = dimCheck.ok ? await mdStore.checkProfile() : null;
+      if (!dimCheck.ok || (genCheck && !genCheck.ok)) {
+        fallbackDiagnostic = `knowledge fallback skipped: ${!dimCheck.ok ? (dimCheck.reason ?? "md dim incompatible") : genCheck && !genCheck.ok ? genCheck.code : ""}`;
         await mdStore.close();
       } else {
         const mdCandidates = Math.min(limit * 4, 200);
@@ -410,75 +413,6 @@ async function searchSessions(
   await store.close();
 }
 
-async function searchKnowledge(query: string, limit: number): Promise<void> {
-  if (!fs.existsSync(orgDbPath)) {
-    console.error(
-      JSON.stringify({ error: "Org knowledge base not indexed. Run: cd ~/repos/gh/agent-config && ./run.sh index:org" }),
-    );
-    process.exit(1);
-  }
-
-  // PR-D: knowledge search must use the ORG provider, not the sessions one.
-  const provider = getOrgProvider();
-  const dim = provider.dimensions || 2560;
-
-  const store = await openAxisForRead(orgDbPath, dim);
-
-  // Dim safety: a misconfigured org provider should fail loudly before we
-  // issue a search whose ranking would be silently corrupted.
-  const dimCheck = await store.checkCompatibleDim();
-  if (!dimCheck.ok) {
-    console.error(
-      JSON.stringify({
-        error: `knowledge search refused: ${dimCheck.reason ?? "org dim incompatible"}`,
-        configured: dimCheck.configured,
-        actual: dimCheck.actual,
-      }),
-    );
-    process.exit(1);
-  }
-
-  const expanded = dictcliExpand(query);
-  const enrichedQuery =
-    expanded.length > 0 ? `${query} ${expanded.join(" ")}` : query;
-
-  const candidates = Math.min(limit * 4, 200); // openclaw candidateMultiplier pattern
-  const queryVector = await provider.embedQuery(enrichedQuery);
-  const bm25Query = expandQueryForBM25(enrichedQuery); // include dictcli expand terms in FTS
-  const vectorResults = await store.search(queryVector, candidates, 0.05);
-  const ftsResults = await store.fullTextSearch(bm25Query, candidates);
-
-  const results = await retrieve(query, vectorResults, ftsResults, {
-    vectorWeight: 0.7,
-    bm25Weight: 0.3,
-    recencyHalfLifeDays: 90,
-    minScore: 0.05,
-    mmr: { enabled: true, lambda: 0.7 },
-    mergeStrategy: "weighted" as MergeStrategy,
-  });
-
-  const finalResults = results.slice(0, limit);
-  recordRecall(query, "search-knowledge", finalResults, { limit });
-  console.log(
-    JSON.stringify({
-      query,
-      expanded: expanded.length > 0 ? expanded : undefined,
-      count: finalResults.length,
-      results: finalResults.map((r) => formatResult(r)),
-    }),
-  );
-
-  await store.close();
-}
-
-/**
- * Search the md track (public garden direct embedding).
- *
- * Mirrors searchKnowledge: dict expand, hybrid (vector + BM25), MMR. The
- * recency decay half-life is longer than sessions (90 days) because the
- * garden is intentionally not chronological — most retrieval value is in
- * the long-form notes, not the freshest mtime.
- */
 async function searchMd(query: string, limit: number, full: boolean = false): Promise<void> {
   // The md-specific "not indexed" exit 1 that used to sit here is gone: absence
   // is one contract for every axis now (openAxisForRead → state:"absent", exit 4),
@@ -486,7 +420,7 @@ async function searchMd(query: string, limit: number, full: boolean = false): Pr
   const provider = getMdProvider();
   const dim = provider.dimensions || 4096;
 
-  const store = await openAxisForRead(mdDbPath, dim);
+  const store = await openAxisForRead(mdDbPath, dim, provider);
 
   const dimCheck = await store.checkCompatibleDim();
   if (!dimCheck.ok) {
@@ -558,19 +492,6 @@ async function status(): Promise<void> {
     }
   }
 
-  let orgCount = 0;
-  const orgExists = fs.existsSync(orgDbPath);
-  if (orgExists) {
-    const orgStore = new VectorStore(orgDbPath, 2560, { readOnly: true });
-    try {
-      await orgStore.init();
-      orgCount = await orgStore.getCount();
-      await orgStore.close();
-    } catch {
-      // not initialized
-    }
-  }
-
   const totalSessionFiles = findSessionFiles().length;
 
   console.log(
@@ -591,11 +512,6 @@ async function status(): Promise<void> {
         indexed: mdExists,
         source: "md",
       },
-      org: {
-        chunks: orgCount,
-        indexed: orgExists,
-        production: "disabled",
-      },
     }),
   );
 }
@@ -608,6 +524,8 @@ async function reindex(force: boolean): Promise<void> {
   const notAuthority = indexAuthorityRefusal("cli.ts reindex");
   if (notAuthority) throw new Error(notAuthority);
   const provider = getProvider();
+  const legacyWriter = writerRefusal(provider);
+  if (legacyWriter) throw new Error(`cli.ts reindex refused — ${legacyWriter}`);
   const paid = (provider as { isPaidRemote?: boolean }).isPaidRemote === true;
   if (force && paid && process.env.ANDENKEN_ALLOW_PAID_FULL_REBUILD !== "1") {
     throw new Error(
@@ -627,7 +545,7 @@ async function reindex(force: boolean): Promise<void> {
 async function reindexLocked(provider: EmbeddingProvider, paid: boolean, force: boolean): Promise<void> {
   const dim = provider.dimensions || 2560;
 
-  const store = new VectorStore(sessionDbPath, dim);
+  const store = new VectorStore(sessionDbPath, dim, { profile: profileOfProvider(provider) });
   await store.init();
 
   if (force) {
@@ -637,6 +555,8 @@ async function reindexLocked(provider: EmbeddingProvider, paid: boolean, force: 
     await store.reset();
   }
   await store.ensureTable();
+  // Same write guard as indexer.ts: dimension, then generation stamp.
+  await store.assertCompatibleDim();
 
   const files = findSessionFiles();
   const indexed = force ? new Set<string>() : await store.getIndexedFiles();
@@ -659,7 +579,7 @@ async function reindexLocked(provider: EmbeddingProvider, paid: boolean, force: 
   let totalChunks = 0;
 
   for (let i = 0; i < toIndex.length; i++) {
-    const chunks = await extractSessionChunks(toIndex[i]);
+    const chunks = await withEmbedSplit(embedSplitFor(profileOfProvider(provider)), () => extractSessionChunks(toIndex[i]));
     if (chunks.length === 0) continue;
 
     const vectors = await provider.embedDocumentBatch(
@@ -762,8 +682,13 @@ function parseArgs() {
  * lets a query vector from here land in a space built over there.
  */
 async function searchOpenclaw(query: string, limit: number, full: boolean): Promise<void> {
-  const provider = getSessionsProvider();
-  const store = await openAxisForRead(getOpenclawDbPath(), 4096);
+  // The OpenClaw query provider is its own namespace (ANDENKEN_OPENCLAW_QUERY_*).
+  // Only when that is unset does it fall back to the sessions provider — and the
+  // generation check in openAxisForRead then refuses unless the store is that
+  // provider's own generation (today: the unstamped legacy 4096d harvest). A
+  // sessions migration therefore cannot silently re-point OpenClaw queries.
+  const provider = createOpenclawQueryProviderFromEnv() ?? getSessionsProvider();
+  const store = await openAxisForRead(getOpenclawDbPath(), provider.dimensions || 4096, provider);
 
   const dimCheck = await store.checkCompatibleDim();
   if (!dimCheck.ok) {

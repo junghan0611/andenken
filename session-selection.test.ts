@@ -32,6 +32,7 @@ import {
   durableReasonCode,
   errorCode,
   readSourceOnce,
+  parseKstWindow,
   runPlan,
   validatePlanArgs,
   type PlanEnv,
@@ -493,8 +494,14 @@ await check("checkSource / readSourceOnce: fixed codes, refused sources never op
 // ---------------------------------------------------------------------------
 console.log("\n# candidate plan guard (metadata only, temp tree)");
 // ---------------------------------------------------------------------------
+const WIDE = (() => {
+  const w = parseKstWindow("2000-01-01", "2100-01-01");
+  if (!w.ok) throw new Error(w.code);
+  return w.window;
+})();
 const gRoot = fs.mkdtempSync(path.join(os.tmpdir(), "andenken-plan-guard-"));
 const gEnv: PlanEnv = {
+  profileId: "ollama-bge-m3-1024",
   home: gRoot,
   corpus: path.join(gRoot, "corpus"),
   dataDir: path.join(gRoot, "data"),
@@ -506,15 +513,16 @@ fs.mkdirSync(path.join(gRoot, "inv"));
 const goodTarget = path.join(gEnv.candidatesRoot, "20990101-control-v1");
 const goodOut = path.join(gRoot, "inv", "plan.json");
 await check("guard: accepts the good shape and refuses each violation by code", () => {
+  const WIN = ["--since-kst", "2000-01-01", "--until-kst", "2100-01-01"];
   const v = (argv: string[], env = gEnv) => {
-    const r = validatePlanArgs(argv, env);
+    const r = validatePlanArgs(argv.includes("--since-kst") ? argv : [...argv, ...WIN], env);
     return r.ok ? "ok" : r.code;
   };
-  const good = ["--target", goodTarget, "--out", goodOut];
+  const good = ["--target", goodTarget, "--out", goodOut, "--since-kst", "2000-01-01", "--until-kst", "2100-01-01"];
   strictEqual(v(good), "ok");
   strictEqual(v([...good, "--force"]), "unknown-argument");
-  strictEqual(v(["--target", goodTarget, "--target", goodTarget, "--out", goodOut]), "argument-repeated");
-  strictEqual(v(["--target", goodTarget]), "target-and-out-required");
+  strictEqual(v(["--target", goodTarget, "--target", goodTarget, "--out", goodOut, "--since-kst", "2000-01-01", "--until-kst", "2100-01-01"]), "argument-repeated");
+  strictEqual(v(["--target", goodTarget, "--since-kst", "2000-01-01", "--until-kst", "2100-01-01"]), "target-and-out-required");
   strictEqual(v(good, { ...gEnv, corpus: undefined }), "corpus-env-required");
   const emptyCorpus = path.join(gRoot, "empty-corpus");
   fs.mkdirSync(emptyCorpus);
@@ -522,7 +530,7 @@ await check("guard: accepts the good shape and refuses each violation by code", 
   strictEqual(v(good, { ...gEnv, corpus: "relative/corpus" }), "corpus-not-absolute");
   fs.symlinkSync(gEnv.corpus!, path.join(gRoot, "corpus-alias"));
   strictEqual(v(good, { ...gEnv, corpus: path.join(gRoot, "corpus-alias") }), "corpus-not-canonical");
-  strictEqual(v(["--target", "relative/x", "--out", goodOut]), "target-not-absolute-normalized");
+  strictEqual(v(["--target", "relative/x", "--out", goodOut, "--since-kst", "2000-01-01", "--until-kst", "2100-01-01"]), "target-not-absolute-normalized");
   fs.mkdirSync(path.join(gEnv.candidatesRoot, "exists"));
   strictEqual(v(["--target", path.join(gEnv.candidatesRoot, "exists"), "--out", goodOut]), "target-exists");
   strictEqual(v(["--target", path.join(gRoot, "elsewhere", "x"), "--out", goodOut]), "target-not-directly-under-candidates-root");
@@ -581,7 +589,7 @@ await check("runPlan: legacy → control → message-level S0 → to-send, durab
   fs.chmodSync(snap, 0o600);
 
   const before = fs.readdirSync(gEnv.candidatesRoot).sort();
-  const plan = await withCorpusEnv(corpus, () => runPlan(goodTarget, { ...gEnv }));
+  const plan = await withCorpusEnv(corpus, () => runPlan(goodTarget, { ...gEnv }, WIDE));
   strictEqual(plan.status, "complete");
   strictEqual(plan.complete, true);
   const t = plan.totals;
@@ -638,7 +646,7 @@ await check("runPlan: symlinked sources are refused before any read; the plan is
   fs.mkdirSync(path.join(corpus, "dev", ".claude", "projects"), { recursive: true });
   fs.symlinkSync(outsideDir, path.join(corpus, "dev", ".claude", "projects", "-escape"));
 
-  const plan = await withCorpusEnv(corpus, () => runPlan(path.join(root, "candidates", "x"), { ...gEnv, corpus }));
+  const plan = await withCorpusEnv(corpus, () => runPlan(path.join(root, "candidates", "x"), { ...gEnv, corpus }, WIDE));
   deepStrictEqual(plan.refused.map((r) => r.code).sort(), ["source-symlink", "source-symlinked-ancestor"]);
   deepStrictEqual(plan.errors, [], "no EACCES: the unreadable outside files were never opened");
   deepStrictEqual([plan.totals.discovered, plan.totals.files], [3, 1]);
@@ -652,7 +660,7 @@ await check("runPlan: a device dir with nothing discovered is status empty, neve
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "andenken-plan-empty-"));
   const corpus = path.join(root, "corpus");
   fs.mkdirSync(path.join(corpus, "dev"), { recursive: true });
-  const plan = await withCorpusEnv(corpus, () => runPlan(path.join(root, "candidates", "x"), { ...gEnv, corpus }));
+  const plan = await withCorpusEnv(corpus, () => runPlan(path.join(root, "candidates", "x"), { ...gEnv, corpus }, WIDE));
   deepStrictEqual([plan.status, plan.complete, plan.totals.discovered, plan.totals.files], ["empty", false, 0, 0]);
   fs.rmSync(root, { recursive: true, force: true });
 });
@@ -661,7 +669,7 @@ await check("runPlan: discovery env pointing elsewhere reads nothing and is inco
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "andenken-plan-mismatch-"));
   const corpus = path.join(root, "corpus");
   fs.mkdirSync(path.join(corpus, "dev"), { recursive: true });
-  const plan = await withCorpusEnv(gEnv.corpus!, () => runPlan(path.join(root, "candidates", "x"), { ...gEnv, corpus }));
+  const plan = await withCorpusEnv(gEnv.corpus!, () => runPlan(path.join(root, "candidates", "x"), { ...gEnv, corpus }, WIDE));
   deepStrictEqual(plan.errors, [{ file: "<discovery>", code: "discovery-corpus-mismatch" }]);
   deepStrictEqual([plan.status, plan.totals.discovered, plan.durablePin.files.length], ["incomplete", 0, 0]);
   fs.rmSync(root, { recursive: true, force: true });
@@ -675,7 +683,7 @@ await check("runPlan: a refused durable snapshot surfaces as a code; the reason 
   const snap = durableDest(corpus);
   fs.mkdirSync(path.dirname(snap), { recursive: true });
   fs.writeFileSync(snap, `not a database ${MARK} 합성 본문\n`, { mode: 0o600 });
-  const plan = await withCorpusEnv(corpus, () => runPlan(path.join(root, "candidates", "x"), { ...gEnv, corpus }));
+  const plan = await withCorpusEnv(corpus, () => runPlan(path.join(root, "candidates", "x"), { ...gEnv, corpus }, WIDE));
   strictEqual(plan.durable.ran, true);
   const df = plan.durable.files![0] as Record<string, unknown>;
   deepStrictEqual([df.status, df.reasonCode, "reason" in df], ["refused", "not-sqlite", false]);
@@ -688,7 +696,7 @@ await check("runPlan: a refused durable snapshot surfaces as a code; the reason 
 });
 await check("defaultPlanEnv derives paths from HOME / env only", () => {
   const e = defaultPlanEnv({ HOME: "/h", ANDENKEN_SESSION_CORPUS: "~/c" } as NodeJS.ProcessEnv);
-  deepStrictEqual(e, { home: "/h", corpus: "/h/c", dataDir: "/h/repos/gh/andenken/data", candidatesRoot: "/h/.local/state/andenken/candidates" });
+  deepStrictEqual(e, { profileId: undefined, home: "/h", corpus: "/h/c", dataDir: "/h/repos/gh/andenken/data", candidatesRoot: "/h/.local/state/andenken/candidates" });
 });
 
 fs.rmSync(tmp, { recursive: true, force: true });

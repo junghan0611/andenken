@@ -459,11 +459,14 @@ fs.mkdirSync(path.join(fakeRepo, "data"), { recursive: true });
 const realNode = process.execPath;
 stub("pnpm", `case "$*" in
   "exec tsx indexer.ts policy") exec "${TSX}" "${REPO}/indexer.ts" policy ;;
-  "exec tsx indexer.ts status --json") echo "pnpm status" >>"${calls}"; echo '{"sessions":{"actual_dim":4096,"to_index":1,"count":5}}' ;;
+  "exec tsx indexer.ts status --json") echo "pnpm status" >>"${calls}"; echo '{"sessions":{"actual_dim":'"\${STATUS_DIM:-1024}"',"to_index":1,"count":5}}' ;;
+  "exec tsx scripts/profile-preflight.ts sessions") echo "pnpm preflight profile=$ANDENKEN_SESSION_PROFILE endpoint=$ANDENKEN_SESSION_ENDPOINT provider=$ANDENKEN_SESSION_PROVIDER" >>"${calls}" ;;
   "exec tsx indexer.ts verify sessions") echo "pnpm verify" >>"${calls}" ;;
   *) echo "pnpm $*" >>"${calls}"; exit 99 ;;
 esac`);
-stub("curl", `echo "curl" >>"${calls}"; python3 -c 'import json; print(json.dumps({"data":[{"embedding":[0]*4096}]}))'`);
+// The profiled preflight is `pnpm exec tsx scripts/profile-preflight.ts` (digest + 1 validated probe); a curl probe would be a regression.
+stub("curl", `echo "curl" >>"${calls}"; exit 99`);
+const PREFLIGHT = "pnpm preflight profile=ollama-bge-m3-1024 endpoint=http://127.0.0.1:11435 provider=vllm";
 // node: the indexer launch is recorded with what it inherited; everything else is the real node.
 stub("node", `if [ "$1 $2" = "--import tsx" ] && [[ "$3" == *.ts ]]; then
   c=missing
@@ -472,6 +475,10 @@ stub("node", `if [ "$1 $2" = "--import tsx" ] && [[ "$3" == *.ts ]]; then
   echo "node $n $4 custody=$c" >>"${calls}"; exit "\${INDEXER_RC:-0}"
 fi
 exec ${JSON.stringify(realNode)} "$@"`);
+const ledgerShaOrNone = () => {
+  const f = path.join(corpus, "MANIFEST.json");
+  return fs.existsSync(f) ? createHash("sha256").update(fs.readFileSync(f)).digest("hex") : "none";
+};
 /** Calls after gather's own local copy (an rsync into the temp corpus). */
 const afterGather = () => lines(calls).filter((l) => !(l.startsWith("rsync") && l.includes("--files-from=")));
 const sync = (args: string[], over: Record<string, string | undefined> = {}) =>
@@ -481,27 +488,77 @@ await check("--local: custody → gather (preflight only, no commit) → status 
   const r = sync(["--local"]);
   strictEqual(r.status, 0, r.out);
   deepStrictEqual(phases(), ["preflight lock=caller-fd host=local"]);
-  deepStrictEqual(afterGather(), ["pnpm status", "curl", "node indexer sessions custody=held"]);
+  deepStrictEqual(afterGather(), ["pnpm status", PREFLIGHT, "node indexer sessions custody=held"]);
+  ok(r.out.includes("profile: ollama-bge-m3-1024 (1024d, loopback http://127.0.0.1:11435)"), r.out);
 });
-await check("--global: gather commits (checkpoint) before status / probe / indexer; publish follows the index", () => {
-  const r = sync(["--global"]);
+await check("--local: ANDENKEN_SYNC_ENDPOINT is placement only and reaches the preflight; inherited Qwen SESSION_* lines never do", () => {
+  const r = sync(["--local"], {
+    ANDENKEN_SYNC_ENDPOINT: "http://127.0.0.1:45678",
+    ANDENKEN_SESSION_MODEL: "qwen/qwen3-embedding-8b",
+    ANDENKEN_SESSION_DIMENSIONS: "4096",
+    ANDENKEN_SESSION_ENDPOINT: "https://openrouter.ai/api",
+    ANDENKEN_SESSION_API_KEY: "sk-leak",
+  });
   strictEqual(r.status, 0, r.out);
-  deepStrictEqual(phases(), ["preflight lock=caller-fd host=local", "checkpoint lock=caller-fd host=local"]);
-  const c = afterGather();
-  deepStrictEqual(c.slice(0, 3), ["pnpm status", "curl", "node indexer sessions custody=held"]);
-  ok(c.indexOf("pnpm verify") > 2, c.join("\n"));
+  deepStrictEqual(afterGather(), ["pnpm status", PREFLIGHT.replace("11435", "45678"), "node indexer sessions custody=held"]);
+  ok(!r.out.includes("openrouter") && !r.out.includes("sk-leak"), r.out);
 });
-await check("--global: a failed checkpoint (15) stops the sync before status, probe and indexer, with the child's rc", () => {
-  const r = sync(["--global"], { FAKE_ARCHIVE_RC_CHECKPOINT: "15" });
-  strictEqual(r.status, 15, r.out);
-  ok(r.out.includes("refusing to index"), r.out);
-  deepStrictEqual(afterGather(), []);
+await check("generation gate: another ANDENKEN_SYNC_PROFILE, or a stampless sessions.lance, exits 2 before custody, gather, status, preflight (API 0)", () => {
+  const bad = sync(["--local"], { ANDENKEN_SYNC_PROFILE: "openrouter-qwen3-8b-4096" });
+  strictEqual(bad.status, 2, bad.out);
+  ok(bad.out.includes("the only sync generation is ollama-bge-m3-1024"), bad.out);
+  deepStrictEqual(phases(), []);
+  deepStrictEqual(lines(calls), []);
+  const legacy = path.join(root, "legacy-data");
+  fs.mkdirSync(path.join(legacy, "sessions.lance"), { recursive: true });
+  const r = sync(["--local"], { ANDENKEN_DATA: legacy });
+  strictEqual(r.status, 2, r.out);
+  ok(r.out.includes("no generation stamp") && r.out.includes("legacy 4096d store"), r.out);
+  deepStrictEqual(phases(), []);
+  deepStrictEqual(lines(calls), []);
 });
-await check("--global: a checkpoint whose index restore failed (19) → sync exits 19 with `corpus-archive-restore-failed`", () => {
-  const r = sync(["--global"], { FAKE_ARCHIVE_RC_CHECKPOINT: "19" });
-  strictEqual(r.status, 19, r.out);
-  ok(r.out.includes("REFUSED corpus-archive-restore-failed"), r.out);
-  deepStrictEqual(afterGather(), []);
+await check("a stamped 1024d store is accepted by the generation gate (the stamp is what counts)", () => {
+  const stamped = path.join(root, "stamped-data");
+  fs.mkdirSync(path.join(stamped, "sessions.lance"), { recursive: true });
+  fs.writeFileSync(path.join(stamped, "sessions.lance", "andenken-profile.json"), "{}");
+  const r = sync(["--local"], { ANDENKEN_DATA: stamped });
+  ok(!r.out.includes("no generation stamp") && !r.out.includes("the only sync generation"), r.out);
+});
+await check("a store of the wrong dimension (status says 4096) → exit 1 API 0: no preflight, no indexer", () => {
+  const r = sync(["--local"], { STATUS_DIM: "4096" });
+  strictEqual(r.status, 1, r.out);
+  ok(r.out.includes("4096d, not the 1024d generation"), r.out);
+  deepStrictEqual(afterGather(), ["pnpm status"]);
+});
+
+// --global is closed (profiled generation: publish is a separate gate). DORMANT until it reopens:
+//   - gather --strict --checkpoint before status / preflight / indexer; publish after the index
+//   - failed checkpoint (15) → child's rc, restore failure (19) → corpus-archive-restore-failed
+//   - archive-skip-gather-refused for --global + SKIP_GATHER=1 on an archive corpus
+//   - publish order: verify → corpus replicate (--strict) → index rsync; 0-row index never published
+//   - the manifest/pin/ledger files travel with the index; absence travels too
+for (const [label, over] of [
+  ["plain", {}],
+  ["with a failing checkpoint (15) it never gets that far", { FAKE_ARCHIVE_RC_CHECKPOINT: "15" }],
+  ["with a restore failure (19) it never gets that far", { FAKE_ARCHIVE_RC_CHECKPOINT: "19" }],
+  ["with SKIP_GATHER=1 on the archive corpus the global refusal wins (archive-skip-gather-refused is dormant)", { SKIP_GATHER: "1" }],
+] as const) {
+  await check(`--global (${label}) → exit 2 API 0: nothing gathered, custody not taken, no status / preflight / index / replicate / rsync`, () => {
+    const before = ledgerShaOrNone();
+    const r = sync(["--global"], { ...over });
+    strictEqual(r.status, 2, r.out);
+    ok(r.out.includes("publishes to the replica") && r.out.includes("separate gate"), r.out);
+    ok(!r.out.includes("archive-skip-gather-refused") && !r.out.includes("refusing to index"), r.out);
+    deepStrictEqual(phases(), []);
+    deepStrictEqual(lines(calls), []);
+    strictEqual(ledgerShaOrNone(), before);
+  });
+}
+await check("--push (the deprecated alias of --global) is refused the same way", () => {
+  const r = sync(["--push"]);
+  strictEqual(r.status, 2, r.out);
+  deepStrictEqual(lines(calls), []);
+  deepStrictEqual(phases(), []);
 });
 await check("the indexer's own refusal code is the sync's (75 here, not a folded 1)", () => {
   const r = sync(["--local"], { INDEXER_RC: "75" });
@@ -530,65 +587,45 @@ await check("owner hook absent → sync exit 10 before gather", () => {
   strictEqual(r.status, 10, r.out);
   deepStrictEqual(lines(calls), []);
 });
-await check("rebuild-sessions-full.sh (not --dry-run) with custody held elsewhere → exit 75 before gather / estimate", async () => {
+// rebuild-sessions-full.sh is RETIRED (exit 2 right after cd): it must never reach custody, gather, estimate, lock or a request.
+// DORMANT with it: custody-before-gather (75 when held), gather → ledger → ONE checkpoint before the estimate,
+// checkpoint restore failure (19) → "refusing to destroy", and the archive-skip-gather-refused refusal for a rebuild.
+const rebuild = (args: string[], over: Record<string, string | undefined> = {}) =>
+  run("bash", [path.join(fakeRepo, "scripts", "rebuild-sessions-full.sh"), ...args], { ANDENKEN_DATA: path.join(fakeRepo, "data"), ...over }, root);
+const ledgerSha = () => createHash("sha256").update(fs.readFileSync(path.join(corpus, "MANIFEST.json"))).digest("hex");
+const pinnedRebuild = path.join(root, "pinned-rebuild");
+fs.mkdirSync(path.join(pinnedRebuild, "sessions.lance"), { recursive: true });
+fs.writeFileSync(path.join(pinnedRebuild, "session-policy.json"), JSON.stringify(CONTROL_V1_PIN));
+fs.writeFileSync(path.join(pinnedRebuild, "session-manifest.json"), JSON.stringify({ files: {}, lastUpdated: "", [MANIFEST_POLICY_FIELD]: CONTROL_V1_PIN }));
+const retired = (r: { status: number | null; out: string }) => {
+  strictEqual(r.status, 2, r.out);
+  ok(r.out.includes("retired"), r.out);
+  deepStrictEqual(phases(), [], "custody never taken, no archive phase");
+  deepStrictEqual(lines(calls), [], "no gather, estimate, status, probe, ssh or rsync");
+};
+await check("rebuild-sessions-full.sh is retired: exit 2, no custody / gather / checkpoint / estimate / request — plain, --dry-run, legacy dir", () => {
+  const before = ledgerSha();
+  retired(rebuild([]));
+  retired(rebuild(["--dry-run"]));
+  strictEqual(ledgerSha(), before, "ledger unchanged");
+});
+await check("retired rebuild with custody held elsewhere → still exit 2 (not 75): it never reaches custody", async () => {
   const h = await holdLock(lockPath);
   try {
-    const r = run("bash", [path.join(fakeRepo, "scripts", "rebuild-sessions-full.sh")], { ANDENKEN_DATA: path.join(fakeRepo, "data") }, root);
-    strictEqual(r.status, 75, r.out);
-    deepStrictEqual(lines(archiveLog), []);
-    deepStrictEqual(lines(calls), []);
+    retired(rebuild([]));
   } finally {
     h.kill();
   }
 });
-
-const rebuild = (args: string[], over: Record<string, string | undefined> = {}) =>
-  run("bash", [path.join(fakeRepo, "scripts", "rebuild-sessions-full.sh"), ...args], { ANDENKEN_DATA: path.join(fakeRepo, "data"), ...over }, root);
-await check("explicit full rebuild (archive mode): gather → ledger → ONE checkpoint, before the estimate", () => {
-  const r = rebuild([]);
-  deepStrictEqual(phases(), ["preflight lock=caller-fd host=local", "checkpoint lock=caller-fd host=local"], r.out);
-  ok(lines(archiveLog)[1].includes("manifest=") && !lines(archiveLog)[1].includes("manifest=none"), "the checkpoint sees a ledger");
-});
-await check("full rebuild: a checkpoint restore failure (19) → rebuild exits 19 before the estimate, nothing destroyed", () => {
-  const r = rebuild([], { FAKE_ARCHIVE_RC_CHECKPOINT: "19" });
-  strictEqual(r.status, 19, r.out);
-  ok(r.out.includes("refusing to destroy"), r.out);
-  deepStrictEqual(afterGather(), []);
-});
-await check("full rebuild on a control-pinned data dir → refused (2) before custody, gather and checkpoint", () => {
-  const pinned = path.join(root, "pinned-rebuild");
-  fs.mkdirSync(path.join(pinned, "sessions.lance"), { recursive: true });
-  fs.writeFileSync(path.join(pinned, "session-policy.json"), JSON.stringify(CONTROL_V1_PIN));
-  fs.writeFileSync(path.join(pinned, "session-manifest.json"), JSON.stringify({ files: {}, lastUpdated: "", [MANIFEST_POLICY_FIELD]: CONTROL_V1_PIN }));
-  const r = rebuild([], { ANDENKEN_DATA: pinned });
-  strictEqual(r.status, 2, r.out);
-  deepStrictEqual(phases(), []);
-  deepStrictEqual(afterGather(), []);
-});
-await check("full rebuild --dry-run: no custody, no gather, no checkpoint", () => {
-  rebuild(["--dry-run"]);
-  deepStrictEqual(phases(), []);
-});
-const ledgerSha = () => createHash("sha256").update(fs.readFileSync(path.join(corpus, "MANIFEST.json"))).digest("hex");
-await check("full rebuild + SKIP_GATHER=1 on an archive corpus → refused (2), API 0: no custody, preflight, checkpoint, estimate or destroy; ledger unchanged", () => {
+await check("retired rebuild on a control-pinned dir, with SKIP_GATHER=1 on an archive corpus, and with a checkpoint rc set → the same exit 2, nothing done", () => {
   const before = ledgerSha();
+  retired(rebuild([], { ANDENKEN_DATA: pinnedRebuild }));
   const r = rebuild([], { SKIP_GATHER: "1" });
-  strictEqual(r.status, 2, r.out);
-  ok(r.out.includes("archive-skip-gather-refused"), r.out);
-  deepStrictEqual(phases(), []);
-  deepStrictEqual(lines(calls), []);
+  retired(r);
+  ok(!r.out.includes("archive-skip-gather-refused"), "that refusal is dormant; the retirement wins");
+  retired(rebuild(["--dry-run"], { SKIP_GATHER: "1" }));
+  retired(rebuild([], { FAKE_ARCHIVE_RC_CHECKPOINT: "19" }));
   strictEqual(ledgerSha(), before);
-});
-await check("…a pinned data dir is still refused for its pin first (the earlier gate wins)", () => {
-  const r = rebuild([], { SKIP_GATHER: "1", ANDENKEN_DATA: path.join(root, "pinned-rebuild") });
-  strictEqual(r.status, 2, r.out);
-  ok(!r.out.includes("archive-skip-gather-refused"), r.out);
-  deepStrictEqual(phases(), []);
-});
-await check("…--dry-run + SKIP_GATHER=1 is unchanged (not this refusal; no custody, no phase)", () => {
-  const r = rebuild(["--dry-run"], { SKIP_GATHER: "1" });
-  ok(!r.out.includes("archive-skip-gather-refused"), r.out);
-  deepStrictEqual(phases(), []);
 });
 
 // ============================================================================
@@ -635,7 +672,7 @@ await check("sync SKIP_GATHER=1: preflight + form still run under custody; refus
   const okRun = sync(["--local"], { SKIP_GATHER: "1" });
   strictEqual(okRun.status, 0, okRun.out);
   deepStrictEqual(phases(), ["preflight lock=caller-fd host=local"]);
-  deepStrictEqual(lines(calls), ["pnpm status", "curl", "node indexer sessions custody=held"]);
+  deepStrictEqual(lines(calls), ["pnpm status", PREFLIGHT, "node indexer sessions custody=held"]);
   const bad = sync(["--local"], { SKIP_GATHER: "1", FAKE_ARCHIVE_RC_PREFLIGHT: "13" });
   strictEqual(bad.status, 13, bad.out);
   deepStrictEqual(lines(calls), []);
@@ -648,19 +685,11 @@ await check("sync SKIP_GATHER=1: preflight + form still run under custody; refus
     fs.rmSync(pointer);
   }
 });
-await check("sync --global + SKIP_GATHER=1 on an archive corpus → refused (2), API 0: no lock wait, custody, probe, index, publish or archive change", () => {
-  const before = ledgerSha();
-  const r = sync(["--global"], { SKIP_GATHER: "1" });
-  strictEqual(r.status, 2, r.out);
-  ok(r.out.includes("archive-skip-gather-refused"), r.out);
-  deepStrictEqual(phases(), []);
-  deepStrictEqual(lines(calls), [], "no status, curl, indexer, verify, replicate or index rsync");
-  strictEqual(ledgerSha(), before);
-});
-await check("…a legacy corpus (no .git): sync --global + SKIP_GATHER=1 is not this refusal", () => {
+await check("…a legacy corpus (no .git): sync --global + SKIP_GATHER=1 is refused as --global too (exit 2, nothing run)", () => {
   const r = sync(["--global"], { SKIP_GATHER: "1", ANDENKEN_SESSION_CORPUS: path.join(home, "plain") });
+  strictEqual(r.status, 2, r.out);
   ok(!r.out.includes("archive-skip-gather-refused"), r.out);
-  ok(lines(calls).includes("node indexer sessions custody=missing"), lines(calls).join("\n"));
+  deepStrictEqual(lines(calls), []);
 });
 
 // ============================================================================

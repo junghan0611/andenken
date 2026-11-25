@@ -18,8 +18,9 @@
  *                malformed / one-sided pin, with 0 requests and the DB unchanged
  *   T4 estimate  pinned estimate = control-v1 send count, S0 reported apart
  *   T7 fresh     empty / missing index + paid endpoint → refused, 0 requests
- *   wrappers     rebuild-sessions-full / sync-sessions refuse before gather,
- *                preflight or destroy
+ *   wrappers     rebuild-sessions-full is retired (exit 2, nothing done);
+ *                sync-sessions refuses (generation / policy / authority) before
+ *                gather, preflight or index; --global is closed
  *   corpus       root .git pruned, device dot dirs kept, symlink / annex pointer
  *                → exit 3 with nothing written or shipped
  */
@@ -49,6 +50,7 @@ import { extractSessionChunks } from "./session-indexer.ts";
 import { durableS0Inspector } from "./indexer.ts";
 import { VectorStore } from "./store.ts";
 import { writeFakeArchiveHelper } from "./corpus-archive-fake.ts";
+import { PROFILES, STAMP_FILE, makeStamp } from "./embedding-profile.ts";
 
 const REPO = import.meta.dirname;
 const TSX = path.join(REPO, "node_modules", ".bin", "tsx");
@@ -909,44 +911,97 @@ function wrapper(script: string, args: string[], over: Record<string, string | u
 
 const wrapperSha = treeSha(data);
 const realData = () => fs.realpathSync(data);
-await check("rebuild-sessions-full.sh on a pinned dir → exit 2: no gather, estimate, preflight or destroy", () => {
-  const r = wrapper("rebuild-sessions-full.sh", []);
+// rebuild-sessions-full.sh is RETIRED (exit 2 right after cd, before policy, estimate, gather, custody, lock, key, API).
+// Its former policy/authority/forged-answer assertions moved to sync-sessions.sh, which still runs the same gates.
+const retiredRebuild = (label: string, args: string[], over: Record<string, string | undefined> = {}) =>
+  check(`rebuild-sessions-full.sh ${label} → exit 2 retired: no gather, estimate, custody, lock or request; data unchanged`, () => {
+    const before = treeSha(data);
+    const r = wrapper("rebuild-sessions-full.sh", args, over);
+    strictEqual(r.status, 2, r.out);
+    ok(r.out.includes("retired"), r.out);
+    deepStrictEqual(r.calls, []);
+    strictEqual(treeSha(data), before);
+  });
+await retiredRebuild("on a pinned dir", []);
+await retiredRebuild("--dry-run on a pinned dir", ["--dry-run"]);
+await retiredRebuild("with ANDENKEN_DATA ≠ ./data (the data-dir-mismatch gate is dormant)", [], { ANDENKEN_DATA: path.join(root, "unit") });
+await retiredRebuild("on a non-authority device (exit 2, not the old authority exit 1)", [], { ANDENKEN_INDEX_AUTHORITY: "elsewhere" });
+await retiredRebuild("with a forged policy answer", [], { POLICY_ANSWER: "{}" });
+await retiredRebuild("with SKIP_GATHER=1", [], { SKIP_GATHER: "1" });
+await check("rebuild-sessions-full.sh with no ~/.current-device, and on a legacy dir → exit 2 retired, nothing recorded", () => {
+  const bare = path.join(root, "bare-home");
+  fs.mkdirSync(bare, { recursive: true });
+  const host = spawnSync("hostname", { encoding: "utf-8" }).stdout.trim();
+  const r = wrapper("rebuild-sessions-full.sh", [], { HOME: bare, ANDENKEN_INDEX_AUTHORITY: host });
   strictEqual(r.status, 2, r.out);
-  ok(r.out.includes("REFUSED sessions-policy pinned"), r.out);
   deepStrictEqual(r.calls, []);
-  strictEqual(treeSha(data), wrapperSha);
+  const l = path.join(root, "legacyrepo");
+  fs.cpSync(path.join(fakeRepo, "scripts"), path.join(l, "scripts"), { recursive: true });
+  fs.mkdirSync(path.join(l, "data"));
+  const env = { ...childEnv({ ANDENKEN_DATA: path.join(l, "data") }), PATH: `${stubBin}:${process.env.PATH}` };
+  fs.writeFileSync(calls, "");
+  const r2 = spawnSync("bash", [path.join(l, "scripts", "rebuild-sessions-full.sh")], { cwd: root, env, encoding: "utf-8", input: "yes\n" });
+  strictEqual(r2.status, 2, r2.stdout + r2.stderr);
+  strictEqual(fs.readFileSync(calls, "utf-8"), "");
 });
-await check("rebuild-sessions-full.sh --dry-run on a pinned dir → refused the same way", () => {
-  const r = wrapper("rebuild-sessions-full.sh", ["--dry-run"]);
+
+// --- sync-sessions.sh: generation gate, then the (unchanged) policy / authority gates ---
+// The data dir's sessions.lance has no stamp (the earlier indexer runs wrote an 8d store through the mock), which the
+// generation gate refuses; the gates below need a stamped store, so stamp it for the duration of one call.
+const STAMP_FILE_PATH = path.join(data, "sessions.lance", STAMP_FILE);
+function stamped<T>(fn: () => T): T {
+  const had = fs.existsSync(STAMP_FILE_PATH);
+  if (!had) fs.writeFileSync(STAMP_FILE_PATH, JSON.stringify(makeStamp(PROFILES["ollama-bge-m3-1024"]), null, 2) + "\n");
+  try {
+    return fn();
+  } finally {
+    if (!had) fs.rmSync(STAMP_FILE_PATH);
+  }
+}
+await check("sync-sessions.sh on a store without andenken-profile.json → exit 2 (legacy store is read-only): nothing gathered, written or requested", () => {
+  strictEqual(fs.existsSync(STAMP_FILE_PATH), false);
+  const before = treeSha(data);
+  const r = wrapper("sync-sessions.sh", ["--local"]);
   strictEqual(r.status, 2, r.out);
+  ok(r.out.includes("no generation stamp") && r.out.includes("legacy 4096d store"), r.out);
   deepStrictEqual(r.calls, []);
+  strictEqual(treeSha(data), before);
 });
-await check("rebuild-sessions-full.sh with ANDENKEN_DATA ≠ ./data → exit 2 data-dir-mismatch, nothing done", () => {
-  const r = wrapper("rebuild-sessions-full.sh", [], { ANDENKEN_DATA: path.join(root, "unit") });
-  strictEqual(r.status, 2, r.out);
-  ok(r.out.includes("data-dir-mismatch"), r.out);
-  deepStrictEqual(r.calls, []);
-  strictEqual(treeSha(data), wrapperSha);
+await check("sync-sessions.sh: another ANDENKEN_SYNC_PROFILE → exit 2, nothing done", () => {
+  for (const prof of ["openrouter-qwen3-8b-4096", "openrouter-bge-m3-1024", "nonsense"]) {
+    const r = wrapper("sync-sessions.sh", ["--local"], { ANDENKEN_SYNC_PROFILE: prof });
+    strictEqual(r.status, 2, r.out);
+    ok(r.out.includes("the only sync generation is ollama-bge-m3-1024"), r.out);
+    deepStrictEqual(r.calls, []);
+  }
 });
-await check("sync-sessions.sh with a malformed pin → exit 2 before gather / status / preflight / publish", () => {
+await check("sync-sessions.sh --global / --push → exit 2 before gather (publish is a separate gate); the pin gates for --global are dormant with it", () => {
+  for (const flag of ["--global", "--push"]) {
+    const r = wrapper("sync-sessions.sh", [flag]);
+    strictEqual(r.status, 2, r.out);
+    ok(r.out.includes("separate gate"), r.out);
+    deepStrictEqual(r.calls, []);
+  }
+});
+await check("sync-sessions.sh with a malformed pin → exit 2 before gather / status / preflight (--local now carries this gate)", () => {
   fs.writeFileSync(pinPath, "{}");
-  const r = wrapper("sync-sessions.sh", ["--global"]);
+  const r = stamped(() => wrapper("sync-sessions.sh", ["--local"]));
   fs.writeFileSync(pinPath, pinBytes, { mode: 0o600 });
   strictEqual(r.status, 2, r.out);
   deepStrictEqual(r.calls, []);
 });
 await check("sync-sessions.sh on a pinned (well-formed) dir passes the policy gate and reaches gather", () => {
-  const r = wrapper("sync-sessions.sh", ["--local"]);
+  const r = stamped(() => wrapper("sync-sessions.sh", ["--local"]));
   ok(r.out.includes('"pinned":true'), r.out);
   strictEqual(r.calls[0], "gather --only dev", r.out);
+  ok(r.out.includes("profile: ollama-bge-m3-1024 (1024d, loopback http://127.0.0.1:11435)"), r.out);
+  ok(!r.calls.some((c) => c.startsWith("curl")), "the preflight is no longer a curl probe");
 });
-await check("rebuild-sessions-full.sh on a non-authority device → exit 1 before gather / destroy", () => {
-  const before = treeSha(data); // the sync checks above left their flock files in data/
-  const r = wrapper("rebuild-sessions-full.sh", [], { ANDENKEN_INDEX_AUTHORITY: "elsewhere" });
+await check("sync-sessions.sh on a non-authority device → exit 1 after gather, before status / preflight / indexer", () => {
+  const r = stamped(() => wrapper("sync-sessions.sh", ["--local"], { ANDENKEN_INDEX_AUTHORITY: "elsewhere" }));
   strictEqual(r.status, 1, r.out);
-  ok(r.out.includes("not-index-authority"), r.out);
-  deepStrictEqual(r.calls, []);
-  strictEqual(treeSha(data), before);
+  ok(r.out.includes("INVARIANT.md §7.1") && r.out.includes("(no API call was made)"), r.out);
+  deepStrictEqual(r.calls, ["gather --only dev"]);
 });
 for (const [label, answer] of [
   ["{}", () => "{}"],
@@ -956,46 +1011,103 @@ for (const [label, answer] of [
   ["another data dir", () => JSON.stringify({ dataDir: path.join(root, "unit"), selection: "legacy", pinned: false })],
   ["an extra key", () => JSON.stringify({ dataDir: realData(), selection: "legacy", pinned: false, note: "x" })],
 ] as const) {
-  await check(`forged policy answer (${label}) never reads as legacy: rebuild exit 2, nothing done`, () => {
+  await check(`forged policy answer (${label}) never reads as legacy: sync --local exit 2, nothing done`, () => {
     const before = treeSha(data);
-    const r = wrapper("rebuild-sessions-full.sh", [], { POLICY_ANSWER: answer() });
+    const r = stamped(() => wrapper("sync-sessions.sh", ["--local"], { POLICY_ANSWER: answer() }));
     strictEqual(r.status, 2, r.out);
     ok(r.out.includes("unparseable answer"), r.out);
     deepStrictEqual(r.calls, []);
     strictEqual(treeSha(data), before);
   });
 }
-await check("no ~/.current-device, hostname = authority → rebuild refuses as 'unknown' (as the indexer would); nothing done", () => {
+await check("no ~/.current-device, hostname = authority → sync refuses at its authority gate: no status, no preflight, no indexer", () => {
   const bare = path.join(root, "bare-home");
   fs.mkdirSync(bare, { recursive: true });
-  const before = treeSha(data);
   const host = spawnSync("hostname", { encoding: "utf-8" }).stdout.trim();
-  const r = wrapper("rebuild-sessions-full.sh", [], { HOME: bare, ANDENKEN_INDEX_AUTHORITY: host });
+  const r = stamped(() => wrapper("sync-sessions.sh", ["--local"], { HOME: bare, ANDENKEN_INDEX_AUTHORITY: host }));
   strictEqual(r.status, 1, r.out);
   ok(r.out.includes("this is 'unknown'"), r.out);
-  deepStrictEqual(r.calls, []);
-  strictEqual(treeSha(data), before);
+  ok(!r.calls.some((c) => c.startsWith("curl") || c.includes("indexer.ts") || c.includes("profile-preflight")), r.calls.join("\n"));
 });
-await check("no ~/.current-device, hostname = authority → sync refuses at its authority gate: no preflight, no indexer", () => {
-  const bare = path.join(root, "bare-home");
-  const host = spawnSync("hostname", { encoding: "utf-8" }).stdout.trim();
-  const r = wrapper("sync-sessions.sh", ["--local"], { HOME: bare, ANDENKEN_INDEX_AUTHORITY: host });
-  strictEqual(r.status, 1, r.out);
-  ok(r.out.includes("this is 'unknown'"), r.out);
-  ok(!r.calls.some((c) => c.startsWith("curl") || c.includes("indexer.ts sessions")), r.calls.join("\n"));
-});
-await check("rebuild-sessions-full.sh on a legacy dir passes the gate (then stops at the stubbed gather/estimate)", () => {
-  const l = path.join(root, "legacyrepo");
-  fs.cpSync(path.join(fakeRepo, "scripts"), path.join(l, "scripts"), { recursive: true });
-  fs.mkdirSync(path.join(l, "data"));
-  const env = { ...childEnv({ ANDENKEN_DATA: path.join(l, "data") }), PATH: `${stubBin}:${process.env.PATH}` };
-  fs.writeFileSync(calls, "");
-  const r = spawnSync("bash", [path.join(l, "scripts", "rebuild-sessions-full.sh")], { cwd: root, env, encoding: "utf-8", input: "no\n" });
-  ok((r.stdout + r.stderr).includes('"pinned":false'), r.stdout + r.stderr);
-  const c = fs.readFileSync(calls, "utf-8");
-  ok(c.includes("gather") && c.includes("pnpm exec tsx indexer.ts estimate sessions --full"), c);
-  ok(!c.includes("curl"), "no preflight without confirmation");
-});
+
+// --- the profiled preflight (scripts/profile-preflight.ts): mock Ollama on 127.0.0.1:<random> ---
+console.log("\n# profile preflight: digest via /api/tags + one validated 1024d probe (mock runtime)");
+{
+  const PROFILE = PROFILES["ollama-bge-m3-1024"];
+  const mock = { digest: PROFILE.digest as string, dim: 1024, tags: 0, embeds: 0, echoModel: "bge-m3:latest" as string | undefined };
+  const srv = http.createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => {
+      if (req.method === "GET" && req.url === "/api/tags") {
+        mock.tags++;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ models: [{ name: "bge-m3:latest", digest: mock.digest }] }));
+        return;
+      }
+      if (req.method === "POST" && req.url === "/v1/embeddings") {
+        mock.embeds++;
+        const input = (JSON.parse(Buffer.concat(chunks).toString("utf-8")) as { input: string[] }).input;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ...(mock.echoModel ? { model: mock.echoModel } : {}), data: input.map((t, index) => ({ index, embedding: Array.from({ length: mock.dim }, (_, k) => ((t.length + k) % 7) / 7 + 0.01) })) }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+  });
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", () => r()));
+  const mport = (srv.address() as { port: number }).port;
+  const pf = (over: Record<string, string | undefined> = {}) =>
+    runChild(["scripts/profile-preflight.ts", "sessions"], {
+      ANDENKEN_SESSION_PROFILE: "ollama-bge-m3-1024",
+      ANDENKEN_SESSION_PROVIDER: "vllm",
+      ANDENKEN_SESSION_ENDPOINT: `http://127.0.0.1:${mport}`,
+      ANDENKEN_SESSION_MODEL: undefined,
+      ANDENKEN_SESSION_DIMENSIONS: undefined,
+      ANDENKEN_SESSION_API_KEY: undefined,
+      ANDENKEN_SESSION_PAID_REMOTE: undefined,
+      ...over,
+    });
+  const json = (out: string) => JSON.parse(out.split("\n").filter((l) => l.startsWith("{")).pop() ?? "{}") as Record<string, unknown>;
+  const reset2 = () => Object.assign(mock, { digest: PROFILE.digest as string, dim: 1024, tags: 0, embeds: 0, echoModel: "bge-m3:latest" });
+  await check("preflight: digest matches and one probe returns 1024d → exit 0 (any loopback port); the runtime saw /api/tags and ≥ 1 embedding request", async () => {
+    reset2();
+    const r = await pf();
+    strictEqual(r.status, 0, r.out);
+    const j = json(r.out);
+    deepStrictEqual([j.ok, j.identity, j.probe, j.dimensions], [true, "digest-match", "ok", 1024]);
+    ok(mock.tags >= 1 && mock.embeds >= 1, `tags ${mock.tags} embeds ${mock.embeds}`);
+  });
+  await check("preflight: digest mismatch → exit 1 digest-mismatch with ZERO embedding requests", async () => {
+    reset2();
+    mock.digest = "0".repeat(64);
+    const r = await pf();
+    strictEqual(r.status, 1, r.out);
+    deepStrictEqual([json(r.out).ok, json(r.out).code, mock.embeds], [false, "digest-mismatch", 0]);
+  });
+  await check("preflight: a reply of the wrong dimension / a substituted model echo → exit 1 (never accepted as a probe)", async () => {
+    reset2();
+    mock.dim = 768;
+    const a = await pf();
+    strictEqual(a.status, 1, a.out);
+    strictEqual(json(a.out).ok, false);
+    reset2();
+    mock.echoModel = "some-other-model";
+    const b = await pf();
+    strictEqual(b.status, 1, b.out);
+    strictEqual(json(b.out).ok, false);
+  });
+  await check("preflight: a Qwen-era env (MODEL / DIMENSIONS conflicting with the profile) is refused, and a missing profile is exit 2 — no request either way", async () => {
+    reset2();
+    const a = await pf({ ANDENKEN_SESSION_MODEL: "qwen/qwen3-embedding-8b", ANDENKEN_SESSION_DIMENSIONS: "4096" });
+    ok(a.status !== 0, a.out);
+    const b = await pf({ ANDENKEN_SESSION_PROFILE: undefined });
+    strictEqual(b.status, 2, b.out);
+    strictEqual(mock.tags + mock.embeds, 0);
+  });
+  await new Promise<void>((r) => srv.close(() => r()));
+}
 
 // ============================================================================
 console.log("\n# corpus scripts: root .git pruned, source form fail-closed");

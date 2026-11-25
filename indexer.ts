@@ -10,6 +10,7 @@
  *   npx tsx indexer.ts status
  */
 
+import { decideStoreAccess, writerRefusal, embedSplitFor, maxInputCodepoints, profileOfProvider, readStoreStamp, stampPath } from "./embedding-profile.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -17,7 +18,7 @@ import { createHash } from "node:crypto";
 import { execSync } from "node:child_process";
 import {
   createSessionProviderFromEnv,
-  createOrgProviderFromEnv,
+  createOpenclawQueryProviderFromEnv,
   createMdProviderFromEnv,
   runWithConcurrency,
   DEFAULT_CONCURRENCY,
@@ -25,12 +26,11 @@ import {
 } from "./embedding-provider.js";
 import { rateLimitSliceSize, withRateLimitRetry } from "./embed-retry.js";
 import { finalizeIndexRun, formatApiSummary } from "./index-finalize.js";
-import { VectorStore, getSessionsDbPath, getOrgDbPath, getMdDbPath, getOpenclawDbPath, getDataDir, describeAxisAbsence, ftsReady } from "./store.js";
+import { VectorStore, getSessionsDbPath, getMdDbPath, getOpenclawDbPath, getDataDir, describeAxisAbsence, ftsReady } from "./store.js";
 import { describeFtsHealth, OPENCLAW_FTS_HEALTHY_MARK } from "./openclaw-fts.js";
 import { assertOpenclawWriteLock, OpenclawLockRefused } from "./openclaw-lock.js";
 import { stagingState } from "./openclaw-importer.js";
-import { findSessionFiles } from "./session-indexer.js";
-import { findOrgFiles, chunkOrgFile, shouldIndexOrgFile } from "./org-chunker.js";
+import { findSessionFiles, withEmbedSplit } from "./session-indexer.js";
 import { findMdFiles, chunkMdFile, mdChunkToStoreRow } from "./md-chunker.js";
 import { WriteBuffer } from "./write-buffer.js";
 import { durableCorpusRoot } from "./durable-source.js";
@@ -135,24 +135,6 @@ interface OrgFileManifest {
   // git diff). The field is optional so existing manifests migrate lazily.
   files: Record<string, { mtimeMs: number; size: number; chunks: number; skippedOversize?: number; payloadHash?: string }>;
   lastUpdated: string;
-}
-
-function getManifestPath(): string {
-  return path.join(getDataDir(), "org-manifest.json");
-}
-
-function loadManifest(): OrgFileManifest {
-  const p = getManifestPath();
-  try {
-    return JSON.parse(fs.readFileSync(p, "utf-8"));
-  } catch {
-    return { files: {}, lastUpdated: "" };
-  }
-}
-
-function saveManifest(manifest: OrgFileManifest): void {
-  manifest.lastUpdated = new Date().toISOString();
-  fs.writeFileSync(getManifestPath(), JSON.stringify(manifest, null, 2));
 }
 
 // --- Session Manifest (mirrors org pattern; same shape, different path) ---
@@ -447,22 +429,6 @@ function getSessionsProvider(): EmbeddingProvider {
 }
 
 /**
- * PR-B: ORG-track provider for the CLI indexer.
- * Reads ANDENKEN_ORG_* with backward-compat fallback to legacy ANDENKEN_VLLM_*.
- */
-function getOrgProvider(): EmbeddingProvider {
-  const p = createOrgProviderFromEnv();
-  if (!p) {
-    throw new Error(
-      "No org embedding provider available. Set ANDENKEN_ORG_PROVIDER (or the " +
-      "legacy ANDENKEN_PROVIDER + ANDENKEN_VLLM_*) for backward-compat.",
-    );
-  }
-  console.log(`📡 Org provider: ${p.name} (${p.dimensions}d)`);
-  return p;
-}
-
-/**
  * MD-track provider for the CLI indexer (Issue #8).
  *
  * Reads ANDENKEN_MD_* exclusively. No legacy fallback — md is a new track
@@ -488,7 +454,7 @@ function getMdProvider(): EmbeddingProvider {
  * rather than silently degrade.
  */
 function getProvider(): EmbeddingProvider {
-  throw new Error("getProvider() removed in PR-B; use getSessionsProvider() or getOrgProvider()");
+  throw new Error("getProvider() removed in PR-B; use getSessionsProvider() or getMdProvider()");
 }
 
 // --- Progress ---
@@ -554,6 +520,10 @@ async function indexSessions(force: boolean) {
   // with zero requests instead of being re-saved later.
   const ledgerAtStart = policy.pinned ? loadS0Ledger() : null;
   const provider = getSessionsProvider();
+  // No active Qwen build: refused before the store, the corpus or any request.
+  const legacyWriter = writerRefusal(provider);
+  if (legacyWriter) throw new Error(`index:sessions refused — ${legacyWriter}`);
+  return withEmbedSplit(embedSplitFor(profileOfProvider(provider)), async () => {
   const paid = (provider as { isPaidRemote?: boolean }).isPaidRemote === true;
 
   // PR-B paidRemote guard. Prevents accidental
@@ -581,7 +551,7 @@ async function indexSessions(force: boolean) {
     if (refusal) throw new Error(refusal);
   }
 
-  const store = new VectorStore(undefined, provider.dimensions || 2560);
+  const store = new VectorStore(undefined, provider.dimensions || 2560, { profile: profileOfProvider(provider) });
   await store.init();
   if (force) {
     // The reset takes the pi-durable rows too, so their checkpoint goes — FIRST.
@@ -779,6 +749,7 @@ async function indexSessions(force: boolean) {
     log: (line) => console.log(line),
     close: () => store.close(),
   });
+  });
 }
 
 // --- pi-durable snapshots (issue #15) ---
@@ -826,7 +797,10 @@ async function indexDurable(dryRun: boolean, json: boolean) {
   // getSessionsProvider() announces itself on stdout; --json keeps stdout to the report.
   const provider = json ? createSessionProviderFromEnv() : getSessionsProvider();
   if (!provider) throw new Error("No sessions embedding provider available (ANDENKEN_SESSION_*)");
-  const store = new VectorStore(undefined, provider.dimensions || 2560);
+  const legacyWriter = writerRefusal(provider);
+  if (legacyWriter) throw new Error(`index:durable refused — ${legacyWriter}`);
+  return withEmbedSplit(embedSplitFor(profileOfProvider(provider)), async () => {
+  const store = new VectorStore(undefined, provider.dimensions || 2560, { profile: profileOfProvider(provider) });
   await store.init();
   await store.ensureTable();
   await store.assertCompatibleDim();
@@ -844,6 +818,7 @@ async function indexDurable(dryRun: boolean, json: boolean) {
   } finally {
     await store.close();
   }
+  });
 }
 
 // --- MD Indexing (public garden direct embedding) ---
@@ -858,6 +833,8 @@ async function indexDurable(dryRun: boolean, json: boolean) {
 
 async function indexMd(force: boolean) {
   const provider = getMdProvider();
+  const legacyWriter = writerRefusal(provider);
+  if (legacyWriter) throw new Error(`index:md refused — ${legacyWriter}`);
 
   // PR-md2 (gpt-5.5 review #9): paid-remote gate strengthened.
   //
@@ -885,7 +862,9 @@ async function indexMd(force: boolean) {
     }
   }
 
-  const store = new VectorStore(getMdDbPath(), provider.dimensions || 4096);
+  const profile = profileOfProvider(provider);
+  const mdChunkOptions = { maxEmbedCodepoints: profile ? maxInputCodepoints(profile, "document") ?? undefined : undefined };
+  const store = new VectorStore(getMdDbPath(), provider.dimensions || 4096, { profile });
   await store.init();
   if (force) await store.reset();
   await store.ensureTable();
@@ -935,7 +914,7 @@ async function indexMd(force: boolean) {
   for (const f of suspectFiles) {
     let chunks;
     try {
-      chunks = chunkMdFile(f);
+      chunks = chunkMdFile(f, mdChunkOptions);
     } catch {
       // chunker failure is rare; fall back to treating as stale so the
       // embedding pass below produces a real error surface.
@@ -1014,7 +993,7 @@ async function indexMd(force: boolean) {
 
   const tasks = toIndex.map((file) => async () => {
     try {
-      const chunks = chunkMdFile(file);
+      const chunks = chunkMdFile(file, mdChunkOptions);
       const payloadHash = chunks.length > 0 ? computeMdPayloadHash(chunks) : undefined;
 
       let manifestEntry: { mtimeMs: number; size: number; chunks: number; payloadHash?: string } | undefined;
@@ -1083,205 +1062,6 @@ async function indexMd(force: boolean) {
   });
 }
 
-// --- Org Indexing ---
-
-async function indexOrg(force: boolean) {
-  const provider = getOrgProvider();
-  const store = new VectorStore(getOrgDbPath(), provider.dimensions || 2560);
-  await store.init();
-  if (force) await store.reset();
-  await store.ensureTable();
-
-  // PR-D safety: same guard as indexSessions. Org has its own LanceDB file
-  // (org.lance) and its own dim — refuse to write when the existing table
-  // dim doesn't match the configured provider dim.
-  await store.assertCompatibleDim();
-
-  const allFiles = findOrgFiles();
-  const files = allFiles.filter((f) => shouldIndexOrgFile(f));
-  const indexed = force ? new Set<string>() : await store.getIndexedFilesStrict();
-  let manifest = force ? { files: {}, lastUpdated: "" } as OrgFileManifest : loadManifest();
-  const hasManifest = Object.keys(manifest.files).length > 0;
-
-  // Stale detection: new files + mtime-changed files
-  const { newFiles, staleFiles } = force
-    ? { newFiles: files, staleFiles: [] as string[] }
-    : getStaleFiles(files, indexed, manifest);
-  const toIndex = [...newFiles, ...staleFiles];
-
-  // First run without manifest: initialize from all indexed files
-  if (!hasManifest && !force) {
-    console.log(`Manifest not found — initializing from ${files.length} files...`);
-    manifest = initManifest(files);
-    saveManifest(manifest);
-    console.log(`✅ Manifest initialized. Next run will detect stale files.`);
-  }
-
-  console.log(
-    `Org: ${files.length} files (${allFiles.length} total) | indexed: ${indexed.size} | new: ${newFiles.length} | stale: ${staleFiles.length} | concurrency: ${CONCURRENCY}`,
-  );
-  if (toIndex.length === 0) {
-    console.log("✅ All org files indexed and up-to-date.");
-    await store.close();
-    return;
-  }
-
-  // --- Batch stem: collect chunks first, apply hard guard, then stem in one JVM call ---
-  console.log("Collecting chunks for stem enrichment...");
-  const fileChunks: Array<{
-    file: string;
-    chunks: ReturnType<typeof chunkOrgFile>;
-    manifestEntry?: { mtimeMs: number; size: number; chunks: number; skippedOversize?: number };
-  }> = [];
-  let skippedOversizeChunks = 0;
-
-  for (const file of toIndex) {
-    const content = fs.readFileSync(file, "utf-8");
-    const rawChunks = chunkOrgFile(content, file);
-    let fileSkipped = 0;
-    const chunks = rawChunks.filter((chunk) => {
-      if (chunk.text.length <= ORG_EMBED_MAX_CHARS) return true;
-      skippedOversizeChunks++;
-      fileSkipped++;
-      console.warn(
-        `[org-embed-skip] ${file}:${chunk.lineNumber} ${chunk.chunkType} ${chunk.text.length} chars > ${ORG_EMBED_MAX_CHARS} :: ${chunk.hierarchy || chunk.metadata.title}`,
-      );
-      return false;
-    });
-
-    let manifestEntry: { mtimeMs: number; size: number; chunks: number; skippedOversize?: number } | undefined;
-    try {
-      const stat = fs.statSync(file);
-      manifestEntry = { mtimeMs: stat.mtimeMs, size: stat.size, chunks: chunks.length };
-      if (fileSkipped > 0) manifestEntry.skippedOversize = fileSkipped;
-    } catch { /* file may have been deleted */ }
-
-    fileChunks.push({ file, chunks, manifestEntry });
-  }
-
-  if (skippedOversizeChunks > 0) {
-    console.log(`⚠️  Hard guard skipped ${skippedOversizeChunks} oversize org chunks (> ${ORG_EMBED_MAX_CHARS} chars)`);
-  }
-
-  const allChunkTexts = fileChunks.flatMap(fc => fc.chunks.map(c => c.text));
-  console.log(`Stemming ${allChunkTexts.length} chunks via dictcli...`);
-  const allStems = batchStem(allChunkTexts);
-  console.log(`Stemming done.`);
-
-  // Map stems back to chunks
-  let stemIdx = 0;
-  const enrichedFileChunks = fileChunks.map(fc => ({
-    ...fc,
-    chunks: fc.chunks.map(c => {
-      const stems = allStems[stemIdx] ?? [];
-      stemIdx++;
-      return { ...c, enrichedText: enrichTextWithStems(c.text, stems) };
-    }),
-  }));
-
-  const totalChunks = enrichedFileChunks.reduce((sum, fc) => sum + fc.chunks.length, 0);
-
-  // Pre-flight cost estimate
-  const totalChars = allChunkTexts.reduce((sum, t) => sum + t.length, 0);
-  const estTokens = Math.ceil(totalChars / 2.5);
-  const estCost = (estTokens / 1_000_000) * 0.20;
-  const estBatches = Math.ceil(totalChunks / 100);
-  console.log(`💰 Pre-flight: ${totalChunks} chunks, ${estBatches} API calls, ~${(estTokens / 1000).toFixed(0)}K tokens, ~$${estCost.toFixed(3)}`);
-  if (estCost > 1.0 && provider.name !== "vllm") {
-    console.log(`⚠️  Estimated cost > $1. Use Ctrl+C to abort.`);
-    await new Promise(r => setTimeout(r, 5000)); // 5s grace period
-  }
-  provider.resetStats();
-
-  const CHECKPOINT_INTERVAL = 50;
-  let filesProcessed = 0;
-
-  const progress = new Progress(enrichedFileChunks.length, "Org");
-  const wb = new WriteBuffer(store, DB_WRITE_BATCH);
-
-  const tasks = enrichedFileChunks.map(({ file, chunks, manifestEntry }) => async () => {
-    try {
-      if (chunks.length === 0) {
-        await wb.markFile(file);
-        if (manifestEntry) {
-          manifest.files[file] = manifestEntry;
-        }
-        filesProcessed++;
-        progress.tick(0);
-        if (filesProcessed % CHECKPOINT_INTERVAL === 0) {
-          saveManifest(manifest);
-          console.log(`  📌 Manifest checkpoint at ${filesProcessed}/${enrichedFileChunks.length} files`);
-        }
-        return;
-      }
-
-      // Embed in batches — size from provider config (Gemini: 100 API limit, vLLM: larger)
-      const embedBatch = parseInt(process.env.ANDENKEN_EMBED_BATCH ?? "", 10) || 100;
-      for (let b = 0; b < chunks.length; b += embedBatch) {
-        const batch = chunks.slice(b, b + embedBatch);
-        const vectors = await provider.embedDocumentBatch(
-          batch.map((c) => c.text), // original text for vector embedding
-        );
-
-        await wb.add(
-          batch.map((c, j) => ({
-            id: c.id,
-            text: c.enrichedText, // stems-enriched text for FTS
-            vector: vectors[j],   // vector from original text
-            sessionFile: c.filePath,
-            project: c.folder,
-            lineNumber: c.lineNumber,
-            timestamp: c.metadata.date || c.metadata.identifier || "",
-            role: c.chunkType,
-            metadata: {
-              title: c.metadata.title,
-              tags: c.metadata.filetags.join(","),
-              hierarchy: c.hierarchy,
-              prefix: c.metadata.titlePrefix,
-              identifier: c.metadata.identifier,
-            },
-          })),
-        );
-      }
-      if (manifestEntry) {
-        manifest.files[file] = manifestEntry;
-      }
-      filesProcessed++;
-      progress.tick(chunks.length);
-
-      // Periodic manifest checkpoint to reduce re-work after interruption
-      if (filesProcessed % CHECKPOINT_INTERVAL === 0) {
-        saveManifest(manifest);
-        console.log(`  📌 Manifest checkpoint at ${filesProcessed}/${enrichedFileChunks.length} files`);
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[org-index-error] ${file} :: ${msg}`);
-      progress.error();
-      throw err;
-    }
-  });
-
-  const { errors: orgErrors } = await runWithConcurrency(tasks, CONCURRENCY);
-  await wb.flush(); // final flush
-  if (orgErrors > 0) {
-    throw new Error(`Org indexing failed for ${orgErrors} files`);
-  }
-
-  // Final manifest save
-  saveManifest(manifest);
-
-  try {
-    await store.createFtsIndex();
-  } catch {}
-  const total = await store.getCount();
-  const orgStats = provider.getStats();
-  console.log(progress.summary());
-  console.log(`💰 API: ${orgStats.calls} calls, ~${(orgStats.estimatedTokens / 1000).toFixed(0)}K tokens, ~$${orgStats.estimatedCostUSD.toFixed(3)}`);
-  console.log(`Total in DB: ${total}`);
-  await store.close();
-}
-
 // --- Compact ---
 
 async function compact(target: string) {
@@ -1301,7 +1081,7 @@ async function compact(target: string) {
   // export opens read-only and never compacts.
   const targets =
     target === "all"
-      ? ["sessions", "md", "org"]
+      ? ["sessions", "md"]
       : [target];
 
   for (const t of targets) {
@@ -1310,9 +1090,7 @@ async function compact(target: string) {
         ? getSessionsDbPath()
         : t === "md"
           ? getMdDbPath()
-          : t === "openclaw"
-            ? getOpenclawDbPath()
-            : getOrgDbPath();
+          : getOpenclawDbPath();
 
     if (!fs.existsSync(dbPath)) {
       console.log(`${t}: not found`);
@@ -1397,26 +1175,9 @@ interface StatusTrack {
   missing_rows?: number;
 }
 
-/**
- * Org status reads the indexed set strictly but in a catch: org is disabled and
- * status org is display only, so its read error must not fail the whole status
- * call (sessions sync Step 1, the md replica check). When the read fails the
- * five numbers that depend on it are null — unknown, never 0 and never the
- * missing-rows count an empty set would produce — and indexed_error names it.
- */
-type OrgStatusTrack = Omit<StatusTrack, "indexed_files" | "new" | "stale" | "to_index" | "missing_rows"> & {
-  indexed_files: number | null;
-  new: number | null;
-  stale: number | null;
-  to_index: number | null;
-  missing_rows?: number | null;
-  indexed_error?: string;
-};
-
 interface StatusJson {
   sessions: StatusTrack;
   md: StatusTrack;
-  org: OrgStatusTrack;
 }
 
 async function collectSessionStatus(): Promise<StatusTrack> {
@@ -1516,100 +1277,8 @@ async function collectMdStatus(): Promise<StatusTrack> {
   };
 }
 
-export type OrgIndexedRead = { ok: true; indexed: Set<string> } | { ok: false; errorName: string };
-
-/**
- * The org status numbers that depend on the indexed read. A failed read skips
- * getStaleFiles and yields null for all five: an empty set would turn every
- * entry that claims rows into a missing-rows file. The error is a fixed code
- * plus an allowlisted error class name — never the raw message.
- */
-export function orgStaleCounts(
-  files: string[],
-  read: OrgIndexedRead,
-  manifest: Parameters<typeof getStaleFiles>[2],
-): Pick<OrgStatusTrack, "indexed_files" | "new" | "stale" | "to_index" | "missing_rows" | "indexed_error"> {
-  if (!read.ok) {
-    const name = /^[A-Za-z][A-Za-z0-9]{0,39}$/.test(read.errorName) ? read.errorName : "Error";
-    return {
-      indexed_files: null,
-      new: null,
-      stale: null,
-      to_index: null,
-      missing_rows: null,
-      indexed_error: `indexed-files-read-failed (${name})`,
-    };
-  }
-  let newCount = 0;
-  let staleCount = 0;
-  let missingCount = 0;
-  if (Object.keys(manifest.files).length > 0) {
-    const { newFiles, staleFiles, missingRowFiles } = getStaleFiles(files, read.indexed, manifest);
-    newCount = newFiles.length;
-    staleCount = staleFiles.length;
-    missingCount = missingRowFiles.length;
-  }
-  return {
-    indexed_files: read.indexed.size,
-    new: newCount,
-    stale: staleCount,
-    to_index: newCount + staleCount,
-    missing_rows: missingCount,
-  };
-}
-
-async function collectOrgStatus(): Promise<OrgStatusTrack> {
-  const dbPath = getOrgDbPath();
-  const exists = fs.existsSync(dbPath);
-  let count = 0;
-  let actualDim: number | null = null;
-  let read: OrgIndexedRead = { ok: true, indexed: new Set<string>() };
-  if (exists) {
-    const store = new VectorStore(dbPath);
-    await store.init();
-    count = await store.getCount();
-    actualDim = await store.getActualVectorDim();
-    // Strict, caught here only: see OrgStatusTrack. indexOrg, the path that
-    // pays, lets the strict read throw. count/actual_dim failures are outside
-    // this catch.
-    try {
-      read = { ok: true, indexed: await store.getIndexedFilesStrict() };
-    } catch (e) {
-      read = { ok: false, errorName: e instanceof Error ? e.name : "Error" };
-    }
-    await store.close();
-  }
-  const files = findOrgFiles().filter((f) => shouldIndexOrgFile(f));
-  const manifest = loadManifest();
-  const manifestEntries = Object.keys(manifest.files).length;
-  const fileSet = new Set(files);
-  const deletedCount = Object.keys(manifest.files).filter((f) => !fileSet.has(f)).length;
-  const counts = orgStaleCounts(files, read, manifest);
-  return {
-    count,
-    files: files.length,
-    indexed_files: counts.indexed_files,
-    manifest_entries: manifestEntries,
-    new: counts.new,
-    stale: counts.stale,
-    deleted: deletedCount,
-    to_index: counts.to_index,
-    missing_rows: counts.missing_rows,
-    actual_dim: actualDim,
-    last_indexed: manifest.lastUpdated || null,
-    exists,
-    ...(counts.indexed_error ? { indexed_error: counts.indexed_error } : {}),
-  };
-}
-
-/**
- * `sv-SE` is the shortest locale that formats as `YYYY-MM-DD HH:MM:SS`; the
- * timeZone is what makes it a KST reading rather than the machine's.
- */
 function kstStamp(ms: number): string {
-	return new Date(ms)
-		.toLocaleString("sv-SE", { timeZone: "Asia/Seoul" })
-		.slice(0, 16);
+	return new Date(ms).toLocaleString("sv-SE", { timeZone: "Asia/Seoul" }).slice(0, 16);
 }
 
 async function status() {
@@ -1620,17 +1289,14 @@ async function status() {
   // text and json modes).
   let sessionsProviderDim: number | undefined;
   let mdProviderDim: number | undefined;
-  let orgProviderDim: number | undefined;
   try { sessionsProviderDim = createSessionProviderFromEnv()?.dimensions; } catch { /* swallow */ }
   try { mdProviderDim = createMdProviderFromEnv()?.dimensions; } catch { /* swallow */ }
-  try { orgProviderDim = createOrgProviderFromEnv()?.dimensions; } catch { /* swallow */ }
 
   const sessions = await collectSessionStatus();
   const md = await collectMdStatus();
-  const org = await collectOrgStatus();
 
   if (json) {
-    const payload: StatusJson = { sessions, md, org };
+    const payload: StatusJson = { sessions, md };
     console.log(JSON.stringify(payload, null, 2));
     return;
   }
@@ -1714,40 +1380,6 @@ async function status() {
     console.log("📝 MD: not indexed yet");
   }
 
-  if (org.exists) {
-    const orgDbPath = getOrgDbPath();
-    const oSize = execSync(`du -sh ${orgDbPath}`).toString().split("\t")[0];
-    const oFragDir = path.join(orgDbPath, "session_chunks.lance", "data");
-    const oFrags = fs.existsSync(oFragDir) ? fs.readdirSync(oFragDir).length : 0;
-    const oDimLabel = org.actual_dim
-      ? `${org.actual_dim}d`
-      : orgProviderDim
-        ? `empty, provider=${orgProviderDim}d`
-        : "empty";
-    console.log(
-      `📚 Org (${oDimLabel}): ${org.count} chunks | ${org.indexed_files ?? "?"}/${org.files} files | ${oFrags} data files | ${oSize}`,
-    );
-    if (org.actual_dim && orgProviderDim && org.actual_dim !== orgProviderDim) {
-      console.log(
-        `   ⚠ org provider dim=${orgProviderDim}d differs from DB dim=${org.actual_dim}d — search/index paths will refuse until rebuild or config fix`,
-      );
-    }
-    if (org.indexed_error) {
-      console.log(
-        `   ⚠ org ${org.indexed_error} — new/stale/to-index unknown | manifest: ${org.manifest_entries} entries | deleted: ${org.deleted}`,
-      );
-    } else {
-      console.log(
-        `   ↳ manifest: ${org.manifest_entries} entries | new: ${org.new} | stale: ${org.stale}${org.missing_rows ? ` (missing rows: ${org.missing_rows})` : ""} | deleted: ${org.deleted} | to-index: ${org.to_index}`,
-      );
-    }
-    if (org.last_indexed) {
-      console.log(`   ↳ last indexed: ${org.last_indexed}`);
-    }
-  } else {
-    console.log("📚 Org: not indexed (track currently disabled in production — upstream R&D only)");
-  }
-
   // OpenClaw harvest. Reported here because `status` is the surface an operator
   // calls daily, and an axis missing from it is an axis whose freshness nobody
   // can ask about — a cross-review on 2026-09-03 asked exactly that and came
@@ -1823,15 +1455,13 @@ async function cleanup(target: string) {
   const dryRun = process.argv.includes("--dry-run");
   const lancedb = await import("@lancedb/lancedb");
 
-  const targets = target === "all" ? ["sessions", "md", "org"] : [target];
+  const targets = target === "all" ? ["sessions", "md"] : [target];
 
   for (const t of targets) {
     const dbPath =
       t === "sessions"
         ? getSessionsDbPath()
-        : t === "md"
-          ? getMdDbPath()
-          : getOrgDbPath();
+        : getMdDbPath();
     if (!fs.existsSync(dbPath)) { console.log(`${t}: not found`); continue; }
 
     const sizeBefore = execSync(`du -sh ${dbPath}`).toString().split("\t")[0];
@@ -1915,13 +1545,10 @@ async function cleanup(target: string) {
       }
     }
 
-    // 5. Manifest repair (org / md)
-    if (t === "org" || t === "md") {
-      const isOrg = t === "org";
-      const manifest = isOrg ? loadManifest() : loadMdManifest();
-      const trackedFiles = isOrg
-        ? findOrgFiles().filter((f) => shouldIndexOrgFile(f))
-        : findMdFiles();
+    // 5. MD manifest repair
+    if (t === "md") {
+      const manifest = loadMdManifest();
+      const trackedFiles = findMdFiles();
       const fileSet = new Set(trackedFiles);
       let repaired = 0;
 
@@ -1941,7 +1568,7 @@ async function cleanup(target: string) {
       await probe.init();
       const actualDim = await probe.getActualVectorDim();
       await probe.close();
-      const store = new VectorStore(dbPath, actualDim ?? (isOrg ? 2560 : 4096));
+      const store = new VectorStore(dbPath, actualDim ?? 4096);
       await store.init();
       const indexed = await store.getIndexedFiles();
       for (const f of trackedFiles) {
@@ -1956,8 +1583,7 @@ async function cleanup(target: string) {
       await store.close();
 
       if (repaired > 0) {
-        if (isOrg) saveManifest(manifest);
-        else saveMdManifest(manifest);
+        saveMdManifest(manifest);
         console.log(`Manifest repaired: ${repaired} entries fixed`);
       }
     }
@@ -1983,6 +1609,16 @@ async function cleanup(target: string) {
 }
 
 // --- Verify: post-indexing integrity check ---
+
+async function probeRowCount(dbPath: string): Promise<number> {
+  const s = new VectorStore(dbPath, undefined, { readOnly: true });
+  try {
+    await s.init();
+    return await s.getCount();
+  } finally {
+    await s.close();
+  }
+}
 
 async function verify(target: string, opts: { requireFts?: boolean } = {}) {
   const { execSync } = await import("node:child_process");
@@ -2012,17 +1648,17 @@ async function verify(target: string, opts: { requireFts?: boolean } = {}) {
       if (t === "md") return createMdProviderFromEnv()?.dimensions;
       // The openclaw axis is not embedded here, so "configured" means the
       // provider a QUERY would use — sessions, by design (store.ts).
-      if (t === "openclaw") return createSessionProviderFromEnv()?.dimensions;
-      return createOrgProviderFromEnv()?.dimensions;
+      if (t === "openclaw") return (createOpenclawQueryProviderFromEnv() ?? createSessionProviderFromEnv())?.dimensions;
+      return undefined;
     } catch {
       return undefined;
     }
   };
 
-  // `all` deliberately stays sessions/md/org: it is what scripts call after an
+  // `all` deliberately stays sessions/md: it is what scripts call after an
   // indexing run, and openclaw is never written by one. Ask for it by name.
-  const KNOWN_TARGETS = ["sessions", "md", "org", "openclaw"];
-  const targets = target === "all" ? ["sessions", "md", "org"] : [target];
+  const KNOWN_TARGETS = ["sessions", "md", "openclaw"];
+  const targets = target === "all" ? ["sessions", "md"] : [target];
   for (const t of targets) {
     if (!KNOWN_TARGETS.includes(t)) {
       // It used to fall through to org. `verify openclaw` printed org's 44,916
@@ -2040,9 +1676,7 @@ async function verify(target: string, opts: { requireFts?: boolean } = {}) {
         ? getSessionsDbPath()
         : t === "md"
           ? getMdDbPath()
-          : t === "openclaw"
-            ? getOpenclawDbPath()
-            : getOrgDbPath();
+          : getOpenclawDbPath();
     if (!fs.existsSync(dbPath)) {
       console.log(`${t}: not found`);
       if (opts.requireFts) { console.log(`  ❌ FTS-required: ${dbPath} does not exist`); allPassed = false; }
@@ -2083,13 +1717,40 @@ async function verify(target: string, opts: { requireFts?: boolean } = {}) {
       configuredDim &&
       actualDim !== configuredDim
     ) {
-      // Don't fail verify on this — verify is meant to run after rebuilds and
-      // should report on the DB state. A configured/actual delta means the
-      // operator's env doesn't match the DB they just rebuilt; surface it
-      // loudly but let other checks complete.
-      console.log(
-        `  ⚠ provider dim=${configuredDim}d differs from DB dim=${actualDim}d — search/index paths will refuse until rebuild or config fix`,
-      );
+      if (t === "sessions" || t === "md") {
+        // Strict for the live embedding tracks: a configured/stored delta means
+        // every search and index path will refuse this store, so "verified" would
+        // be a false statement. The remaining checks still run and report.
+        fail(`provider dim=${configuredDim}d differs from DB dim=${actualDim}d — the configured generation cannot use this store`);
+      } else {
+        // openclaw (query side, deferred) and org keep the old warning.
+        console.log(
+          `  ⚠ provider dim=${configuredDim}d differs from DB dim=${actualDim}d — search/index paths will refuse until rebuild or config fix`,
+        );
+      }
+    }
+    if (t === "sessions" || t === "md") {
+      // Generation identity (embedding-profile.ts): same dimension is not same
+      // model. Report the stamp, and fail when the configured provider's
+      // generation is not this store's.
+      const stamp = readStoreStamp(dbPath);
+      if (stamp.state === "ok") pass(`Generation stamp: ${stamp.stamp.profileId} (${stamp.stamp.fingerprint.slice(0, 12)}…, ${stamp.stamp.dimensions}d)`);
+      else if (stamp.state === "absent") pass(`Generation stamp: none (pre-stamp store; only the legacy 4096d profile may use it)`);
+      else fail(`Generation stamp unreadable: ${stampPath(dbPath)}`);
+      let provider: EmbeddingProvider | null = null;
+      try {
+        provider = t === "sessions" ? createSessionProviderFromEnv() : createMdProviderFromEnv();
+      } catch {
+        provider = null;
+      }
+      if (!provider) {
+        fail(`no ${t} provider configured — the store's generation cannot be confirmed for use`);
+      } else {
+        const rowsForGen = await probeRowCount(dbPath);
+        const gen = decideStoreAccess(dbPath, profileOfProvider(provider), rowsForGen, actualDim ?? null);
+        if (gen.ok) pass(`Configured generation may use this store (${gen.basis})`);
+        else fail(`Configured generation refused: ${gen.code}`);
+      }
     }
 
     const store = new VectorStore(dbPath, dim, { readOnly });
@@ -2125,6 +1786,29 @@ async function verify(target: string, opts: { requireFts?: boolean } = {}) {
     if (allRows.length === count) pass(`Row count consistent: ${count.toLocaleString()}`);
     else fail(`Row count mismatch: query=${allRows.length} vs count=${count}`);
 
+    // 3b. Vector sample (sessions/md): stored dim, finite, non-zero. A sample,
+    // not a census — it catches a generation written by an unvalidated path.
+    if (t === "sessions" || t === "md") {
+      const SAMPLE = 2000;
+      const sample = await table.query().select(["vector"]).limit(SAMPLE).toArray();
+      let bad = 0;
+      for (const r of sample) {
+        // LanceDB hands back an Arrow vector; index access needs a plain array.
+        const raw = r.vector as { toArray?: () => ArrayLike<number> } | ArrayLike<number> | null;
+        const v: ArrayLike<number> | null =
+          raw && typeof (raw as { toArray?: unknown }).toArray === "function"
+            ? (raw as { toArray: () => ArrayLike<number> }).toArray()
+            : (raw as ArrayLike<number> | null);
+        if (!v || v.length !== dim) { bad++; continue; }
+        let sq = 0;
+        let finite = true;
+        for (let i = 0; i < v.length; i++) { const x = v[i]; if (!Number.isFinite(x)) { finite = false; break; } sq += x * x; }
+        if (!finite || !(sq > 0)) bad++;
+      }
+      if (bad === 0) pass(`Vector sample ok (${sample.length} rows: ${dim}d, finite, non-zero)`);
+      else fail(`${bad} of ${sample.length} sampled vectors are wrong-dim, non-finite or zero`);
+    }
+
     // 4. Physical size report (data files, not logical fragments; see table-shape.ts)
     const fragDir = path.join(dbPath, "session_chunks.lance", "data");
     const frags = fs.existsSync(fragDir) ? fs.readdirSync(fragDir).length : 0;
@@ -2140,30 +1824,6 @@ async function verify(target: string, opts: { requireFts?: boolean } = {}) {
       if (ftsReady(h)) pass(line);
       else if (opts.requireFts) fail(`${line} — FTS-required`);
       else console.log(`  ⚠ ${line} (not required here; search serves the vector leg with degraded=true)`);
-    }
-
-    // 5. Org-specific: manifest consistency
-    if (t === "org") {
-      const manifest = loadManifest();
-      const mEntries = Object.keys(manifest.files).length;
-      const oFiles = findOrgFiles().filter(f => shouldIndexOrgFile(f));
-      const oFileSet = new Set(oFiles);
-
-      // Deleted in manifest
-      const mDeleted = Object.keys(manifest.files).filter(f => !oFileSet.has(f));
-      if (mDeleted.length === 0) pass(`Manifest clean: no deleted entries`);
-      else fail(`${mDeleted.length} deleted files in manifest`);
-
-      // Ghost zone: indexed but not in manifest
-      const ghosts = oFiles.filter(f => indexed.has(f) && !manifest.files[f]);
-      if (ghosts.length === 0) pass(`No ghost zone (all indexed files in manifest)`);
-      else fail(`${ghosts.length} ghost zone files (indexed, not in manifest)`);
-
-      // 0-chunk noise: manifest has file, LanceDB doesn't
-      const zeroChunkNoise = oFiles.filter(f => !indexed.has(f) && manifest.files[f]?.chunks === 0);
-      pass(`0-chunk files: ${zeroChunkNoise.length} (not in DB, expected)`);
-
-      console.log(`  📊 manifest: ${mEntries} | indexed: ${indexed.size} | disk: ${oFiles.length}`);
     }
 
     await store.close();
@@ -2250,10 +1910,19 @@ async function estimate(target: string) {
   let heldChunks = 0;
   let heldChars = 0;
   let conflictFiles = 0;
+  // A profiled sessions generation splits to fit its window (embedding-profile.ts);
+  // estimate under the same split so its chunk count is the one that would be sent.
+  let estSplit: ReturnType<typeof embedSplitFor>;
+  try {
+    const p = createSessionProviderFromEnv();
+    estSplit = p ? embedSplitFor(profileOfProvider(p)) : undefined;
+  } catch {
+    estSplit = undefined;
+  }
   for (const f of filesToEstimate) {
     try {
       // Same per-policy extractor indexSessions sends from; legacy is unchanged.
-      const { send: chunks, held } = await extractForPolicy(f, policy, corpus);
+      const { send: chunks, held } = await withEmbedSplit(estSplit, () => extractForPolicy(f, policy, corpus));
       totalChunks += chunks.length;
       for (const c of chunks) totalChars += c.text.length;
       heldChunks += held.length;
@@ -2541,9 +2210,9 @@ if (isDirectInvocation) {
       }
       break;
     case "org":
-      await indexOrg(force);
-      break;
+      throw new Error("org indexing is retired");
     case "compact":
+      if (args[1] && !["all", "sessions", "md", "openclaw"].includes(args[1])) throw new Error("compact: invalid target");
       if (args[1] === "openclaw") {
         // Our own harvest store: the authority writes it, under the harvest lock
         // that import, prune, FTS bootstrap and publish take (openclaw-lock.ts).
@@ -2561,13 +2230,14 @@ if (isDirectInvocation) {
       else await compact(args[1] ?? "all");
       break;
     case "cleanup":
-      if (touchesSessions(args[1] ?? "org") && !dryRun) {
+      if (!args[1] || !["sessions", "md", "all"].includes(args[1])) throw new Error("cleanup: explicit sessions, md or all target required");
+      if (touchesSessions(args[1]) && !dryRun) {
         await withSessionsLock(`cleanup ${args[1]}`, () => {
           sessionsMaintenanceGate("cleanup");
-          return cleanup(args[1] ?? "org");
+          return cleanup(args[1]);
         });
       }
-      else await cleanup(args[1] ?? "org");
+      else await cleanup(args[1]);
       break;
     case "verify": {
       const rest = args.slice(2);

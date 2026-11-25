@@ -23,6 +23,17 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."   # repo root
 
+# --- RETIRED 2026-11-25 ---
+# This was the in-place Qwen3-Embedding-8B 4096d (OpenRouter, paid) full
+# rebuild of data/sessions.lance. MD + sessions have no active Qwen build: the
+# 4096d store is the preserved legacy generation (read-only, rollback). A new
+# generation is built into a FRESH target by candidate:sessions:plan/build
+# (ollama-bge-m3-1024). Refused before estimate, gather, lock, key or API.
+echo "❌ refused: scripts/rebuild-sessions-full.sh is retired (in-place Qwen 4096d paid rebuild)." >&2
+echo "   Use ./run.sh candidate:sessions:plan / candidate:sessions:build (ollama-bge-m3-1024, fresh target)." >&2
+echo "   Nothing was estimated, gathered, written or requested (API 0)." >&2
+exit 2
+
 # --- corpus root: resolve from ~/.env.local when the caller did not export it ---
 # `./run.sh` load_env's the file first, but a direct invocation (or a systemd
 # unit) does not — and an unset corpus root silently falls back to this
