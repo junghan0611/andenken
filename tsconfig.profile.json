@@ -6,7 +6,7 @@
   },
   "include": [
     "embedding-profile.ts", "embedding-provider.ts", "model-presets.ts", "store.ts", "md-chunker.ts", "session-indexer.ts",
-    "embedding-profile.test.ts"
+    "embedding-profile.test.ts", "scripts/attest-query.ts", "scripts/profile-preflight.ts"
   ],
   "exclude": ["node_modules"]
 }

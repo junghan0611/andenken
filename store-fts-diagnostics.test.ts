@@ -4,9 +4,10 @@
  * rows, and an optional observer learns once per call whether 0 rows means
  * "nothing matched" or "the leg did not work".
  *
- * API 0, network 0. Synthetic temp LanceDB tables with fixed 4d vectors, pure
- * mocks for native failures and broken rows, and one `cli.ts search-sessions
- * --mode recent` child (no embedding call) against a synthetic store.
+ * API 0, network 0. Synthetic temp LanceDB tables with fixed 4d vectors (no
+ * generation), pure mocks for native failures and broken rows, and one `cli.ts
+ * search-sessions --mode recent` child (no embedding call) against a synthetic
+ * store stamped for ollama-bge-m3-1024.
  */
 
 import * as fs from "node:fs";
@@ -16,6 +17,7 @@ import { spawnSync } from "node:child_process";
 import { VectorStore, StoreRowDecodeError } from "./store.ts";
 import { FtsDiagnosticsCollector, attachFtsReport, ftsNote, ftsRequestReport, type FtsDiagnostic } from "./fts-diagnostics.ts";
 import { searchMdCore } from "./md-search.ts";
+import { DEAD_ENDPOINT, DIM, PROFILE, isolatedEnv, profileEnv, vec } from "./test-support-generation.ts";
 
 let passed = 0;
 let failed = 0;
@@ -47,13 +49,17 @@ const row = (id: string, text: string, vector: number[]) => ({
   id, text, vector, sessionFile: "/synthetic/a.jsonl", project: "synthetic",
   lineNumber: 1, timestamp: "2026-10-15T00:00:00Z", role: "user", source: "pi", metadata: {},
 });
-async function syntheticStore(name: string, withFts: boolean): Promise<VectorStore> {
-  const store = new VectorStore(path.join(tmp, name, "sessions.lance"), 4);
+/** `stamped` = a real generation store (1024d, v2 stamp) for a CLI that checks the generation. */
+async function syntheticStore(name: string, withFts: boolean, stamped = false): Promise<VectorStore> {
+  const store = stamped
+    ? new VectorStore(path.join(tmp, name, "sessions.lance"), DIM, { profile: PROFILE })
+    : new VectorStore(path.join(tmp, name, "sessions.lance"), 4);
+  const v = (...h: number[]) => (stamped ? vec(...h) : h);
   await store.ensureTable();
   await store.addChunks([
-    row("a", "zebra crossing synthetic alpha", [1, 0, 0, 0]),
-    row("b", "quantum lattice synthetic beta", [0, 1, 0, 0]),
-    row("c", "harbor lighthouse synthetic gamma", [0, 0, 1, 0]),
+    row("a", "zebra crossing synthetic alpha", v(1, 0, 0, 0)),
+    row("b", "quantum lattice synthetic beta", v(0, 1, 0, 0)),
+    row("c", "harbor lighthouse synthetic gamma", v(0, 0, 1, 0)),
   ]);
   if (withFts) await store.createFtsIndex();
   return store;
@@ -264,24 +270,15 @@ try {
     attachFtsReport(pi3, ftsRequestReport(error), { fts: "knowledge" });
     eq(pi3.content[0].text, "## 1. hit\n\n(⚠ knowledge full-text (BM25) leg error: query-failed; results come from the other legs only)", "pi knowledge_search: one fixed-vocabulary note");
 
-    // CLI: --mode recent never runs FTS. Synthetic store, isolated HOME, no embedding call.
-    await (await syntheticStore("cli", true)).close();
+    // CLI: --mode recent never runs FTS. Synthetic stamped store, isolated HOME, no embedding call.
+    await (await syntheticStore("cli", true, true)).close();
     const home = path.join(tmp, "home");
     fs.mkdirSync(home, { mode: 0o700 });
     const cli = spawnSync(TSX, [path.join(repo, "cli.ts"), "search-sessions", "anything", "--mode", "recent", "--project", "synthetic", "--limit", "2"], {
       cwd: repo,
       encoding: "utf-8",
       timeout: 60_000,
-      env: {
-        PATH: process.env.PATH ?? "",
-        HOME: home,
-        ANDENKEN_DATA: path.join(tmp, "cli"),
-        ANDENKEN_SESSION_PROVIDER: "vllm",
-        ANDENKEN_SESSION_ENDPOINT: "http://127.0.0.1:9",
-        ANDENKEN_SESSION_MODEL: "stub-model",
-        ANDENKEN_SESSION_DIMENSIONS: "4",
-        ANDENKEN_DISABLE_RECALL_TRACKING: "1",
-      },
+      env: isolatedEnv(home, { ANDENKEN_DATA: path.join(tmp, "cli"), ...profileEnv("SESSION", DEAD_ENDPOINT) }),
     });
     let json: { degraded?: boolean; diagnostics?: { fts?: unknown }; count?: number } = {};
     try {

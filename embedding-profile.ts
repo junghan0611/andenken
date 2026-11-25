@@ -9,7 +9,7 @@
  * profile-aware writer carries a stamp of that profile.
  *
  * What lives here, all API 0:
- *   - the known profiles (current 4096d production, local Ollama BGE-M3 1024d,
+ *   - the known profiles (local Ollama BGE-M3 1024d,
  *     OpenRouter BGE-M3 1024d for documents produced on another host)
  *   - a fingerprint over the fields that decide vector geometry
  *   - strict validation of an OpenAI-compatible /v1/embeddings response
@@ -51,15 +51,10 @@ export interface EmbeddingProfile {
 	/** "loopback" profiles refuse any endpoint that is not 127.0.0.1/::1/localhost. */
 	endpointClass: "loopback" | "hosted";
 	paidRemote: boolean;
-	/** Fixed endpoint for loopback profiles (the runtime contract). */
+	/** Default endpoint for loopback profiles (the runtime contract). */
 	endpoint?: string;
-	/**
-	 * True only for the profile that produced the stores that existed before
-	 * stamps did. An unstamped non-empty 4096d store is accepted as this
-	 * profile — and only this one. Existing stores are never stamped
-	 * retroactively by this module.
-	 */
-	legacyUnstamped?: boolean;
+	/** Who computes the vectors: the runtime / API provider. Part of the fingerprint. */
+	provider: "ollama" | "openrouter";
 	/**
 	 * Tokenizer bound used by `maxInputCodepoints`: tokens ≤ NFKC code points
 	 * + this overhead (specials + the sentencepiece leading "▁"). Holds for
@@ -70,26 +65,12 @@ export interface EmbeddingProfile {
 	tokenOverhead: number | null;
 }
 
-const QWEN_QUERY_INSTRUCTION =
-	"Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery: ";
-
+/**
+ * The ONLY generations current code knows (2026-11-25: Qwen / 4096d are not
+ * known here at all; an earlier generation is restored with its own code,
+ * configuration and data together, never read by this code).
+ */
 export const PROFILES: Readonly<Record<string, EmbeddingProfile>> = Object.freeze({
-	"openrouter-qwen3-8b-4096": {
-		id: "openrouter-qwen3-8b-4096",
-		family: "qwen3-embedding-8b",
-		model: "qwen/qwen3-embedding-8b",
-		digest: null,
-		dimensions: 4096,
-		maxInputTokens: 32768,
-		maxBatchSize: 100,
-		timeoutMs: 30_000,
-		queryInstruction: QWEN_QUERY_INSTRUCTION,
-		documentInstruction: "",
-		endpointClass: "hosted",
-		paidRemote: true,
-		legacyUnstamped: true,
-		tokenOverhead: null,
-	},
 	// Runtime contract from nixos-config: Ollama 0.32.3, /v1 on loopback
 	// 127.0.0.1:11435, bge-m3:latest at this digest, ctx 2048, batch ≤ 4, 30 s.
 	"ollama-bge-m3-1024": {
@@ -104,13 +85,15 @@ export const PROFILES: Readonly<Record<string, EmbeddingProfile>> = Object.freez
 		queryInstruction: "",
 		documentInstruction: "",
 		endpointClass: "loopback",
+		provider: "ollama",
 		paidRemote: false,
 		endpoint: "http://127.0.0.1:11435",
 		tokenOverhead: 3,
 	},
-	// Documents embedded on another host (Oracle OpenClaw). Same family as the
-	// local profile, DIFFERENT profile: query vectors from Ollama are not
-	// accepted against these until an isolated parity test is recorded.
+	// Documents embedded on another host (Oracle OpenClaw, its producer only).
+	// Same family as the local profile, DIFFERENT generation: Ollama query
+	// vectors are accepted against these only through an explicit, human-made
+	// query-compatibility attestation on the store (see below).
 	"openrouter-bge-m3-1024": {
 		id: "openrouter-bge-m3-1024",
 		family: "bge-m3",
@@ -123,10 +106,29 @@ export const PROFILES: Readonly<Record<string, EmbeddingProfile>> = Object.freez
 		queryInstruction: "",
 		documentInstruction: "",
 		endpointClass: "hosted",
+		provider: "openrouter",
 		paidRemote: true,
 		tokenOverhead: 3,
 	},
 });
+
+/**
+ * The OpenClaw harvest generation. OpenClaw (Oracle) embeds its own agents'
+ * memory with OpenRouter `baai/bge-m3`; the harvest imports those vectors as
+ * they are, so this is the profile the harvest store is stamped with and the
+ * profile any OpenClaw QUERY vector must belong to.
+ */
+export const OPENCLAW_PROFILE: EmbeddingProfile = PROFILES["openrouter-bge-m3-1024"];
+
+/**
+ * What OpenClaw's own `memory_index_meta_v1` must say for an agent's vectors to
+ * belong to OPENCLAW_PROFILE. Literal producer strings, measured read-only on
+ * Oracle 2026-11-25 (6/6 agents): model "baai/bge-m3", provider "openai" (the
+ * producer's client label, kept as written — not our endpoint identity),
+ * vectorDims 1024. An agent whose meta differs is a different generation and
+ * the import refuses it.
+ */
+export const OPENCLAW_PRODUCER = Object.freeze({ model: "baai/bge-m3", provider: "openai", vectorDims: 1024 });
 
 export function getProfile(id: string): EmbeddingProfile | null {
 	return Object.prototype.hasOwnProperty.call(PROFILES, id) ? PROFILES[id] : null;
@@ -135,7 +137,8 @@ export function getProfile(id: string): EmbeddingProfile | null {
 /** Fields that decide vector geometry. Batch, timeout and price do not. */
 export function profileFingerprint(p: EmbeddingProfile): string {
 	const canonical = JSON.stringify([
-		"andenken-embedding-profile-v1",
+		"andenken-embedding-profile-v2",
+		p.provider,
 		p.endpointClass,
 		p.model,
 		p.digest,
@@ -343,31 +346,60 @@ export async function verifyRuntimeIdentity(
 }
 
 // ---------------------------------------------------------------------------
-// Store stamp
+// Store stamp (v2: provider / revision / preprocess)
 // ---------------------------------------------------------------------------
 
 export const STAMP_FILE = "andenken-profile.json";
-export const STAMP_KIND = "andenken-store-profile-v1";
+export const STAMP_KIND = "andenken-store-profile-v2";
+
+/** Text preparation that shaped the stored vectors. */
+export interface StampPreprocess {
+	queryInstruction: string;
+	documentInstruction: string;
+	/** The split policy the writer used (null = the store's producer split, e.g. a harvest). */
+	split: { target: number; maxCodepoints: number } | null;
+}
+
+/**
+ * For a HARVEST store: what the producer (OpenClaw) says it embedded with, per
+ * its own exported meta, and the per-agent revision last imported.
+ */
+export interface StampProducer {
+	kind: "openclaw-harvest";
+	model: string;
+	provider: string;
+	vectorDims: number;
+	/** Per agent: OpenClaw's memory_index_state revision last imported (an index revision, not a model revision). */
+	revisions: Record<string, string | number | null>;
+	/** Per agent: OpenClaw's chunkingVersion last imported. */
+	chunkingVersions?: Record<string, number | null>;
+}
 
 export interface StoreStamp {
 	kind: typeof STAMP_KIND;
 	profileId: string;
 	fingerprint: string;
+	provider: string;
 	model: string;
+	/** Runtime revision: the weight digest when the runtime exposes one. */
 	digest: string | null;
 	dimensions: number;
+	preprocess: StampPreprocess;
+	producer?: StampProducer;
 	createdAt: string;
 }
 
 /**
  * The stamp lives INSIDE the LanceDB directory so every copy of the store
- * (rsync publish, backup, candidate promotion) carries it with the rows.
+ * (rsync, backup, candidate promotion) carries it with the rows.
  */
 export function stampPath(dbPath: string): string {
 	return path.join(dbPath, STAMP_FILE);
 }
 
 export type StampRead = { state: "absent" } | { state: "ok"; stamp: StoreStamp } | { state: "invalid" };
+
+const isStr = (v: unknown): v is string => typeof v === "string";
 
 export function readStoreStamp(dbPath: string): StampRead {
 	let raw: string;
@@ -379,15 +411,24 @@ export function readStoreStamp(dbPath: string): StampRead {
 	}
 	try {
 		const s = JSON.parse(raw) as Partial<StoreStamp>;
+		const pre = s.preprocess as Partial<StampPreprocess> | undefined;
+		const prod = s.producer as Partial<StampProducer> | undefined;
 		if (
 			s.kind !== STAMP_KIND ||
-			typeof s.profileId !== "string" ||
-			typeof s.fingerprint !== "string" ||
+			!isStr(s.profileId) ||
+			!isStr(s.fingerprint) ||
 			!/^[0-9a-f]{64}$/.test(s.fingerprint) ||
-			typeof s.model !== "string" ||
-			!(s.digest === null || typeof s.digest === "string") ||
+			!isStr(s.provider) ||
+			!isStr(s.model) ||
+			!(s.digest === null || isStr(s.digest)) ||
 			!Number.isInteger(s.dimensions) ||
-			(s.dimensions as number) <= 0
+			(s.dimensions as number) <= 0 ||
+			!pre ||
+			!isStr(pre.queryInstruction) ||
+			!isStr(pre.documentInstruction) ||
+			!(pre.split === null || (typeof pre.split === "object" && Number.isInteger(pre.split?.target) && Number.isInteger(pre.split?.maxCodepoints))) ||
+			(prod !== undefined &&
+				(prod.kind !== "openclaw-harvest" || !isStr(prod.model) || !isStr(prod.provider) || prod.vectorDims !== s.dimensions || typeof prod.revisions !== "object" || prod.revisions === null))
 		) {
 			return { state: "invalid" };
 		}
@@ -397,37 +438,66 @@ export function readStoreStamp(dbPath: string): StampRead {
 	}
 }
 
-export function makeStamp(p: EmbeddingProfile, now: Date = new Date()): StoreStamp {
+export function makeStamp(p: EmbeddingProfile, producer?: StampProducer, now: Date = new Date()): StoreStamp {
+	const split = embedSplitFor(p);
 	return {
 		kind: STAMP_KIND,
 		profileId: p.id,
 		fingerprint: profileFingerprint(p),
+		provider: p.provider,
 		model: p.model,
 		digest: p.digest,
 		dimensions: p.dimensions,
+		preprocess: {
+			queryInstruction: p.queryInstruction,
+			documentInstruction: p.documentInstruction,
+			split: producer ? null : split ? { target: split.target, maxCodepoints: split.maxCodepoints } : null,
+		},
+		...(producer ? { producer } : {}),
 		createdAt: now.toISOString(),
 	};
 }
 
+function writeJsonAtomic(file: string, value: unknown): void {
+	const tmp = `${file}.tmp-${process.pid}`;
+	fs.writeFileSync(tmp, JSON.stringify(value, null, 2) + "\n", { mode: 0o644 });
+	fs.renameSync(tmp, file);
+}
+
 /**
  * Stamp a store. Refuses to overwrite a stamp of a different profile, and
- * refuses to stamp a store that already holds rows (`rowsBefore > 0`) with no
- * stamp — that would launder an unknown generation into a known one. Atomic
- * (write tmp + rename). The directory must already exist (a writer created it).
+ * refuses to stamp a store that already holds rows without one — that would
+ * launder an unknown generation into a known one. A harvest writer passes its
+ * `producer`: model / provider / dims must match the existing stamp's, and the
+ * per-agent revisions are merged. Atomic (tmp + rename). The directory must
+ * already exist (a writer created it).
  */
-export function writeStoreStamp(dbPath: string, p: EmbeddingProfile, rowsBefore: number): StoreStamp {
+export function writeStoreStamp(dbPath: string, p: EmbeddingProfile, rowsBefore: number, producer?: StampProducer): StoreStamp {
 	const cur = readStoreStamp(dbPath);
 	if (cur.state === "invalid") throw new StoreProfileRefused("store-stamp-invalid");
 	if (cur.state === "ok") {
 		if (cur.stamp.fingerprint !== profileFingerprint(p)) throw new StoreProfileRefused("store-profile-mismatch");
-		return cur.stamp;
+		if (!producer) return cur.stamp;
+		const old = cur.stamp.producer;
+		if (!old) throw new StoreProfileRefused("store-producer-missing");
+		if (old.model !== producer.model || old.provider !== producer.provider || old.vectorDims !== producer.vectorDims) {
+			throw new StoreProfileRefused("store-producer-mismatch");
+		}
+		const next: StoreStamp = {
+			...cur.stamp,
+			producer: {
+				...old,
+				revisions: { ...old.revisions, ...producer.revisions },
+				chunkingVersions: { ...(old.chunkingVersions ?? {}), ...(producer.chunkingVersions ?? {}) },
+			},
+		};
+		writeJsonAtomic(stampPath(dbPath), next);
+		return next;
 	}
 	if (rowsBefore > 0) throw new StoreProfileRefused("store-unstamped-has-rows");
 	if (!fs.existsSync(dbPath)) throw new StoreProfileRefused("store-dir-missing");
-	const stamp = makeStamp(p);
-	const tmp = `${stampPath(dbPath)}.tmp-${process.pid}`;
-	fs.writeFileSync(tmp, JSON.stringify(stamp, null, 2) + "\n", { mode: 0o644 });
-	fs.renameSync(tmp, stampPath(dbPath));
+	const stamp = makeStamp(p, producer);
+	writeJsonAtomic(stampPath(dbPath), stamp);
 	return stamp;
 }
 
@@ -438,76 +508,171 @@ export class StoreProfileRefused extends Error {
 	}
 }
 
-export type StoreProfileDecision =
-	| { ok: true; basis: "stamp" | "legacy-unstamped" | "empty-store" }
-	| { ok: false; code: string };
+// ---------------------------------------------------------------------------
+// Query-compatibility attestation (human-made, query side only)
+// ---------------------------------------------------------------------------
+
+export const ATTEST_FILE = "andenken-query-attestation.json";
+export const ATTEST_KIND = "andenken-query-attestation-v1";
 
 /**
- * May vectors of profile `p` be written to / queried against this store?
- *
- *   stamp present  → fingerprints must be equal (same model, digest, dim, instructions)
- *   stamp invalid  → refuse
- *   no stamp, no rows (or no store) → allowed; a writer must stamp it on creation
- *   no stamp, rows → allowed ONLY for the `legacyUnstamped` profile at its
- *                    dimension; anything else is an unknown generation
- *
- * `storedDim` is the sampled vector dimension (null when the store is empty or
- * absent), `rows` the row count (0 when absent).
+ * A human's recorded judgment that vectors of `queryProfile` may query a store
+ * of another generation (e.g. local Ollama BGE-M3 queries against OpenRouter
+ * BGE-M3 documents). Equal dimension is never this evidence: the attestation
+ * names the exact store fingerprint, the exact query fingerprint and the
+ * evidence refs (parity measurement, user acceptance). It lives in the store
+ * directory, travels with it, and never applies to WRITES.
  */
-export function decideStoreProfile(
-	dbPath: string,
-	p: EmbeddingProfile,
-	rows: number,
-	storedDim: number | null,
-): StoreProfileDecision {
-	const s = readStoreStamp(dbPath);
-	if (s.state === "invalid") return { ok: false, code: "store-stamp-invalid" };
-	if (storedDim !== null && storedDim !== p.dimensions) return { ok: false, code: "store-dimension-mismatch" };
-	if (s.state === "ok") {
-		if (s.stamp.dimensions !== p.dimensions) return { ok: false, code: "store-dimension-mismatch" };
-		if (s.stamp.fingerprint !== profileFingerprint(p)) return { ok: false, code: "store-profile-mismatch" };
-		return { ok: true, basis: "stamp" };
+export interface QueryAttestation {
+	kind: typeof ATTEST_KIND;
+	storeFingerprint: string;
+	queryProfileId: string;
+	queryFingerprint: string;
+	evidence: string[];
+	attestedBy: string;
+	attestedAt: string;
+}
+
+export function attestationPath(dbPath: string): string {
+	return path.join(dbPath, ATTEST_FILE);
+}
+
+export type AttestRead = { state: "absent" } | { state: "ok"; list: QueryAttestation[] } | { state: "invalid" };
+
+export function readAttestations(dbPath: string): AttestRead {
+	let raw: string;
+	try {
+		raw = fs.readFileSync(attestationPath(dbPath), "utf-8");
+	} catch (e) {
+		if ((e as NodeJS.ErrnoException).code === "ENOENT") return { state: "absent" };
+		return { state: "invalid" };
 	}
-	if (rows === 0) return { ok: true, basis: "empty-store" };
-	if (p.legacyUnstamped === true) return { ok: true, basis: "legacy-unstamped" };
-	return { ok: false, code: "store-unstamped-unknown-generation" };
+	try {
+		const list = JSON.parse(raw) as unknown;
+		if (!Array.isArray(list)) return { state: "invalid" };
+		for (const a of list as Partial<QueryAttestation>[]) {
+			if (
+				a?.kind !== ATTEST_KIND ||
+				!isStr(a.storeFingerprint) ||
+				!isStr(a.queryProfileId) ||
+				!isStr(a.queryFingerprint) ||
+				!Array.isArray(a.evidence) ||
+				a.evidence.length === 0 ||
+				!a.evidence.every((x) => isStr(x) && x.trim().length > 0) ||
+				!isStr(a.attestedBy) ||
+				a.attestedBy.trim().length === 0 ||
+				!isStr(a.attestedAt)
+			) {
+				return { state: "invalid" };
+			}
+		}
+		return { state: "ok", list: list as QueryAttestation[] };
+	} catch {
+		return { state: "invalid" };
+	}
 }
 
 /**
- * Store-access decision for a provider that may or may not carry a profile.
- * `null` = an unprofiled provider (legacy env without `*_PROFILE` whose
- * model is not the legacy one): it keeps the old dimension-only behaviour on
- * an UNSTAMPED store, and is refused by name on a stamped one — a stamped
- * generation is only ever touched by its own profile.
+ * Record an attestation (the explicit human step). Requires a valid stamp, a
+ * query profile of the same dimension but another fingerprint, at least one
+ * evidence ref and a named attester. Idempotent per (store, query) pair.
+ */
+export function writeAttestation(
+	dbPath: string,
+	query: EmbeddingProfile,
+	evidence: string[],
+	attestedBy: string,
+	now: Date = new Date(),
+): QueryAttestation {
+	const st = readStoreStamp(dbPath);
+	if (st.state !== "ok") throw new StoreProfileRefused(st.state === "absent" ? "store-unstamped" : "store-stamp-invalid");
+	if (st.stamp.dimensions !== query.dimensions) throw new StoreProfileRefused("store-dimension-mismatch");
+	const qf = profileFingerprint(query);
+	if (qf === st.stamp.fingerprint) throw new StoreProfileRefused("attestation-not-needed-same-generation");
+	const ev = evidence.map((e) => e.trim()).filter((e) => e.length > 0);
+	if (ev.length === 0) throw new StoreProfileRefused("attestation-evidence-required");
+	if (attestedBy.trim().length === 0) throw new StoreProfileRefused("attestation-attester-required");
+	const cur = readAttestations(dbPath);
+	if (cur.state === "invalid") throw new StoreProfileRefused("attestation-invalid");
+	const list = (cur.state === "ok" ? cur.list : []).filter(
+		(a) => !(a.storeFingerprint === st.stamp.fingerprint && a.queryFingerprint === qf),
+	);
+	const rec: QueryAttestation = {
+		kind: ATTEST_KIND,
+		storeFingerprint: st.stamp.fingerprint,
+		queryProfileId: query.id,
+		queryFingerprint: qf,
+		evidence: ev,
+		attestedBy: attestedBy.trim(),
+		attestedAt: now.toISOString(),
+	};
+	writeJsonAtomic(attestationPath(dbPath), [...list, rec]);
+	return rec;
+}
+
+// ---------------------------------------------------------------------------
+// Access decision
+// ---------------------------------------------------------------------------
+
+export type StoreProfileDecision =
+	| { ok: true; basis: "stamp" | "attested" | "empty-store" }
+	| { ok: false; code: string };
+
+/**
+ * May vectors of profile `p` be written to (`write`) or queried against
+ * (`query`) this store? There is no legacy and no inference:
+ *
+ *   p null (unprofiled provider)   → refuse
+ *   stamp invalid / attestation file invalid → refuse
+ *   stored dim ≠ p dim             → refuse
+ *   stamp, same fingerprint        → ok
+ *   stamp, other fingerprint       → query only, and only with a matching
+ *                                    attestation; writes always refuse
+ *   no stamp, no rows / no store   → ok (a writer stamps it on creation)
+ *   no stamp, rows                 → refuse: an unknown generation
  */
 export function decideStoreAccess(
 	dbPath: string,
 	p: EmbeddingProfile | null,
 	rows: number,
 	storedDim: number | null,
+	access: "write" | "query" = "write",
 ): StoreProfileDecision {
-	if (p) return decideStoreProfile(dbPath, p, rows, storedDim);
+	if (!p) return { ok: false, code: "unprofiled-provider" };
 	const s = readStoreStamp(dbPath);
 	if (s.state === "invalid") return { ok: false, code: "store-stamp-invalid" };
-	if (s.state === "ok") return { ok: false, code: "unprofiled-provider-on-stamped-store" };
-	return { ok: true, basis: rows === 0 ? "empty-store" : "legacy-unstamped" };
+	if (storedDim !== null && storedDim !== p.dimensions) return { ok: false, code: "store-dimension-mismatch" };
+	if (s.state === "ok") {
+		if (s.stamp.dimensions !== p.dimensions) return { ok: false, code: "store-dimension-mismatch" };
+		if (s.stamp.fingerprint === profileFingerprint(p)) return { ok: true, basis: "stamp" };
+		if (access === "query") {
+			const a = readAttestations(dbPath);
+			if (a.state === "invalid") return { ok: false, code: "attestation-invalid" };
+			const qf = profileFingerprint(p);
+			if (a.state === "ok" && a.list.some((x) => x.storeFingerprint === s.stamp.fingerprint && x.queryFingerprint === qf)) {
+				return { ok: true, basis: "attested" };
+			}
+			return { ok: false, code: "query-generation-not-attested" };
+		}
+		return { ok: false, code: "store-profile-mismatch" };
+	}
+	if (rows === 0) return { ok: true, basis: "empty-store" };
+	return { ok: false, code: "store-unstamped" };
 }
 
-/**
- * The profile a provider speaks for: its explicit one, else the legacy 4096
- * profile when model and dimension are exactly the legacy pair, else null.
- */
-export function profileOfProvider(provider: {
-	readonly dimensions: number;
-	readonly profile?: EmbeddingProfile;
-	readonly model?: string;
-}): EmbeddingProfile | null {
-	if (provider.profile) return provider.profile;
-	const legacy = PROFILES["openrouter-qwen3-8b-4096"];
-	if (typeof provider.model === "string" && provider.model.toLowerCase() === legacy.model && provider.dimensions === legacy.dimensions) {
-		return legacy;
-	}
-	return null;
+/** Write-side shorthand (candidate build / resume). */
+export function decideStoreProfile(
+	dbPath: string,
+	p: EmbeddingProfile,
+	rows: number,
+	storedDim: number | null,
+): StoreProfileDecision {
+	return decideStoreAccess(dbPath, p, rows, storedDim, "write");
+}
+
+/** The profile a provider speaks for: its explicit one, nothing inferred. */
+export function profileOfProvider(provider: { readonly profile?: EmbeddingProfile }): EmbeddingProfile | null {
+	return provider.profile ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -583,26 +748,14 @@ export function embedSplitFor(p: EmbeddingProfile | null | undefined): EmbedSpli
 }
 
 // ---------------------------------------------------------------------------
-// Writer rule: the legacy generation is read-only
+// Writer rule
 // ---------------------------------------------------------------------------
 
 /**
  * Refusal code for an EMBEDDING WRITE (index / sync / durable / md /
- * /memory reindex) by `provider`, or null when it may write.
- *
- * The legacy Qwen 4096d generation (2026-11-25 decision: MD + sessions have no
- * active Qwen build) is read-only: it may still QUERY the preserved 4096d
- * stores and be used for rollback, but nothing embeds new rows with it. The
- * check is by identity (profileOfProvider), so it also catches a Qwen provider
- * configured the old way without `*_PROFILE`. Unprofiled stub/custom providers
- * keep the dimension + stamp guards (they can never write a stamped store).
+ * /memory reindex) by `provider`, or null when it may write: only a provider
+ * built from a known profile writes. Nothing is inferred from a model string.
  */
-export function writerRefusal(provider: {
-	readonly dimensions: number;
-	readonly profile?: EmbeddingProfile;
-	readonly model?: string;
-}): string | null {
-	const p = profileOfProvider(provider);
-	if (p && p.legacyUnstamped === true) return `legacy-generation-read-only: ${p.id} may query preserved stores but no longer writes`;
-	return null;
+export function writerRefusal(provider: { readonly profile?: EmbeddingProfile }): string | null {
+	return provider.profile ? null : "unprofiled-writer: set ANDENKEN_<NS>_PROFILE to a known generation";
 }

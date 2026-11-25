@@ -176,8 +176,8 @@ function getProvider(): EmbeddingProvider | null {
 
 export default function (pi: ExtensionAPI) {
   // Provider/store split into two independent live tracks. Failure on one
-  // track must not cascade to the other. Sessions and md both use OpenRouter
-  // Qwen3-Embedding-8B / 4096d today, but they still have separate stores and
+  // track must not cascade to the other. Sessions and md share the
+  // ollama-bge-m3-1024 generation, but they still have separate stores and
   // providers so their lifecycle/cost boundaries stay isolated.
   //
   // Cross-track query in session_search → knowledge_search re-embeds through
@@ -231,14 +231,14 @@ export default function (pi: ExtensionAPI) {
       // Fallback dim 2560 only fires when sessionsProvider hasn't been
       // resolved yet (status hover, /memory before search). After
       // ensureSessionsProvider runs, store gets the real dim.
-      const dim = sessionsProvider?.dimensions ?? 2560;
+      const dim = sessionsProvider?.dimensions;
       sessionStore = new VectorStore(undefined, dim, sessionsProvider ? { profile: profileOfProvider(sessionsProvider) } : {});
     }
     return sessionStore;
   }
   function getMdStore(): VectorStore {
     if (!mdStore) {
-      const dim = mdProvider?.dimensions ?? 4096;
+      const dim = mdProvider?.dimensions;
       mdStore = new VectorStore(mdDbPath, dim, mdProvider ? { profile: profileOfProvider(mdProvider) } : {});
     }
     return mdStore;
@@ -481,12 +481,9 @@ export default function (pi: ExtensionAPI) {
 
       // PR-D: dim safety MUST run before any sessP.embedQuery() call.
       //
-      // Same scenario as cli.ts searchSessions: PR-B will switch sessions to
-      // OpenRouter qwen/qwen3-embedding-8b (4096d). If data/sessions.lance
-      // still holds the old 2560d index, an unguarded path would trigger a
-      // paid OpenRouter call first, then LanceDB would silently fall back to
-      // FTS-only (store.ts:237). Throw early so operators see the rebuild
-      // requirement instead of paying for embeddings against a stale index.
+      // Same scenario as cli.ts searchSessions: a provider whose dimension or
+      // generation is not the store's must refuse BEFORE embedding, instead of
+      // LanceDB silently falling back to FTS-only (store.ts).
       // Empty/fresh DB passes through.
       const sessDimCheck = await getSessionStore().checkCompatibleDim();
       const sessGen = sessDimCheck.ok ? await getSessionStore().checkProfile() : null;

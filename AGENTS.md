@@ -90,7 +90,7 @@ queries plus sessions/md cannot make the meaning→time turn.
 |-------|------------|-------|
 | **sessions** | Recover decisions and continuity inside canonical time windows | Load-bearing for agent continuity. OpenClaw parity remains a technical baseline, not the product goal. Stored timestamp/project/role/source/session-file signals must support timeline-grounded recall. |
 | **md (public garden)** | Recover durable interpretation attached to dated notes and events | Current production knowledge axis. Direct Markdown embedding over `~/repos/gh/notes/content`. **English tags are a controlled vocabulary (~1,243)**: the doomemacs-config export drops org-side tags and emits only English tags registered in meta notes, so the unnormalized org tag soup never reaches md. Korean stays free-form; English is constrained in pairs. Tags land in the stored `text` (FTS/display), never in `embeddingInput`. Ports OpenClaw builtin md memory logic (`~/repos/3rd/openclaw/packages/memory-host-sdk/src/host/`) onto the same LanceDB backend used by sessions. First production cut closed on 2026-05-12; current work is time-grounded retrieval quality. |
-| **openclaw (harvest)** | Recover what the bots said and kept, nameable as its own axis | Landed 2026-09-03. A HARVEST, not a sync: OpenClaw embeds its own agents' sessions and memory with `qwen/qwen3-embedding-8b` at 4096d — the same model and dimension we use, picked independently on both sides — so rows arrive with text AND vector and the import costs **zero embedding API calls**. We do not own their chunking, model, retention, or their `openclaw-agent.sqlite`, which the export opens `sqlite3 -readonly` and never compacts. We DO own `data/openclaw.lance` — our schema, ids and FTS index — so its defrag is ours, by name. Append-only (their deletes are never mirrored), authority-harvested then explicitly published to the private Oracle replica, and never a search fallback. See INVARIANT §7.3. |
+| **openclaw (harvest)** | Recover what the bots said and kept, nameable as its own axis | A HARVEST, not a sync: OpenClaw (Oracle) embeds its own agents' sessions and memory with OpenRouter `baai/bge-m3` 1024d (rebuilt from zero 2026-11-25; no Qwen group remains), so rows arrive with text AND vector and the import costs **zero embedding API calls**. We do not own their chunking, model, retention, or their `openclaw-agent.sqlite`, which the export opens `sqlite3 -readonly` and never compacts. We DO own `openclaw.lance` — schema, ids, FTS index, generation stamp — so its defrag is ours, by name. Append-only (their deletes are never mirrored), authority-harvested, never a search fallback. See INVARIANT §7.3. |
 | **org** | **Code removed (2026-11-25)** | The disabled org track (chunker, doctor, indexer/cli/run.sh routes, the legacy `ANDENKEN_VLLM_*` / `createOrgProviderFromEnv` fallback) was removed from the active codebase; git history keeps it. `data/org.lance` is not deleted by code. `all` in verify / compact / cleanup now means sessions + md; `index:org` and `doctor --org` refuse by name. |
 
 **Split of effort.** The agent-in-charge ships sessions + md to agents. The org
@@ -110,7 +110,6 @@ The qmd path attempted between 2026-05-09 and 2026-05-11 was retired on
 embedding-profile.ts    Embedding generation identity: profiles, fingerprint, reply
                         validation, input-length bound, Ollama digest, store stamp
 embedding-provider.ts   EmbeddingProvider interface + vLLM impl + factory
-model-presets.ts        Qwen3-Embedding-4B/8B / bge-m3 / Gemini presets
 store.ts                LanceDB vector store (sessions.lance + md.lance + openclaw.lance)
 retriever.ts            Hybrid retrieval (weighted/RRF + MMR; decay off in prod)
 md-search.ts            md retrieval core + display contract, shared by cli.ts
@@ -139,20 +138,29 @@ is keyed to its own provider/dim. No DB is a fallback for another.
 
 ### Embedding generations (embedding-profile.ts)
 
-Equal dimension is not equal model. A **generation** is named by a profile
-(`openrouter-qwen3-8b-4096` legacy, `ollama-bge-m3-1024` local,
-`openrouter-bge-m3-1024` hosted documents) and fingerprinted over endpoint
-class, model, runtime digest, dimension and instructions.
+Equal dimension is not equal model. A **generation** is named by a profile —
+`ollama-bge-m3-1024` (local; the only one andenken embeds with) and
+`openrouter-bge-m3-1024` (the OpenClaw harvest's documents; a store identity
+only) — and fingerprinted over provider, endpoint class, model, runtime digest,
+dimension and instructions. **Qwen / 4096d is not known to current code**
+(2026-11-26): the earlier generation is a recovery artefact restored with its own
+code, configuration and data, never read by this code.
 
 - A store written by a profiled writer carries `<db>.lance/andenken-profile.json`
   (it travels with every copy of the store). Write, `reset` and query refuse a
   different fingerprint — `reset` refuses BEFORE dropping rows.
-- A pre-stamp (unstamped, non-empty) store is accepted only by the legacy 4096d
-  profile. Existing stores are never stamped retroactively; a new generation
-  goes to a new data directory.
-- `ANDENKEN_<NS>_PROFILE=<id>` builds the provider from the profile; a
-  conflicting MODEL / DIMENSIONS / instruction / endpoint / batch / timeout is a
-  refusal. Namespaced providers without a usable DIMENSIONS are refused.
+- Stamp v2 records provider, runtime revision (digest), preprocess
+  (instructions, split policy) and, for a harvest, the producer and per-agent
+  index revisions. An unstamped store with rows is an unknown generation:
+  refused for read and write. Nothing is stamped retroactively; every
+  generation lives in a fresh `ANDENKEN_DATA`.
+- Providers exist ONLY through `ANDENKEN_<NS>_PROFILE=<id>` (no model-string,
+  preset, Gemini or dimension-default path). A conflicting MODEL / DIMENSIONS /
+  instruction / endpoint / batch / timeout is a refusal. Before its first
+  request a digest-pinned provider proves the runtime digest (`/api/tags`).
+- A query against ANOTHER generation passes only with an explicit
+  query-attestation in the store (`./run.sh attest:query`, human, names store +
+  query fingerprints and evidence). It never permits writes.
 - Every reply is validated: one vector per input, integer unique in-range
   index, exact dimension, finite, non-zero, and for loopback profiles the
   echoed model. An invalid reply is permanent (never retried).
@@ -162,8 +170,8 @@ class, model, runtime digest, dimension and instructions.
   + code-point ceiling); every character survives. The legacy split is
   byte-identical outside that scope.
 - OpenClaw queries use `ANDENKEN_OPENCLAW_QUERY_*` when set, otherwise the
-  sessions provider — and the generation check refuses rather than silently
-  falling back to FTS when that provider is not the harvest's generation.
+  sessions provider; the generation check (stamp or attestation) refuses rather
+  than silently falling back to FTS.
 
 The md track is no longer "under construction" in the old sense: first
 production cut is closed. Current md work is quality measurement and
@@ -201,10 +209,9 @@ queryable only by a provider that emits the same dimension.
 
 | Track | Model / dim | Endpoint | When |
 |-------|-------------|----------|------|
-| **Sessions (legacy, READ-ONLY since 2026-11-25)** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `ANDENKEN_SESSION_*` → `data/sessions.lance` (unstamped) | query + rollback only. Every writer refuses this generation (`writerRefusal`); `sync-sessions.sh` refuses the unstamped store before gather; `rebuild-sessions-full.sh` is retired. |
-| **MD (legacy, READ-ONLY since 2026-11-25)** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `ANDENKEN_MD_*` → `data/md.lance` (unstamped) | query + rollback only; `index:md` / `sync:md` refuse the Qwen generation before any request. `sync:md:oracle` still replicates the existing store. |
-| **OpenClaw** | `qwen/qwen3-embedding-8b` / 4096d — **embedded by OpenClaw, not by us** | `ANDENKEN_OPENCLAW_HOST` (default `oracle`), `sqlite3 -readonly` snapshot of each bot's `openclaw-agent.sqlite` → `data/openclaw.lance` | explicit authority call only: `./run.sh sync:openclaw` (delta by per-agent watermark, `--full` from zero), then `./run.sh sync:openclaw:oracle` to publish the completed private store. **API 0** — the vectors come already computed. |
-| **Local generation (readiness, not adopted)** | Ollama `bge-m3:latest` / 1024d, digest-pinned | loopback `127.0.0.1:11435` via `ANDENKEN_<NS>_PROFILE=ollama-bge-m3-1024` → a NEW data directory | sessions: `candidate:sessions:plan/build` (window `--since-kst/--until-kst`) and `ANDENKEN_SYNC_PROFILE=ollama-bge-m3-1024 scripts/sync-sessions.sh --local`; md: `ANDENKEN_MD_PROFILE`. Never published to Oracle by `--global` / `sync:md:oracle` (stamped stores refused). |
+| **Sessions** | Ollama `bge-m3:latest` / 1024d (`ollama-bge-m3-1024`, digest-pinned) | loopback (`ANDENKEN_SESSION_PROFILE`; placement `ANDENKEN_SESSION_ENDPOINT` / `ANDENKEN_SYNC_ENDPOINT`) → a fresh, stamped `ANDENKEN_DATA` | `candidate:sessions:plan/build` (window `--since-kst/--until-kst`), then `scripts/sync-sessions.sh --local`; `--global` publish dormant until its own gate. |
+| **MD** | Ollama `bge-m3:latest` / 1024d (`ollama-bge-m3-1024`) | loopback (`ANDENKEN_MD_PROFILE`) → a fresh, stamped `ANDENKEN_DATA` | `./run.sh index:md` / `sync:md`; chunks split to fit the 2045 code-point window. `sync:md:oracle` refuses a stamped generation until its publish gate. |
+| **OpenClaw** | `baai/bge-m3` / 1024d — **embedded by OpenClaw (OpenRouter), not by us**; store generation `openrouter-bge-m3-1024` | `ANDENKEN_OPENCLAW_HOST` (default `oracle`), `sqlite3 -readonly` snapshot → `openclaw.lance` in a fresh `ANDENKEN_DATA` | explicit authority call only: `./run.sh sync:openclaw` (`--full` from zero). Import pins the producer literal (`baai/bge-m3` / `openai` / 1024), refuses mixed artifacts, stamps the store. **API 0**. Querying it with local Ollama needs `./run.sh attest:query` (human, evidence-named); no paid query path. |
 
 ### Session corpus sources
 
@@ -326,12 +333,12 @@ create duplicate memory. JSONL discovery chooses only `pi`, `claude`, and `all`
 
 ### Why the split
 
-- **Sessions** are load-bearing for live agent continuity and use 8B/4096d.
-  Incremental sync is paid-remote but low cost; wrong-dim and paid full-rebuild
-  guards are mandatory.
+- **Sessions** are load-bearing for live agent continuity and use the local
+  BGE-M3 1024d generation (no API cost). Wrong-generation and wrong-dim guards
+  are mandatory.
 - **MD** is the current knowledge axis for agents. It indexes the exported
   public garden directly — a controlled corpus where chunking and retrieval
-  are tunable on a sane schedule. Same 8B/4096d provider as sessions; separate
+  are tunable on a sane schedule. Same local BGE-M3 generation as sessions; separate
   LanceDB file so the two pools never cross-contaminate. Its chunk count is
   intentionally much lower than org (`10,119` vs `44,916` in the 2026-05-12
   baseline): OpenClaw-style Markdown chunking emits larger, denser
@@ -349,8 +356,7 @@ create duplicate memory. JSONL discovery chooses only `pi`, `claude`, and `all`
   full rebuilds) and the same wrong-dim preflight. Incremental is the default
   cadence.
 - Indexing/search paths must check DB/provider dimension compatibility before
-  any paid embedding call. Sessions and md expect 4096d (legacy) or their
-  profile's dimension; the generation stamp is checked as well.
+  any embedding call: the profile's dimension and the generation stamp.
 - `memory-sync` skill (agent-config side) covers the sessions fast path. md
   full indexing requires GLG confirmation; md Oracle replication should reuse
   the completed local DB via `./run.sh sync:md:oracle` rather than paying for a
@@ -403,7 +409,7 @@ Specific operations worth knowing by name:
 
 - `./run.sh index:md` / `./run.sh sync:md` / `./run.sh search:md` — md track
   operating surface. Direct embedding of `~/repos/gh/notes/content` via
-  OpenRouter 8B/4096d into `data/md.lance`.
+  the local BGE-M3 generation into `md.lance` (fresh `ANDENKEN_DATA`).
 - `./run.sh sync:openclaw:oracle` — OpenClaw private-axis replication surface. It verifies the authority `data/openclaw.lance/`, rsyncs it to Oracle, then verifies the replica (API 0). It never harvests on Oracle and never reaches the public md track.
 - `./run.sh sync:md:oracle` — md Oracle replication surface. It rsyncs the
   completed local `data/md.lance/` and `data/md-manifest.json` to

@@ -39,6 +39,7 @@
  * run outside it (openclaw-lock.ts), so a direct call is pointed at
  * `./run.sh prune:openclaw`.
  */
+import { OPENCLAW_PROFILE } from "./embedding-profile.js";
 import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
@@ -60,7 +61,8 @@ import {
 	type StatusParse,
 } from "./openclaw-reconcile.js";
 
-const OPENCLAW_DIM = 4096;
+/** The OpenClaw harvest generation (embedding-profile.ts): OpenRouter BGE-M3 1024d. */
+const OPENCLAW_DIM = OPENCLAW_PROFILE.dimensions;
 
 // ── Plan ──────────────────────────────────────────────────────────────────────
 

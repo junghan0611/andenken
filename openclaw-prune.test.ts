@@ -265,9 +265,9 @@ c.commit()`, db]);
 console.log("\n=== apply / backup / restore on a throwaway store ===");
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "andenken-prune-"));
 try {
-	const store = new VectorStore(path.join(tmp, "openclaw.lance"), 4096);
+	const store = new VectorStore(path.join(tmp, "openclaw.lance"), 1024);
 	await store.init();
-	const vec = (seed: number) => Array.from({ length: 4096 }, (_, i) => Math.fround(Math.sin(seed * 1000 + i)));
+	const vec = (seed: number) => Array.from({ length: 1024 }, (_, i) => Math.fround(Math.sin(seed * 1000 + i)));
 	await store.addChunksRaw(["a:n0", "a:old", "a:dr", "a:rs"].map((id, k) => ({
 		id, text: `t-${id}`, vector: vec(k), sessionFile: `p-${id}`, project: "a", lineNumber: 0,
 		timestamp: STAMP1, role: "", source: "memory", metadata: { agent: "a" },
@@ -294,14 +294,14 @@ try {
 	ok("apply: backup, plan and receipt are on disk",
 		["rows.jsonl.gz", "plan.json", "receipt.json"].every((f) => fs.existsSync(path.join(dir, f))));
 	const backup = zlib.gunzipSync(fs.readFileSync(path.join(dir, "rows.jsonl.gz"))).toString().trim().split("\n").map((l) => JSON.parse(l));
-	ok("backup holds the whole row: text and a 4096d float32 vector",
-		backup.length === 2 && backup.every((b) => b.text.startsWith("t-") && Buffer.from(b.vector_f32_b64, "base64").byteLength === 4096 * 4));
+	ok("backup holds the whole row: text and a 1024d float32 vector",
+		backup.length === 2 && backup.every((b) => b.text.startsWith("t-") && Buffer.from(b.vector_f32_b64, "base64").byteLength === 1024 * 4));
 
 	const res = await restorePrune(dir, store);
 	ok("restore re-adds what was deleted", res.restored === 2 && (await store.getCount()) === before);
 	const back = await store.getRowsByIds(["a:old"]);
 	const v = Array.from((back[0].vector as { toArray(): Float32Array }).toArray());
-	ok("restore is bit-exact on the vector", v.length === 4096 && v.every((x, i) => x === Math.fround(Math.sin(1 * 1000 + i))));
+	ok("restore is bit-exact on the vector", v.length === 1024 && v.every((x, i) => x === Math.fround(Math.sin(1 * 1000 + i))));
 	const again = await restorePrune(dir, store);
 	ok("restore is idempotent", again.restored === 0 && again.alreadyPresent === 2 && (await store.getCount()) === before);
 

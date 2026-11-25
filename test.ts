@@ -1310,9 +1310,9 @@ async function testVectorStore() {
 // --- Integration Tests (needs API) ---
 //
 // The Gemini embedding suite is retired (2026-07-14). Nothing live embeds through
-// Gemini: model-presets.ts carries no gemini preset, and both axes — sessions and the
-// garden md index — run OpenRouter Qwen3-Embedding-8B at 4096d. gemini-embeddings.ts
-// and GeminiProvider survive only as an unreferenced back-compat shim.
+// Gemini: providers exist only through a generation profile (embedding-profile.ts),
+// and both axes — sessions and the garden md index — use local Ollama BGE-M3 1024d.
+// GeminiProvider and model-presets.ts were removed on 2026-11-26.
 //
 // The suite pinned 768d ("outputDimensionality: fixed 768d (cost control)"). Gemini
 // later changed that default to 3072, so the assertions went red and stayed red — no

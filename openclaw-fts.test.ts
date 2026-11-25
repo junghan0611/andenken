@@ -506,6 +506,7 @@ if (ARGS.barrierOnly) {
 const { VectorStore, ftsReady } = await import("./store.ts");
 const { fdinfoHoldsFlockWrite } = await import("./openclaw-lock.ts");
 const { OPENCLAW_FTS_PROTOCOL, OPENCLAW_FTS_HEALTHY_MARK } = await import("./openclaw-fts.ts");
+const { OPENCLAW_PROFILE } = await import("./embedding-profile.ts");
 
 const REPO = ARGS.repo;
 const PROD_DATA = path.join(REPO, "data");
@@ -586,7 +587,8 @@ async function heldBy(p: ChildProcess): Promise<void> {
 	});
 }
 
-const DIM = 4096;
+// The harvest generation (OpenRouter BGE-M3 1024d) — the dimension openclaw-fts.ts opens with.
+const DIM = OPENCLAW_PROFILE.dimensions;
 const VEC = Array.from({ length: DIM }, (_, i) => (i % 7) / 7);
 function row(id: string, text: string, ts = "2026-11-04T00:00:00.000Z") {
 	return { id, text, vector: VEC, sessionFile: "synthetic://fts", project: "ftsfixture", lineNumber: 0, timestamp: ts, role: "", source: "memory", metadata: { probe: "1" } };

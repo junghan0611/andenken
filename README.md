@@ -61,8 +61,8 @@ understand where it fits.
 
  embedding       │ THIS REPO.
   (semantic)     │ Vector + BM25 hybrid retrieval over curated corpora.
-                 │ Sessions: Qwen3-Embedding-8B (4096d).
-                 │ MD (public garden export): Qwen3-Embedding-8B (4096d).
+                 │ Sessions: local Ollama BGE-M3 (1024d).
+                 │ MD (public garden export): local Ollama BGE-M3 (1024d).
                  │ Org: code removed 2026-11-25 (git history keeps it).
                  │ Own embeddings: sessions and md.
                  │ OpenClaw: a separate existing-vector harvest.
@@ -208,8 +208,8 @@ READING — choose evidence before opening more context
 candidate → source / file / entry reference → selected excerpt or original
 ```
 
-Sessions and md use Qwen3-Embedding-8B / 4096d; OpenClaw harvest accepts compatible
-existing vectors without re-embedding them. Raw Org indexing remains disabled
+Sessions and md use local Ollama BGE-M3 / 1024d; the OpenClaw harvest imports
+OpenClaw's own OpenRouter BGE-M3 1024d vectors without re-embedding them. Raw Org indexing remains disabled
 upstream R&D, not another production input. BM25 includes Korean particle
 preprocessing; `dictcli` supplies the separate vocabulary-expansion capability.
 Indexing, retrieval and original reading have different admission/cost boundaries;
@@ -315,7 +315,7 @@ separate claims. Dated measurements and the completed recovery are in
 
 ## Stack
 
-- **Embeddings** Sessions + md: Qwen3-Embedding-8B via OpenRouter (4096d, current production). Prepared, not adopted: local Ollama BGE-M3 (1024d, `ollama-bge-m3-1024` profile, digest-pinned, loopback) as a separate stamped generation.
+- **Embeddings** Sessions + md: local Ollama BGE-M3 (1024d, `ollama-bge-m3-1024` profile, digest-pinned, loopback), each in a stamped generation. OpenClaw: its own OpenRouter BGE-M3 1024d vectors, harvested.
 - **Vector store** LanceDB (`@lancedb/lancedb` pinned to `0.40.0`; file-based, one file per track)
 - **Retrieval** Weighted merge + RRF + MMR. Temporal decay is implemented but off in both live tracks; recency is `--mode recent`.
 - **Chunking** Track-specific. Sessions: message-aware (pi-durable rows reuse the same sanitize + split). MD: Markdown-aware. A profiled generation with a short window (BGE-M3, 2045 code points) splits both to fit — never truncates.
@@ -332,9 +332,9 @@ ordinary invocation emits compiled files.
 
 | Track | Model / dim | Endpoint | Status |
 |-------|-------------|----------|--------|
-| **Sessions** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `ANDENKEN_SESSION_*` → `data/sessions.lance` | Live. Device-merged Pi/Claude Code corpus plus explicitly admitted closed pi-durable snapshots. |
-| **MD** | OpenRouter `qwen/qwen3-embedding-8b` / 4096d | `ANDENKEN_MD_*` → `data/md.lance` | Live production knowledge axis. `doctor --md` accounts for the manifest↔indexed gap. |
-| **OpenClaw** | `qwen/qwen3-embedding-8b` / 4096d, **embedded by OpenClaw** | `sqlite3 -readonly` harvest → `data/openclaw.lance` | Live harvest axis; import reuses vectors without embedding calls. CLI search is explicitly named, never a fallback; query cost is separate from import. |
+| **Sessions** | Ollama `bge-m3:latest` / 1024d (`ollama-bge-m3-1024`) | `ANDENKEN_SESSION_PROFILE` → `sessions.lance` in a fresh `ANDENKEN_DATA` | Device-merged Pi/Claude Code corpus plus explicitly admitted closed pi-durable snapshots. |
+| **MD** | Ollama `bge-m3:latest` / 1024d (`ollama-bge-m3-1024`) | `ANDENKEN_MD_PROFILE` → `md.lance` in a fresh `ANDENKEN_DATA` | Production knowledge axis. `doctor --md` accounts for the manifest↔indexed gap. |
+| **OpenClaw** | `baai/bge-m3` / 1024d, **embedded by OpenClaw** (store generation `openrouter-bge-m3-1024`) | `sqlite3 -readonly` harvest → `openclaw.lance` | Harvest axis; import reuses vectors without embedding calls and pins the producer. Local Ollama queries need an explicit `attest:query`; no paid query path. |
 | **Local generation** | Ollama `bge-m3:latest` / 1024d | `ANDENKEN_<NS>_PROFILE=ollama-bge-m3-1024` → a new data directory | **Readiness only.** Candidate plan/build + `ANDENKEN_SYNC_PROFILE` local sync; never published by `--global` / `sync:md:oracle`. |
 
 For current counts use `./run.sh status`; dated verification snapshots belong in
@@ -345,8 +345,9 @@ indexed-read failure is shown as unknown, not as missing-row work. Org init/coun
 failures outside that narrow handler can still fail status.
 
 LanceDB stores are dimension- and track-separated. Each track's search must use
-its own provider env. The 4096d sessions/md providers and the 2560d org provider
-are not cross-compatible.
+its own provider env, and every store carries a generation stamp: equal
+dimension never makes two generations compatible. Qwen / 4096d is not known to
+current code (2026-11-26).
 
 ### Session sources — the device-merged corpus
 
@@ -453,9 +454,9 @@ therefore much easier to tune than the raw Denote tree.
 | Surface | Path | Notes |
 |---------|------|-------|
 | md source | `~/repos/gh/notes/content` | exported Markdown; ~2,200 md / ~27MB |
-| md store | `data/md.lance` | LanceDB, dimension 4096d |
+| md store | `md.lance` (fresh `ANDENKEN_DATA`) | LanceDB, 1024d, generation-stamped |
 | md manifest | `data/md-manifest.json` | mtime/size based incremental |
-| provider env | `ANDENKEN_MD_*` | OpenRouter qwen/qwen3-embedding-8b |
+| provider env | `ANDENKEN_MD_PROFILE` | `ollama-bge-m3-1024` (loopback Ollama) |
 | md doctor | `./run.sh doctor --md` | provider / DB / manifest / gap explainability |
 
 The store held `11,078` rows on 2026-10-15. The breakdown below is the
@@ -509,11 +510,10 @@ cd ~/repos/gh/andenken
 ./run.sh golden                       # transitional component baseline; see NEXT.md
 ```
 
-> **2026-11-25:** the Qwen 4096d generation is read-only. `sync-sessions.sh` now
+> **2026-11-25/26:** Qwen / 4096d is not known to current code. `sync-sessions.sh`
 > syncs only the local Ollama BGE-M3 1024d generation (`ANDENKEN_SYNC_PROFILE`,
-> default `ollama-bge-m3-1024`) into a stamped store, and refuses the unstamped
-> legacy store and `--global` before gather; `rebuild-sessions-full.sh` is
-> retired. The text below describes the machinery (custody, gather, locks),
+> default `ollama-bge-m3-1024`) into a stamped store, and refuses an unstamped
+> store and `--global` before gather; `rebuild-sessions-full.sh` is retired. The text below describes the machinery (custody, gather, locks),
 > which is unchanged; its Qwen/OpenRouter specifics are historical.
 
 `scripts/sync-sessions.sh` is the operating heartbeat for the sessions track and

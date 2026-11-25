@@ -3,8 +3,9 @@
  * Tests for the shared sessions.lance writer lock (sessions-lock.ts and
  * scripts/lib/sessions-lock.sh).
  *
- * API 0. Temp data dirs only. Subprocess writers get a vLLM provider at
- * 127.0.0.1:9, so nothing can reach a paid endpoint.
+ * API 0. Temp data dirs only. Subprocess writers get the ollama-bge-m3-1024
+ * profile at 127.0.0.1:9 (the runtime identity check cannot pass there, so no
+ * embedding request can leave), a temp HOME and a synthetic ~/.current-device.
  */
 
 import * as fs from "node:fs";
@@ -21,6 +22,7 @@ import {
 } from "./sessions-lock.ts";
 import { admitDurableSnapshot } from "./durable-source.ts";
 import { VectorStore } from "./store.ts";
+import { DEAD_ENDPOINT, DIM, PROFILE, SYNTHETIC_DEVICE, isolatedEnv, profileEnv, syntheticHome } from "./test-support-generation.ts";
 
 let passed = 0;
 let failed = 0;
@@ -141,22 +143,20 @@ console.log("\n# real writers race the lock (subprocess)");
     return path.join(dir, b, fs.readdirSync(path.join(dir, b))[0], "session.sqlite");
   })();
   await admitDurableSnapshot({ input: snap1, device: "thinkpad", corpus, liveRoots: [path.join(tmp, "none")] });
-  const store = new VectorStore(path.join(data, "sessions.lance"), 4);
+  const store = new VectorStore(path.join(data, "sessions.lance"), DIM, { profile: PROFILE });
   await store.init();
   await store.ensureTable();
   await store.close();
-  const env = {
-    ...process.env,
+  const env = isolatedEnv(syntheticHome(path.join(tmp, "home")), {
     ANDENKEN_DATA: data,
     ANDENKEN_SESSION_CORPUS: corpus,
-    ANDENKEN_SESSION_PROVIDER: "vllm",
-    ANDENKEN_SESSION_ENDPOINT: "http://127.0.0.1:9",
-    ANDENKEN_SESSION_MODEL: "stub-model",
-    ANDENKEN_SESSION_DIMENSIONS: "4",
-    ANDENKEN_INDEX_AUTHORITY: fs.readFileSync(path.join(os.homedir(), ".current-device"), "utf-8").trim(),
+    ...profileEnv("SESSION", DEAD_ENDPOINT),
+    // sync-sessions.sh sets the session endpoint itself; keep its placement dead too.
+    ANDENKEN_SYNC_ENDPOINT: DEAD_ENDPOINT,
+    ANDENKEN_INDEX_AUTHORITY: SYNTHETIC_DEVICE,
     [SESSIONS_LOCK_ENV]: "",
     SKIP_GATHER: "1",
-  };
+  });
   // The winner: a shell writer that holds the lock and writes its own marker manifest.
   const marker = JSON.stringify({ version: 1, files: { "/winner/marker": {} }, lastUpdated: "winner" });
   const winner = spawn("bash", ["-c", `. scripts/lib/sessions-lock.sh; sessions_lock_acquire "winner-writer"; printf '%s' '${marker}' > "$ANDENKEN_DATA/durable-manifest.json"; sleep 4`], { cwd: repo, env });
@@ -204,7 +204,7 @@ console.log("\n# real writers race the lock (subprocess)");
   eq(dry.status, 0, "index:durable --dry-run needs no lock and runs meanwhile");
   eq(fs.readFileSync(path.join(data, "durable-manifest.json"), "utf-8"), marker, "the losers wrote nothing into the winner's manifest");
   await new Promise((r2) => winner.on("exit", r2));
-  const s = new VectorStore(path.join(data, "sessions.lance"), 4);
+  const s = new VectorStore(path.join(data, "sessions.lance"), DIM, { profile: PROFILE });
   await s.init();
   eq(await s.getCount(), 0, "the losers wrote no rows");
   await s.close();

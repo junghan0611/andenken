@@ -683,7 +683,7 @@ async function openTrack(id: TrackId): Promise<Track> {
     );
   }
 
-  const store = new VectorStore(dbPath, provider.dimensions || 4096);
+  const store = new VectorStore(dbPath, provider.dimensions, { readOnly: true, profile: provider.profile ?? null });
   await store.init();
 
   // Dim guard mirrors cli.ts: fail loud on provider/DB mismatch so paid embed

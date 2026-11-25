@@ -26,6 +26,8 @@ import * as path from "node:path";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { writeFakeArchiveHelper } from "./corpus-archive-fake.ts";
 import { CONTROL_V1_PIN, MANIFEST_POLICY_FIELD } from "./session-policy.ts";
+import { makeStamp } from "./embedding-profile.ts";
+import { DEAD_ENDPOINT, PROFILE, profileEnv } from "./test-support-generation.ts";
 
 const REPO = import.meta.dirname;
 const TSX = path.join(REPO, "node_modules", ".bin", "tsx");
@@ -405,14 +407,7 @@ await check("scope of the Node check: a matching FD that NOBODY held passes too 
 
 const nodata = path.join(root, "nodata");
 fs.mkdirSync(nodata, { recursive: true });
-const writerEnv = {
-  ANDENKEN_SESSION_PROVIDER: "vllm",
-  ANDENKEN_SESSION_ENDPOINT: "http://127.0.0.1:9",
-  ANDENKEN_SESSION_MODEL: "mock",
-  ANDENKEN_SESSION_DIMENSIONS: "8",
-  ANDENKEN_SESSION_API_KEY: "dummy",
-  ANDENKEN_SESSION_PAID_REMOTE: "0",
-};
+const writerEnv = profileEnv("SESSION", DEAD_ENDPOINT);
 for (const [name, args] of [
   ["indexer.ts sessions", ["indexer.ts", "sessions"]],
   ["indexer.ts durable", ["indexer.ts", "durable"]],
@@ -513,14 +508,14 @@ await check("generation gate: another ANDENKEN_SYNC_PROFILE, or a stampless sess
   fs.mkdirSync(path.join(legacy, "sessions.lance"), { recursive: true });
   const r = sync(["--local"], { ANDENKEN_DATA: legacy });
   strictEqual(r.status, 2, r.out);
-  ok(r.out.includes("no generation stamp") && r.out.includes("legacy 4096d store"), r.out);
+  ok(r.out.includes("no generation stamp"), r.out);
   deepStrictEqual(phases(), []);
   deepStrictEqual(lines(calls), []);
 });
 await check("a stamped 1024d store is accepted by the generation gate (the stamp is what counts)", () => {
   const stamped = path.join(root, "stamped-data");
   fs.mkdirSync(path.join(stamped, "sessions.lance"), { recursive: true });
-  fs.writeFileSync(path.join(stamped, "sessions.lance", "andenken-profile.json"), "{}");
+  fs.writeFileSync(path.join(stamped, "sessions.lance", "andenken-profile.json"), JSON.stringify(makeStamp(PROFILE)));
   const r = sync(["--local"], { ANDENKEN_DATA: stamped });
   ok(!r.out.includes("no generation stamp") && !r.out.includes("the only sync generation"), r.out);
 });

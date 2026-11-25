@@ -14,6 +14,7 @@ import {
   decideStoreAccess,
   writeStoreStamp,
   type EmbeddingProfile,
+  type StampProducer,
   type StoreProfileDecision,
 } from "./embedding-profile.js";
 import * as path from "node:path";
@@ -208,17 +209,16 @@ export function getSessionsDbPath(): string {
 
 /**
  * MD track (public garden export) LanceDB path. Separate file from sessions
- * and org — the three tracks must never share a store even if two of them
- * happen to use the same dim (sessions and md both run 4096d today).
+ * and openclaw — tracks never share a store even when they share a generation
+ * (sessions and md both use ollama-bge-m3-1024).
  */
 export function getMdDbPath(): string {
   return path.join(getDataDir(), "md.lance");
 }
 
 /**
- * OpenClaw harvest track. Same 4096d as sessions and md — not by agreement but
- * because OpenClaw independently chose `qwen/qwen3-embedding-8b` too, which is
- * what makes importing its vectors possible at all. Still its own file: the
+ * OpenClaw harvest track: OpenClaw's own OpenRouter `baai/bge-m3` 1024d vectors
+ * (store generation `openrouter-bge-m3-1024`), imported as they are. Its own file: the
  * chunking is theirs (400-token chunks), the provenance is theirs, and one DB is
  * never a fallback for another.
  *
@@ -438,16 +438,19 @@ export class VectorStore {
    * is stamped at creation.
    */
   private profile: EmbeddingProfile | null | undefined;
+  /** A harvest writer's producer facts, stamped with a fresh table. */
+  private producer: StampProducer | undefined;
 
   constructor(
     dbPath?: string,
-    vectorDim: number = 2560,
-    opts: { readOnly?: boolean; profile?: EmbeddingProfile | null } = {},
+    vectorDim: number = 0,
+    opts: { readOnly?: boolean; profile?: EmbeddingProfile | null; producer?: StampProducer } = {},
   ) {
     this.dbPath = dbPath ?? getSessionsDbPath();
     this.vectorDim = vectorDim;
     this.readOnly = opts.readOnly ?? false;
     this.profile = opts.profile;
+    this.producer = opts.producer;
     if (this.profile && this.profile.dimensions !== vectorDim) {
       throw new StoreProfileRefused("store-profile-dimension-disagrees");
     }
@@ -486,6 +489,11 @@ export class VectorStore {
    */
   private async createTable(): Promise<void> {
     if (!this.db) throw new Error("DB not connected");
+    // No dimension default: a table is created only by a writer that knows its
+    // generation's dimension (2026-11-25; there is no 2560/4096 fallback).
+    if (!(Number.isInteger(this.vectorDim) && this.vectorDim > 0)) {
+      throw new StoreProfileRefused("store-dimension-unknown");
+    }
 
     const dummyVector = Array.from({ length: this.vectorDim }).fill(
       0,
@@ -509,7 +517,7 @@ export class VectorStore {
       { mode: "overwrite" },
     );
     await this.table.delete("id = '__schema__'");
-    if (this.profile) writeStoreStamp(this.dbPath, this.profile, 0);
+    if (this.profile) writeStoreStamp(this.dbPath, this.profile, 0, this.producer);
   }
 
   async init(): Promise<void> {
@@ -1180,13 +1188,15 @@ export class VectorStore {
    * Generation guard (model identity, not just dimension). Never throws.
    * `undefined` profile (caller did not opt in) → dimension check only.
    */
-  async checkProfile(): Promise<StoreProfileDecision> {
+  async checkProfile(access: "write" | "query" = "query"): Promise<StoreProfileDecision> {
     const dim = await this.checkCompatibleDim();
     if (!dim.ok) return { ok: false, code: "store-dimension-mismatch" };
-    if (this.profile === undefined) return { ok: true, basis: "legacy-unstamped" };
+    // A caller that names no profile gets no generation answer: every live read
+    // and write path passes one, so `undefined` means "not a vector consumer".
+    if (this.profile === undefined) return { ok: false, code: "no-profile-given" };
     try {
       const rows = this.table ? await this.table.countRows() : 0;
-      return decideStoreAccess(this.dbPath, this.profile, rows, dim.actual ?? null);
+      return decideStoreAccess(this.dbPath, this.profile, rows, dim.actual ?? null, access);
     } catch (err) {
       return { ok: false, code: "store-profile-check-failed" };
     }
@@ -1194,7 +1204,7 @@ export class VectorStore {
 
   /** Write-path form of `checkProfile`: throws `StoreProfileRefused`. */
   async assertProfileForWrite(): Promise<void> {
-    const d = await this.checkProfile();
+    const d = await this.checkProfile("write");
     if (!d.ok) throw new StoreProfileRefused(d.code);
   }
 

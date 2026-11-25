@@ -1187,7 +1187,7 @@ await check("resume refuses by name: receipt profile, fingerprint, store stamp (
   fs.writeFileSync(stampFile, JSON.stringify(other));
   await refusedResume("candidate-store-profile-mismatch", a.p, a.t);
   fs.rmSync(stampFile);
-  await refusedResume("candidate-store-unstamped-unknown-generation", a.p, a.t);
+  await refusedResume("candidate-store-unstamped", a.p, a.t);
   fs.writeFileSync(stampFile, "{ not json");
   await refusedResume("candidate-store-stamp-invalid", a.p, a.t);
   fs.writeFileSync(stampFile, stampOrig);

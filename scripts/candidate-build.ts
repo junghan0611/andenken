@@ -825,7 +825,7 @@ async function reconcileTarget(
     // The store stamp names the generation of the rows already there (embedding-profile.ts).
     const decision = decideStoreProfile(path.join(target, "sessions.lance"), CANDIDATE_PROFILE, db.rows, db.dim);
     if (!decision.ok) throw new BuildRefused(`candidate-${decision.code}`);
-    // Rows without a stamp are an unknown generation even if the dimension agrees (the legacy exemption is not this profile's).
+    // Rows without a stamp are an unknown generation even if the dimension agrees.
   }
   if (db.duplicateIds > 0) throw new BuildRefused("candidate-db-duplicate-id");
 

@@ -1000,7 +1000,7 @@ const embedSplitScope = new AsyncLocalStorage<EmbedSplit>();
  * durable text split inside it (across awaits) uses `split.target` and then
  * the hard code-point ceiling, so no part can exceed what the runtime embeds
  * without truncation. `split` undefined = the historical split, unchanged —
- * the 4096d production path never enters a scope.
+ * a writer that names no profile never enters a scope (and cannot write).
  *
  * A scope, not a parameter, because the split sits five calls below every
  * extraction entry point; a caller that forgets the scope gets the historical

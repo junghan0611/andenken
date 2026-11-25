@@ -223,7 +223,7 @@ test("R13 a file discovered and then deleted before classification is skipped, n
 
 type FakeTable = { countRows?: () => Promise<number>; query?: () => unknown };
 function storeWith(table: FakeTable | null) {
-  const s = new VectorStore(path.join(TMP, `never-opened-${++n}.lance`), 4096);
+  const s = new VectorStore(path.join(TMP, `never-opened-${++n}.lance`), 1024);
   const any = s as unknown as { table: unknown; ensureInitialized: () => Promise<void> };
   any.table = table;
   any.ensureInitialized = async () => {}; // never connect
@@ -298,7 +298,7 @@ test("R12 import side effects: nothing written under the isolated HOME or data d
 // --- D. delete errors ----------------------------------------------------------------
 
 test("D1 VectorStore.deleteByFile rejects when the table delete fails", async () => {
-  const store = new VectorStore(path.join(TMP, "never-opened.lance"), 4096);
+  const store = new VectorStore(path.join(TMP, "never-opened.lance"), 1024);
   (store as unknown as { table: unknown }).table = { delete: async () => { throw new Error("stub delete failure"); } };
   await rejects(store.deleteByFile("/x/a.jsonl"), /stub delete failure/);
 });
@@ -307,7 +307,7 @@ test("D2 deleteByFile early-return branch: table still absent after ensureTable 
   // Stub covers only the `if (!this.table) return` branch. The real no-table
   // path creates an empty table in ensureTable() and deletes against it; that is
   // a LanceDB behaviour (coverage M6 receipt), not exercised here.
-  const store = new VectorStore(path.join(TMP, "never-opened2.lance"), 4096);
+  const store = new VectorStore(path.join(TMP, "never-opened2.lance"), 1024);
   (store as unknown as { ensureTable: () => Promise<void> }).ensureTable = async () => {};
   await store.deleteByFile("/x/a.jsonl");
 });

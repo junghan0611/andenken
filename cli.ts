@@ -50,7 +50,7 @@ import { FtsDiagnosticsCollector, ftsRequestReport } from "./fts-diagnostics.js"
  * Track-aware provider getters.
  *
  * searchSessions and searchMd each pick the provider that matches the corpus
- * they're querying. Sessions and md both use 4096d today, but they remain
+ * they're querying. Sessions and md share a generation today, but they remain
  * separate stores/providers so costs and lifecycle do not bleed across tracks.
  *
  * Sessions and md are namespaced (ANDENKEN_SESSION_* / ANDENKEN_MD_*) with no
@@ -65,9 +65,8 @@ function getSessionsProvider(): EmbeddingProvider {
     console.error(
       JSON.stringify({
         error:
-          "No sessions embedding provider available. Set ANDENKEN_SESSION_PROVIDER " +
-          "(and ANDENKEN_SESSION_ENDPOINT / _MODEL / _API_KEY). " +
-          "PR-A's transitional ANDENKEN_VLLM_* fallback was removed in PR-B.",
+          "No sessions embedding provider available. Set ANDENKEN_SESSION_PROFILE=ollama-bge-m3-1024 " +
+          "(placement: ANDENKEN_SESSION_ENDPOINT, a loopback URL). There is no model-string or fallback path.",
       }),
     );
     process.exit(1);
@@ -80,8 +79,8 @@ function getMdProvider(): EmbeddingProvider {
   if (!p) {
     console.error(
       JSON.stringify({
-        error: "No md embedding provider available — set ANDENKEN_MD_PROVIDER " +
-               "(and ANDENKEN_MD_ENDPOINT / _MODEL / _API_KEY).",
+        error: "No md embedding provider available — set ANDENKEN_MD_PROFILE=ollama-bge-m3-1024 " +
+               "(placement: ANDENKEN_MD_ENDPOINT, a loopback URL). There is no model-string or fallback path.",
       }),
     );
     process.exit(1);
@@ -173,7 +172,7 @@ async function searchSessions(
 ): Promise<void> {
   const source = normalizeSourceFilter(opts.source);
   const provider = getSessionsProvider();
-  const dim = provider.dimensions || 2560;
+  const dim = provider.dimensions;
 
   // Phase 1 — assemble filter object from CLI opts. When every filter is
   // absent and mode is undefined, behavior is identical to pre-Phase-1
@@ -194,12 +193,9 @@ async function searchSessions(
 
   // PR-D: dim safety MUST run before any embedQuery() call.
   //
-  // Scenario this prevents: PR-B switches sessions to OpenRouter
-  // qwen/qwen3-embedding-8b (4096d) while data/sessions.lance still holds
-  // the old 2560d index. Without this guard the configured 4096d would
-  // trigger a paid OpenRouter call FIRST, then LanceDB would silently fall
-  // back to FTS-only (store.ts:237). Fail-loud is the right answer:
-  // operator must run rebuild-sessions-full.sh.
+  // Scenario this prevents: a provider whose dimension differs from the
+  // store's would embed FIRST and then LanceDB would silently fall back to
+  // FTS-only (store.ts). Fail-loud is the right answer.
   //
   // Mirrors searchKnowledge / knowledge_search dim guards. Empty/fresh DB
   // passes through (checkCompatibleDim returns ok with actual=null).
@@ -314,7 +310,7 @@ async function searchSessions(
   // When sessions results are thin, supplement with hits from the public
   // garden md corpus. Two safety boundaries: re-embed the query through
   // mdProvider (NOT through `provider`, the sessions provider — coupling
-  // tracks is wrong even though both are 4096d today), and confirm dim
+  // tracks is wrong even though both share a generation today), and confirm dim
   // compatibility before issuing the search. If either boundary fails,
   // sessions results are still returned with a diagnostic — session search
   // never fails because of md-side issues.
@@ -349,7 +345,7 @@ async function searchSessions(
     if (!mdProvider) {
       fallbackDiagnostic = fallbackDiagnostic ?? "knowledge fallback skipped: no md provider";
     } else {
-      const mdDim = mdProvider.dimensions || 4096;
+      const mdDim = mdProvider.dimensions;
       const mdStore = new VectorStore(mdDbPath, mdDim, { readOnly: true, profile: profileOfProvider(mdProvider) });
       await mdStore.init();
       const dimCheck = await mdStore.checkCompatibleDim();
@@ -418,7 +414,7 @@ async function searchMd(query: string, limit: number, full: boolean = false): Pr
   // is one contract for every axis now (openAxisForRead → state:"absent", exit 4),
   // and md was the only axis that had ever been given a gate at all.
   const provider = getMdProvider();
-  const dim = provider.dimensions || 4096;
+  const dim = provider.dimensions;
 
   const store = await openAxisForRead(mdDbPath, dim, provider);
 
@@ -481,7 +477,7 @@ async function status(): Promise<void> {
   let mdFiles = 0;
   const mdExists = fs.existsSync(mdDbPath);
   if (mdExists) {
-    const mdStore = new VectorStore(mdDbPath, 4096, { readOnly: true });
+    const mdStore = new VectorStore(mdDbPath, undefined, { readOnly: true });
     try {
       await mdStore.init();
       mdCount = await mdStore.getCount();
@@ -543,7 +539,7 @@ async function reindex(force: boolean): Promise<void> {
 }
 
 async function reindexLocked(provider: EmbeddingProvider, paid: boolean, force: boolean): Promise<void> {
-  const dim = provider.dimensions || 2560;
+  const dim = provider.dimensions;
 
   const store = new VectorStore(sessionDbPath, dim, { profile: profileOfProvider(provider) });
   await store.init();
@@ -677,18 +673,19 @@ function parseArgs() {
  * and whether it came from what the bot SAID (`sessions`) or KEPT (`memory`):
  * those are different kinds of evidence and must not be quoted as if they were.
  *
- * The query embeds with the sessions provider on purpose: OpenClaw independently
- * chose the same `qwen/qwen3-embedding-8b` at 4096d, which is the coincidence that
- * lets a query vector from here land in a space built over there.
+ * The harvest's vectors are OpenRouter `baai/bge-m3` (store generation
+ * `openrouter-bge-m3-1024`). Andenken never embeds with OpenRouter, so a local
+ * Ollama query vector may search it ONLY when the store carries a human query
+ * attestation for that pair (`./run.sh attest:query`); otherwise this refuses.
  */
 async function searchOpenclaw(query: string, limit: number, full: boolean): Promise<void> {
   // The OpenClaw query provider is its own namespace (ANDENKEN_OPENCLAW_QUERY_*).
   // Only when that is unset does it fall back to the sessions provider — and the
   // generation check in openAxisForRead then refuses unless the store is that
-  // provider's own generation (today: the unstamped legacy 4096d harvest). A
-  // sessions migration therefore cannot silently re-point OpenClaw queries.
+  // provider's own generation or carries a query attestation for it. Nothing
+  // can silently re-point OpenClaw queries.
   const provider = createOpenclawQueryProviderFromEnv() ?? getSessionsProvider();
-  const store = await openAxisForRead(getOpenclawDbPath(), provider.dimensions || 4096, provider);
+  const store = await openAxisForRead(getOpenclawDbPath(), provider.dimensions, provider);
 
   const dimCheck = await store.checkCompatibleDim();
   if (!dimCheck.ok) {

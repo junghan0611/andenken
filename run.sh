@@ -112,12 +112,11 @@ Usage: ./run.sh <command> [args]
                               Refuses an already pinned dir. Cutover step only.
                               default = INCREMENTAL (manifest-driven)
                               --full  = whole corpus
-                              price: ANDENKEN_SESSION_PRICE_PER_M_TOKENS
-                                  > OPENROUTER_QWEN_8B_PRICE > 0.01
-  estimate:md [--full]        Issue #8: md OpenRouter 8B estimate (API 0)
+                              price: ANDENKEN_SESSION_PRICE_PER_M_TOKENS, else 0
+                                  (the local generation has no API price)
+  estimate:md [--full]        md estimate (API 0)
                               CJK-weighted token model, per-folder breakdown
-                              price: ANDENKEN_MD_PRICE_PER_M_TOKENS
-                                  > OPENROUTER_QWEN_8B_PRICE > 0.01
+                              price: ANDENKEN_MD_PRICE_PER_M_TOKENS, else 0
   sync:openclaw [--full]      Harvest OpenClaw's own index: export → freshness
                               board → import → reconcile DRY-RUN. Zero embedding
                               cost — the vectors come already computed. Append-only;
@@ -215,6 +214,10 @@ Usage: ./run.sh <command> [args]
                               sessions 429 rescheduler, provider error diagnostics and
                               the index-run finalization seam (API 0: fetch stubbed,
                               fake clock, temp HOME/ANDENKEN_DATA, no ~/.env.local)
+  attest:query --db <sessions|md|openclaw> --query-profile <id> --evidence <ref>... --by <name>
+                              HUMAN step (TTY "yes"): record that <id> vectors may QUERY a
+                              store of another generation (e.g. Ollama BGE-M3 → OpenClaw
+                              OpenRouter BGE-M3) on named evidence. Never permits writes.
   test:profile                Type fence (tsconfig.profile.json) + synthetic suite for the
                               embedding generation contract: profiles, reply validation,
                               input-length fail-closed, Ollama digest, env refusal, store
@@ -510,6 +513,8 @@ case "${1:-help}" in
     # removes credential-shaped env names from its own process before any test.
     cd "$SCRIPT_DIR" && node node_modules/typescript/bin/tsc -p tsconfig.retry.json \
       && node --import tsx embed-retry.test.ts ;;
+  attest:query)
+    shift; cd "$SCRIPT_DIR" && pnpm exec tsx scripts/attest-query.ts "$@" ;;
   test:profile)
     # API 0: no load_env; fetch stubbed, temp HOME/ANDENKEN_DATA, credential env removed.
     cd "$SCRIPT_DIR" && node node_modules/typescript/bin/tsc -p tsconfig.profile.json \

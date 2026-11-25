@@ -1,5 +1,5 @@
 /**
- * Unified Indexer — Sessions + Org (dim follows active provider; runtime 2560d with Qwen3-4B)
+ * Unified Indexer — Sessions + MD (dimension and generation follow the provider profile)
  *
  * Parallel embedding + batched DB writes to minimize LanceDB fragments.
  *
@@ -419,9 +419,8 @@ function getSessionsProvider(): EmbeddingProvider {
   const p = createSessionProviderFromEnv();
   if (!p) {
     throw new Error(
-      "No sessions embedding provider available. Set ANDENKEN_SESSION_PROVIDER " +
-      "(and ANDENKEN_SESSION_ENDPOINT / _MODEL / _API_KEY). PR-A's transitional " +
-      "legacy fallback was removed in PR-B.",
+      "No sessions embedding provider available. Set ANDENKEN_SESSION_PROFILE=ollama-bge-m3-1024 " +
+      "(placement: ANDENKEN_SESSION_ENDPOINT, a loopback URL). There is no model-string or fallback path.",
     );
   }
   console.log(`📡 Sessions provider: ${p.name} (${p.dimensions}d)`);
@@ -432,15 +431,15 @@ function getSessionsProvider(): EmbeddingProvider {
  * MD-track provider for the CLI indexer (Issue #8).
  *
  * Reads ANDENKEN_MD_* exclusively. No legacy fallback — md is a new track
- * and must never pick up the org-shaped vLLM env by accident. Recommended
- * provider is OpenRouter qwen/qwen3-embedding-8b 4096d, same as sessions.
+ * and must never pick up another track's env by accident. Generation:
+ * ollama-bge-m3-1024 (ANDENKEN_MD_PROFILE), same as sessions.
  */
 function getMdProvider(): EmbeddingProvider {
   const p = createMdProviderFromEnv();
   if (!p) {
     throw new Error(
-      "No md embedding provider available. Set ANDENKEN_MD_PROVIDER " +
-      "(and ANDENKEN_MD_ENDPOINT / _MODEL / _DIMENSIONS / _API_KEY).",
+      "No md embedding provider available. Set ANDENKEN_MD_PROFILE=ollama-bge-m3-1024 " +
+      "(placement: ANDENKEN_MD_ENDPOINT, a loopback URL). There is no model-string or fallback path.",
     );
   }
   console.log(`📡 MD provider: ${p.name} (${p.dimensions}d)`);
@@ -520,7 +519,7 @@ async function indexSessions(force: boolean) {
   // with zero requests instead of being re-saved later.
   const ledgerAtStart = policy.pinned ? loadS0Ledger() : null;
   const provider = getSessionsProvider();
-  // No active Qwen build: refused before the store, the corpus or any request.
+  // Only a profiled generation writes: refused before the store, the corpus or any request.
   const legacyWriter = writerRefusal(provider);
   if (legacyWriter) throw new Error(`index:sessions refused — ${legacyWriter}`);
   return withEmbedSplit(embedSplitFor(profileOfProvider(provider)), async () => {
@@ -551,7 +550,7 @@ async function indexSessions(force: boolean) {
     if (refusal) throw new Error(refusal);
   }
 
-  const store = new VectorStore(undefined, provider.dimensions || 2560, { profile: profileOfProvider(provider) });
+  const store = new VectorStore(undefined, provider.dimensions, { profile: profileOfProvider(provider) });
   await store.init();
   if (force) {
     // The reset takes the pi-durable rows too, so their checkpoint goes — FIRST.
@@ -800,7 +799,7 @@ async function indexDurable(dryRun: boolean, json: boolean) {
   const legacyWriter = writerRefusal(provider);
   if (legacyWriter) throw new Error(`index:durable refused — ${legacyWriter}`);
   return withEmbedSplit(embedSplitFor(profileOfProvider(provider)), async () => {
-  const store = new VectorStore(undefined, provider.dimensions || 2560, { profile: profileOfProvider(provider) });
+  const store = new VectorStore(undefined, provider.dimensions, { profile: profileOfProvider(provider) });
   await store.init();
   await store.ensureTable();
   await store.assertCompatibleDim();
@@ -824,7 +823,7 @@ async function indexDurable(dryRun: boolean, json: boolean) {
 // --- MD Indexing (public garden direct embedding) ---
 //
 // Operates on `~/repos/gh/notes/content` exported Markdown via md-chunker.
-// Provider: ANDENKEN_MD_* (recommended: OpenRouter Qwen3-Embedding-8B 4096d).
+// Provider: ANDENKEN_MD_PROFILE (ollama-bge-m3-1024).
 // Store: data/md.lance — separate LanceDB from sessions and org.
 // Manifest: data/md-manifest.json — mtime/size driven incremental.
 //
@@ -864,7 +863,7 @@ async function indexMd(force: boolean) {
 
   const profile = profileOfProvider(provider);
   const mdChunkOptions = { maxEmbedCodepoints: profile ? maxInputCodepoints(profile, "document") ?? undefined : undefined };
-  const store = new VectorStore(getMdDbPath(), provider.dimensions || 4096, { profile });
+  const store = new VectorStore(getMdDbPath(), provider.dimensions, { profile });
   await store.init();
   if (force) await store.reset();
   await store.ensureTable();
@@ -1231,7 +1230,7 @@ async function collectMdStatus(): Promise<StatusTrack> {
   let actualDim: number | null = null;
   let indexedFiles = new Set<string>();
   if (exists) {
-    const store = new VectorStore(dbPath, 4096);
+    const store = new VectorStore(dbPath);
     await store.init();
     count = await store.getCount();
     actualDim = await store.getActualVectorDim();
@@ -1387,7 +1386,7 @@ async function status() {
   // watermark, so freshness is stated as "how recent is the newest chunk we
   // hold, per bot" rather than as an indexed/total file ratio.
   if (fs.existsSync(getOpenclawDbPath())) {
-    const ocStore = new VectorStore(getOpenclawDbPath(), 4096, { readOnly: true });
+    const ocStore = new VectorStore(getOpenclawDbPath(), undefined, { readOnly: true });
     await ocStore.init();
     const ocCount = await ocStore.getCount();
     const ocDim = await ocStore.getActualVectorDim();
@@ -1568,7 +1567,7 @@ async function cleanup(target: string) {
       await probe.init();
       const actualDim = await probe.getActualVectorDim();
       await probe.close();
-      const store = new VectorStore(dbPath, actualDim ?? 4096);
+      const store = new VectorStore(dbPath, actualDim ?? undefined);
       await store.init();
       const indexed = await store.getIndexedFiles();
       for (const f of trackedFiles) {
@@ -1704,13 +1703,13 @@ async function verify(target: string, opts: { requireFts?: boolean } = {}) {
     await probe.close();
 
     const configuredDim = safeProviderDim(t);
-    const dim = actualDim ?? configuredDim ?? 2560;
+    const dim = actualDim ?? configuredDim ?? 0;
     const dimNote =
       actualDim !== null && actualDim !== undefined
         ? `actual=${actualDim}d`
         : configuredDim
           ? `empty (provider=${configuredDim}d)`
-          : `empty (default 2560d)`;
+          : `empty (no configured generation)`;
     pass(`Dim: ${dimNote}`);
     if (
       actualDim &&
@@ -1735,7 +1734,7 @@ async function verify(target: string, opts: { requireFts?: boolean } = {}) {
       // generation is not this store's.
       const stamp = readStoreStamp(dbPath);
       if (stamp.state === "ok") pass(`Generation stamp: ${stamp.stamp.profileId} (${stamp.stamp.fingerprint.slice(0, 12)}…, ${stamp.stamp.dimensions}d)`);
-      else if (stamp.state === "absent") pass(`Generation stamp: none (pre-stamp store; only the legacy 4096d profile may use it)`);
+      else if (stamp.state === "absent") fail(`Generation stamp: none — an unstamped store is an unknown generation`);
       else fail(`Generation stamp unreadable: ${stampPath(dbPath)}`);
       let provider: EmbeddingProvider | null = null;
       try {
@@ -1850,8 +1849,7 @@ async function verify(target: string, opts: { requireFts?: boolean } = {}) {
 //
 // Price resolution (in order):
 //   1. ANDENKEN_SESSION_PRICE_PER_M_TOKENS env (sessions-namespaced)
-//   2. OPENROUTER_QWEN_8B_PRICE env (alias for openrouter qwen 8B)
-//   3. default 0.01 USD per million tokens
+//   2. otherwise 0 — the local generation has no API price
 //
 // Caveat printed in output: chars/2.5 is an approximation; OpenRouter actual
 // usage may differ ±20% depending on tokenizer.
@@ -1939,16 +1937,10 @@ async function estimate(target: string) {
   // Keeps the estimate consistent with stats once the actual rebuild runs.
   const tokens = Math.ceil(totalChars / 2.5);
 
-  // Price precedence (matches scripts/rebuild-sessions-full.sh):
-  //   1. ANDENKEN_SESSION_PRICE_PER_M_TOKENS
-  //   2. OPENROUTER_QWEN_8B_PRICE
-  //   3. 0.01
-  const priceRaw =
-    process.env.ANDENKEN_SESSION_PRICE_PER_M_TOKENS ??
-    process.env.OPENROUTER_QWEN_8B_PRICE ??
-    "0.01";
-  const pricePerM = parseFloat(priceRaw);
-  const price = Number.isFinite(pricePerM) && pricePerM > 0 ? pricePerM : 0.01;
+  // The local generation has no API price; an explicit per-M price is still
+  // honoured for an operator who wants to cost a different runtime.
+  const pricePerM = parseFloat(process.env.ANDENKEN_SESSION_PRICE_PER_M_TOKENS ?? "0");
+  const price = Number.isFinite(pricePerM) && pricePerM > 0 ? pricePerM : 0;
   const cost = (tokens / 1_000_000) * price;
 
   const header = fullMode ? "Sessions estimate (FULL REBUILD)" : "Sessions estimate (INCREMENTAL)";
@@ -2015,7 +2007,7 @@ async function estimateMd() {
       let indexed = new Set<string>();
       const mDbPath = getMdDbPath();
       if (fs.existsSync(mDbPath)) {
-        const store = new VectorStore(mDbPath, 4096);
+        const store = new VectorStore(mDbPath);
         await store.init();
         indexed = await store.getIndexedFiles();
         await store.close();
@@ -2087,12 +2079,8 @@ async function estimateMd() {
   // CJK-aware token estimate: weightedChars / 4 ≈ tokens.
   const tokens = Math.ceil(totalWeightedChars / 4);
 
-  const priceRaw =
-    process.env.ANDENKEN_MD_PRICE_PER_M_TOKENS ??
-    process.env.OPENROUTER_QWEN_8B_PRICE ??
-    "0.01";
-  const pricePerM = parseFloat(priceRaw);
-  const price = Number.isFinite(pricePerM) && pricePerM > 0 ? pricePerM : 0.01;
+  const pricePerM = parseFloat(process.env.ANDENKEN_MD_PRICE_PER_M_TOKENS ?? "0");
+  const price = Number.isFinite(pricePerM) && pricePerM > 0 ? pricePerM : 0;
   const cost = (tokens / 1_000_000) * price;
 
   const header = fullMode ? "MD estimate (FULL CORPUS)" : "MD estimate (INCREMENTAL)";

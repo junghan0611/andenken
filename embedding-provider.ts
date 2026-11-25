@@ -49,6 +49,9 @@ export interface EmbeddingProvider {
   /** Vector dimensions this provider produces */
   readonly dimensions: number;
 
+  /** The embedding generation this provider speaks for (embedding-profile.ts). */
+  readonly profile?: EmbeddingProfile;
+
   /** Embed a single text for search (query time) */
   embedQuery(text: string): Promise<number[]>;
 
@@ -126,47 +129,6 @@ export class CachingProvider implements EmbeddingProvider {
   }
 }
 
-// --- Gemini Provider ---
-
-import {
-  embedQuery as geminiEmbedQuery,
-  embedDocument as geminiEmbedDocument,
-  embedDocumentBatch as geminiEmbedDocumentBatch,
-  getApiStats as geminiGetApiStats,
-  resetApiStats as geminiResetApiStats,
-  type GeminiEmbeddingConfig,
-} from "./gemini-embeddings.js";
-
-export class GeminiProvider implements EmbeddingProvider {
-  readonly name = "gemini";
-  readonly dimensions: number;
-  private config: GeminiEmbeddingConfig;
-
-  constructor(config: GeminiEmbeddingConfig) {
-    this.config = config;
-    this.dimensions = config.dimensions ?? 768;
-  }
-
-  async embedQuery(text: string): Promise<number[]> {
-    return geminiEmbedQuery(text, this.config);
-  }
-
-  async embedDocument(text: string): Promise<number[]> {
-    return geminiEmbedDocument(text, this.config);
-  }
-
-  async embedDocumentBatch(texts: string[]): Promise<number[][]> {
-    return geminiEmbedDocumentBatch(texts, this.config);
-  }
-
-  getStats(): EmbeddingStats {
-    return geminiGetApiStats();
-  }
-
-  resetStats(): void {
-    geminiResetApiStats();
-  }
-}
 
 // --- vLLM Provider ---
 
@@ -800,9 +762,6 @@ export class VLLMProvider implements EmbeddingProvider {
   }
 }
 
-// --- Model Presets ---
-
-import { getModelPreset } from "./model-presets.js";
 import {
   assertInputsFit,
   getProfile,
@@ -811,53 +770,6 @@ import {
   verifyRuntimeIdentity,
   type EmbeddingProfile,
 } from "./embedding-profile.js";
-
-// --- Factory ---
-
-export interface ProviderConfig {
-  type?: "gemini" | "vllm";
-  // Gemini
-  apiKey?: string;
-  geminiModel?: string;
-  geminiDimensions?: number;
-  // vLLM
-  vllmEndpoint?: string;
-  vllmModel?: string;
-  vllmDimensions?: number;
-  vllmQueryInstruction?: string;
-  vllmDocumentInstruction?: string;
-  vllmMaxBatchSize?: number;
-}
-
-/**
- * Create embedding provider from explicit config.
- */
-export function createProvider(config: ProviderConfig): EmbeddingProvider {
-  if (config.type === "vllm") {
-    if (!config.vllmEndpoint) throw new Error("ANDENKEN_VLLM_ENDPOINT required for vllm provider");
-    if (!config.vllmModel) throw new Error("ANDENKEN_VLLM_MODEL required for vllm provider");
-    return new VLLMProvider({
-      endpoint: config.vllmEndpoint,
-      model: config.vllmModel,
-      dimensions: config.vllmDimensions,
-      queryInstruction: config.vllmQueryInstruction,
-      documentInstruction: config.vllmDocumentInstruction,
-      maxBatchSize: config.vllmMaxBatchSize,
-      // PR-A: explicit createProvider(config) had been silently dropping apiKey
-      // for the vllm branch. ProviderConfig.apiKey is shared across provider
-      // types; for vllm/OpenAI-compatible endpoints it is the bearer token.
-      apiKey: config.apiKey,
-    });
-  }
-
-  // Default: Gemini
-  if (!config.apiKey) throw new Error("GEMINI_API_KEY required for gemini provider");
-  return new GeminiProvider({
-    apiKey: config.apiKey,
-    model: config.geminiModel ?? "gemini-embedding-2-preview",
-    dimensions: (config.geminiDimensions ?? 768) as 768,
-  });
-}
 
 // --- Env reading: shared $VAR-aware getter ---
 //
@@ -924,24 +836,6 @@ function readEnvWithFileFallback(key: string): string | undefined {
   return getEnvFile()[key];
 }
 
-/**
- * Map provider type strings to the concrete class.
- *
- * - "vllm"        → VLLMProvider (local /v1/embeddings)
- * - "openrouter"  → VLLMProvider with paid-remote default (OpenAI-compatible)
- * - "gemini"      → GeminiProvider
- *
- * The "openrouter" alias is purely cosmetic at this layer (it still
- * constructs VLLMProvider). The classification matters for downstream
- * paid-remote signalling, which lands in PR-B.
- */
-export type ResolvedProviderType = "vllm" | "openrouter" | "gemini";
-export function resolveProviderType(raw: string | undefined): ResolvedProviderType | null {
-  if (!raw) return null;
-  if (raw === "vllm" || raw === "gemini" || raw === "openrouter") return raw;
-  process.stderr.write(`⚠ unknown provider type: ${raw} (allowed: vllm | openrouter | gemini)\n`);
-  return null;
-}
 
 /**
  * Build a VLLMProvider from a namespaced env reader. Used by both
@@ -958,55 +852,15 @@ function buildVllmFromNamespacedEnv(
   nameTag: string,
   providerType: "vllm" | "openrouter",
 ): VLLMProvider | null {
+  // A provider comes ONLY from a known generation profile. There is no
+  // model-string path, no preset and no dimension default (2026-11-25): an
+  // env without ANDENKEN_<NS>_PROFILE builds nothing.
   const profileId = read("PROFILE");
-  if (profileId !== undefined) return buildVllmFromProfile(read, nameTag, profileId, providerType);
-  const endpoint = read("ENDPOINT");
-  const model = read("MODEL");
-  if (!endpoint || !model) {
-    process.stderr.write(
-      `⚠ ${nameTag} provider: ENDPOINT or MODEL not set\n`,
-    );
+  if (profileId === undefined) {
+    process.stderr.write(`⚠ ${nameTag} provider: ${"PROFILE"} not set — refused (no fallback)\n`);
     return null;
   }
-  const presetName = read("PRESET") ?? model;
-  const preset = getModelPreset(presetName);
-  if (preset && read("LOG_PRESET") === "1") {
-    process.stderr.write(
-      `📋 ${nameTag} preset: ${presetName} (${preset.dimensions}d, batch=${preset.maxBatchSize})\n`,
-    );
-  }
-  const dimStr = read("DIMENSIONS");
-  const batchStr = read("MAX_BATCH_SIZE");
-  const timeoutStr = read("TIMEOUT_MS");
-  const priceStr = read("PRICE_PER_M_TOKENS");
-  const parsedPrice = priceStr !== undefined ? parseFloat(priceStr) : NaN;
-  // A namespaced (sessions / md) provider never learns its dimension from the
-  // reply: an unset, zero or garbage DIMENSIONS with no preset is refused here,
-  // before any store is opened or any request is made.
-  const dimensions = dimStr !== undefined ? parsePositiveInt(dimStr) : preset?.dimensions;
-  if (dimensions === undefined || dimensions === null || !(dimensions > 0)) {
-    process.stderr.write(
-      `⚠ ${nameTag} provider: DIMENSIONS ${dimStr === undefined ? "unset and no preset for this model" : "is not a positive integer"} — refused\n`,
-    );
-    return null;
-  }
-  return new VLLMProvider({
-    endpoint,
-    model,
-    dimensions,
-    queryInstruction: read("QUERY_INSTRUCTION") ?? preset?.queryInstruction,
-    documentInstruction: read("DOCUMENT_INSTRUCTION") ?? preset?.documentInstruction,
-    maxBatchSize: batchStr ? parseInt(batchStr, 10) : preset?.maxBatchSize,
-    apiKey: read("API_KEY"),
-    timeoutMs: timeoutStr ? parseInt(timeoutStr, 10) : undefined,
-    nameTag,
-    // PR-B: paid-remote signalling. Both env vars are namespaced
-    // (ANDENKEN_SESSION_PAID_REMOTE, ANDENKEN_SESSION_PRICE_PER_M_TOKENS, etc.)
-    // so sessions/org tracks each carry their own pricing without affecting
-    // the other.
-    paidRemote: read("PAID_REMOTE") === "1",
-    pricePerMillionInputTokens: Number.isFinite(parsedPrice) ? parsedPrice : undefined,
-  });
+  return buildVllmFromProfile(read, nameTag, profileId, providerType);
 }
 
 function parsePositiveInt(v: string): number | null {
@@ -1032,6 +886,10 @@ function buildVllmFromProfile(
     return null;
   };
   if (!profile) return refuse("unknown profile");
+  // OpenRouter generation belongs to the Oracle producer only: a hosted profile
+  // is a STORE identity here (what the harvest's vectors are), never something
+  // andenken embeds with — so no paid query path exists to fall back to.
+  if (profile.endpointClass !== "loopback") return refuse("hosted generation is a store identity only; andenken embeds only with a loopback profile");
   if (profile.endpointClass === "loopback" && providerType !== "vllm") return refuse(`PROVIDER=${providerType} contradicts a loopback profile (use vllm)`);
   const model = read("MODEL");
   if (model !== undefined && model !== profile.model) return refuse(`MODEL ${model} ≠ ${profile.model}`);
@@ -1087,127 +945,53 @@ function buildVllmFromProfile(
 
 // --- Namespaced provider factories ---
 //
-// SESSIONS and ORG run on independent env namespaces so a misconfiguration
-// on one track cannot silently bleed into the other.
-//
-// Namespace contract (PR-B):
-//   ANDENKEN_SESSION_*  — sessions track only. NEVER falls back to legacy.
-//   ANDENKEN_ORG_*      — org track only. Falls back to legacy ANDENKEN_VLLM_*.
-//
-// PR-A had a transitional `allowLegacyFallback` option for sessions so
-// existing operators with only ANDENKEN_VLLM_* didn't break immediately.
-// PR-B removes it: sessions providers now require explicit ANDENKEN_SESSION_*.
-// Operators must migrate or sessions search/index returns null/throws.
+// Each track reads its own env namespace (ANDENKEN_SESSION_*, ANDENKEN_MD_*,
+// ANDENKEN_OPENCLAW_QUERY_*) so a misconfiguration on one cannot bleed into
+// another. No namespace falls back to a legacy or shared one.
 
 /**
- * Create the SESSIONS-track embedding provider from `ANDENKEN_SESSION_*`.
- *
- * Returns null when the namespace is empty. Never reads `ANDENKEN_VLLM_*`
- * directly — sessions must opt out of the global env slot to stay isolated
- * from org indexing. PR-B removed the transitional legacy fallback.
+ * The SESSIONS provider from `ANDENKEN_SESSION_*`. Built ONLY from a known generation
+ * profile (`ANDENKEN_SESSION_PROFILE`, e.g. `ollama-bge-m3-1024`); `ANDENKEN_SESSION_PROVIDER` may be
+ * unset or `vllm`. No model-string path, no preset, no Gemini, no fallback:
+ * an absent namespace builds nothing (null).
  */
 export function createSessionProviderFromEnv(): EmbeddingProvider | null {
-  const read = (suffix: string) =>
-    readEnvWithFileFallback("ANDENKEN_SESSION_" + suffix);
-  const rawType = read("PROVIDER");
-  const providerType = resolveProviderType(rawType);
-
-  // Fail-fast on EXPLICIT-but-INVALID config. If the operator typed a
-  // namespace value (e.g. ANDENKEN_SESSION_PROVIDER=anthropic), that is a
-  // misconfiguration we must surface — silently returning null instead of
-  // applying some default would mask the typo. resolveProviderType already
-  // wrote the warning.
-  if (rawType && !providerType) return null;
-
-  if (providerType === "vllm" || providerType === "openrouter") {
-    return buildVllmFromNamespacedEnv(
-      read,
-      providerType === "openrouter" ? "sessions:openrouter" : "sessions:vllm",
-      providerType,
-    );
-  }
-  if (providerType === "gemini") {
-    // Permitted but unusual. Sessions on Gemini is a corner case.
-    const apiKey = loadGeminiKey();
-    if (!apiKey) return null;
-    return new GeminiProvider({
-      apiKey,
-      model: read("GEMINI_MODEL") ?? "gemini-embedding-2-preview",
-      dimensions: 768,
-    });
-  }
-
-  // SESSIONS namespace ABSENT → null. No legacy fallback in PR-B.
-  return null;
+  return buildFromNamespace((suffix: string) => readEnvWithFileFallback("ANDENKEN_SESSION_" + suffix), "sessions");
 }
 
 /**
- * Create the MD-track embedding provider from `ANDENKEN_MD_*`.
- *
- * Mirrors `createSessionProviderFromEnv` exactly — the md track is the
- * second "live, agent-facing" axis and uses the same provider machinery as
- * sessions. Namespaced env so a misconfiguration cannot bleed across tracks.
- * NEVER falls back to legacy `ANDENKEN_VLLM_*` (same rule as sessions).
- *
- * Recommended config (OpenRouter Qwen3-Embedding-8B, 4096d, paid-remote):
- *
- *     ANDENKEN_MD_PROVIDER=openrouter
- *     ANDENKEN_MD_ENDPOINT=https://openrouter.ai/api
- *     ANDENKEN_MD_MODEL=qwen/qwen3-embedding-8b
- *     ANDENKEN_MD_DIMENSIONS=4096
- *     ANDENKEN_MD_API_KEY=<openrouter key>
- *     ANDENKEN_MD_PAID_REMOTE=1
- *     ANDENKEN_MD_PRICE_PER_M_TOKENS=0.01
+ * The MD provider from `ANDENKEN_MD_*`. Built ONLY from a known generation
+ * profile (`ANDENKEN_MD_PROFILE`, e.g. `ollama-bge-m3-1024`); `ANDENKEN_MD_PROVIDER` may be
+ * unset or `vllm`. No model-string path, no preset, no Gemini, no fallback:
+ * an absent namespace builds nothing (null).
  */
 export function createMdProviderFromEnv(): EmbeddingProvider | null {
-  const read = (suffix: string) =>
-    readEnvWithFileFallback("ANDENKEN_MD_" + suffix);
-  const rawType = read("PROVIDER");
-  const providerType = resolveProviderType(rawType);
-
-  // Fail-fast on EXPLICIT-but-INVALID config (mirrors sessions/org).
-  if (rawType && !providerType) return null;
-
-  if (providerType === "vllm" || providerType === "openrouter") {
-    return buildVllmFromNamespacedEnv(
-      read,
-      providerType === "openrouter" ? "md:openrouter" : "md:vllm",
-      providerType,
-    );
-  }
-  if (providerType === "gemini") {
-    const apiKey = loadGeminiKey();
-    if (!apiKey) return null;
-    return new GeminiProvider({
-      apiKey,
-      model: read("GEMINI_MODEL") ?? "gemini-embedding-2-preview",
-      dimensions: 768,
-    });
-  }
-
-  // MD namespace ABSENT → null. No legacy fallback (md is a new track; we
-  // never want it picking up an old org-shaped vLLM endpoint by accident).
-  return null;
+  return buildFromNamespace((suffix: string) => readEnvWithFileFallback("ANDENKEN_MD_" + suffix), "md");
 }
 
 /**
- * OpenClaw QUERY provider from `ANDENKEN_OPENCLAW_QUERY_*` (vllm | openrouter
- * only). Null when the namespace is absent; the caller may then fall back to
- * the sessions provider, and the store generation check decides whether that
- * provider may query the harvest at all.
+ * OpenClaw QUERY provider from `ANDENKEN_OPENCLAW_QUERY_*` (same profile-only
+ * rules). Null when the namespace is absent; the caller then uses the sessions
+ * provider, and the store's generation stamp (or an explicit query
+ * attestation) decides whether that provider may query the harvest at all.
  */
 export function createOpenclawQueryProviderFromEnv(): EmbeddingProvider | null {
-  const read = (suffix: string) =>
-    readEnvWithFileFallback("ANDENKEN_OPENCLAW_QUERY_" + suffix);
-  const rawType = read("PROVIDER");
-  if (rawType === undefined) return null;
-  const providerType = resolveProviderType(rawType);
-  if (providerType !== "vllm" && providerType !== "openrouter") {
-    throw new Error(`ANDENKEN_OPENCLAW_QUERY_PROVIDER=${rawType} refused (vllm | openrouter)`);
-  }
-  const p = buildVllmFromNamespacedEnv(read, `openclaw-query:${providerType}`, providerType);
+  const read = (suffix: string) => readEnvWithFileFallback("ANDENKEN_OPENCLAW_QUERY_" + suffix);
+  if (read("PROFILE") === undefined && read("PROVIDER") === undefined) return null;
+  const p = buildFromNamespace(read, "openclaw-query");
   if (!p) throw new Error("ANDENKEN_OPENCLAW_QUERY_* is set but does not build a provider — refused");
   return p;
+}
+
+/** Shared namespaced builder: profile only; PROVIDER, when given, must be vllm. */
+function buildFromNamespace(read: (suffix: string) => string | undefined, tag: string): VLLMProvider | null {
+  const rawType = read("PROVIDER");
+  if (read("PROFILE") === undefined && rawType === undefined) return null;
+  if (rawType !== undefined && rawType !== "vllm") {
+    process.stderr.write(`⚠ ${tag} provider: PROVIDER=${rawType} refused (profile generations are served by a loopback vllm/OpenAI-compatible runtime)\n`);
+    return null;
+  }
+  return buildVllmFromNamespacedEnv(read, `${tag}:vllm`, "vllm");
 }
 
 // --- Env file loader with variable expansion ---
@@ -1249,21 +1033,7 @@ function loadEnvFile(): Record<string, string> {
   return result;
 }
 
-function loadGeminiKey(): string {
-  const fromEnv =
-    process.env.GOOGLE_AI_API_KEY ??
-    process.env.GEMINI_API_KEY ??
-    process.env.GOOGLE_API_KEY;
-  if (fromEnv) return fromEnv;
 
-  const envFile = loadEnvFile();
-  return (
-    envFile["GOOGLE_AI_API_KEY"] ??
-    envFile["GEMINI_API_KEY"] ??
-    envFile["GOOGLE_API_KEY"] ??
-    ""
-  );
-}
 
 // --- Re-exports for backward compatibility ---
 // Consumers that still import from gemini-embeddings.ts continue to work.

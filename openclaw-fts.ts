@@ -31,6 +31,7 @@
  * does a writable handle open, for that one `createIndex` (replace:false).
  */
 
+import { OPENCLAW_PROFILE } from "./embedding-profile.js";
 import {
 	VectorStore,
 	getOpenclawDbPath,
@@ -42,7 +43,8 @@ import {
 import { indexAuthorityRefusal } from "./session-policy.js";
 import { assertOpenclawWriteLock, OpenclawLockRefused } from "./openclaw-lock.js";
 
-const OPENCLAW_DIM = 4096;
+/** The OpenClaw harvest generation (embedding-profile.ts): OpenRouter BGE-M3 1024d. */
+const OPENCLAW_DIM = OPENCLAW_PROFILE.dimensions;
 
 /** What `--protocol` prints; a publisher refuses a replica that does not print it. */
 export const OPENCLAW_FTS_PROTOCOL = "openclaw-fts-required v1";

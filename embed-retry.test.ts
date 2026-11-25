@@ -19,7 +19,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  GeminiProvider,
   VLLMProvider,
   createSessionProviderFromEnv,
   diagnosticToken,
@@ -41,7 +40,6 @@ import {
   type SharedGate,
 } from "./embed-retry.ts";
 import { IndexRunFailed, finalizeIndexRun, formatApiSummary, type FinalizeDeps } from "./index-finalize.ts";
-import { getModelPreset } from "./model-presets.ts";
 // Pure classification only: importing runs no build (direct-run guard), and
 // store.ts loads LanceDB lazily; no runBuild/verifyCandidate/default deps here.
 import { classifyProviderFailure, providerErrorCode } from "./scripts/candidate-build.ts";
@@ -80,6 +78,7 @@ const calls: Call[] = [];
 let route: ((call: Call, n: number) => Response | Promise<Response>) | null = null;
 globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
   if (!route) throw new Error("network forbidden in this suite");
+  if (String(input).endsWith("/api/tags")) return new Response(JSON.stringify({ models: [{ name: "bge-m3:latest", digest: "7907646426070047a77226ac3e684fbbe8410524f7b4a74d02837e43f2146bab" }] }));
   const body = JSON.parse(String(init?.body)) as { input: string[] };
   const call = { url: String(input), input: body.input, auth: new Headers(init?.headers).get("authorization") };
   calls.push(call);
@@ -373,17 +372,13 @@ test("A10 a permanent error in a later slice: earlier slices counted as discarde
 test("A11 eligibility: a configured native batch size only, never a guess", () => {
   strictEqual(rateLimitSliceSize(mkProvider({ maxBatchSize: 3 })), 3);
   for (const maxBatchSize of [undefined, Number.NaN, 0, -1, 2.5]) strictEqual(rateLimitSliceSize(mkProvider({ maxBatchSize })), null);
-  strictEqual(rateLimitSliceSize(new GeminiProvider({ apiKey: KEY })), null);
   strictEqual(rateLimitSliceSize(fakeInner(() => []).p), null);
   for (const n of [0, -1, 1.5, Number.NaN]) throws(() => withRateLimitRetry(fakeInner(() => []).p, n));
 });
 
-test("A12 the namespaced sessions factory: MAX_BATCH_SIZE, else the model preset, else none", () => {
+test("A12 the namespaced sessions factory: profile batch size and override", () => {
   const base = {
-    ANDENKEN_SESSION_PROVIDER: "openrouter",
-    ANDENKEN_SESSION_ENDPOINT: "http://stub.invalid",
-    ANDENKEN_SESSION_MODEL: "qwen/qwen3-embedding-8b",
-    ANDENKEN_SESSION_DIMENSIONS: "4096",
+    ANDENKEN_SESSION_PROFILE: "ollama-bge-m3-1024",
   };
   const make = (extra: Record<string, string>) => {
     for (const k of Object.keys(process.env)) if (k.startsWith("ANDENKEN_SESSION_")) delete process.env[k];
@@ -393,11 +388,10 @@ test("A12 the namespaced sessions factory: MAX_BATCH_SIZE, else the model preset
     return p;
   };
   try {
-    strictEqual(rateLimitSliceSize(make({ ANDENKEN_SESSION_MAX_BATCH_SIZE: "5" })), 5);
-    const preset = getModelPreset("qwen/qwen3-embedding-8b");
-    ok(preset);
-    strictEqual(rateLimitSliceSize(make({})), preset.maxBatchSize);
-    strictEqual(rateLimitSliceSize(make({ ANDENKEN_SESSION_MAX_BATCH_SIZE: "abc" })), null);
+    strictEqual(rateLimitSliceSize(make({ ANDENKEN_SESSION_MAX_BATCH_SIZE: "3" })), 3);
+    strictEqual(rateLimitSliceSize(make({})), 4);
+    process.env.ANDENKEN_SESSION_MAX_BATCH_SIZE = "abc";
+    strictEqual(createSessionProviderFromEnv(), null);
   } finally {
     for (const k of Object.keys(process.env)) if (k.startsWith("ANDENKEN_SESSION_")) delete process.env[k];
   }
@@ -483,25 +477,20 @@ test("B1 HTTP slice size = configured maxBatchSize; instruction once; order kept
 test("B2 factory provider: HTTP request sizes follow ANDENKEN_SESSION_MAX_BATCH_SIZE", async () => {
   for (const k of Object.keys(process.env)) if (k.startsWith("ANDENKEN_SESSION_")) delete process.env[k];
   Object.assign(process.env, {
-    ANDENKEN_SESSION_PROVIDER: "openrouter",
-    ANDENKEN_SESSION_ENDPOINT: "http://stub.invalid",
-    ANDENKEN_SESSION_MODEL: "qwen/qwen3-embedding-8b",
-    // The stub answers 1-d vectors; the provider now validates every reply
-    // against its configured dimension, so the fixture must agree with it.
-    ANDENKEN_SESSION_DIMENSIONS: "1",
+    ANDENKEN_SESSION_PROFILE: "ollama-bge-m3-1024",
     ANDENKEN_SESSION_MAX_BATCH_SIZE: "2",
   });
   try {
     const p = createSessionProviderFromEnv();
     ok(p);
     const w = withRateLimitRetry(p, rateLimitSliceSize(p)!, POLICY, fakeClock().clock);
-    useRoute((call) => ok200(call.input));
+    useRoute((call) => new Response(JSON.stringify({ data: call.input.map((t, index) => ({ index, embedding: Array(1024).fill(vec(t)[0]) })) })));
     const texts = ["u0", "u1", "u2", "u3", "u4"];
     const out = await w.embedDocumentBatch(texts);
     endRoute();
-    const instr = getModelPreset("qwen/qwen3-embedding-8b")?.documentInstruction ?? "";
+    const instr = "";
     deepStrictEqual(calls.map((c) => c.input), [["u0", "u1"], ["u2", "u3"], ["u4"]].map((s) => s.map((t) => instr + t)));
-    deepStrictEqual(out, texts.map((t) => vec(instr + t)));
+    deepStrictEqual(out, texts.map((t) => Array(1024).fill(vec(instr + t)[0])));
     strictEqual(calls[0].auth, null); // no key configured anywhere in this process
   } finally {
     endRoute();

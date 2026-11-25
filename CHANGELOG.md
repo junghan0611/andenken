@@ -5,6 +5,13 @@ andenken CalVer 스냅샷. 형식 `vYYYY.M.D[-suffix]`. 과거에 *닫힌* 작�
 
 ## Unreleased
 
+### BGE-M3 only; the Qwen / 4096d generation is no longer known to current code (2026-11-26)
+
+- Removed every Qwen / 4096d path from active code: the legacy `openrouter-qwen3-8b-4096` profile and its "unstamped store = legacy" rule, model-string / preset / Gemini provider construction (`model-presets.ts`, `GeminiProvider`, `createProvider`, `resolveProviderType`), automatic profile inference and all `|| 4096` / `?? 2560` dimension defaults. Providers are built only from `ANDENKEN_<NS>_PROFILE` (`ollama-bge-m3-1024`); an unstamped store with rows is refused for read and write. The earlier generation (4096d indexes, manifests, backups) is a recovery artefact restored together with its own code and configuration, never read by this code; `data/` is untouched.
+- Store stamp v2 records provider, runtime revision (digest) and preprocess (instructions, split policy); harvest stores also record the producer (model / provider / vectorDims) and per-agent index revisions and chunking versions.
+- OpenClaw harvest is the `openrouter-bge-m3-1024` store generation: the importer pins the producer literal (`baai/bge-m3` / `openai` / 1024 per `memory_index_meta_v1`), refuses a mixed or unvouched artifact before any row, drops non-finite / zero vectors and stamps the store. OpenRouter is a store identity only: andenken never embeds or queries with it.
+- Local Ollama queries against another generation (the OpenClaw harvest) require an explicit, human-made query attestation (`./run.sh attest:query`) naming the store and query fingerprints and evidence; it never permits writes. Without it, search refuses.
+
 ## v2026.11.15 — Recover missing session rows and recognize summaries
 
 ### Session extraction and bounded retries

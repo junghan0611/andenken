@@ -2,11 +2,11 @@
  * openclaw-importer.ts — import OpenClaw's own embedding index into openclaw.lance.
  *
  * This track is a HARVEST. OpenClaw embeds its agents' memory and sessions
- * itself, and it happens to use `qwen/qwen3-embedding-8b` at 4096d — the same
- * model and dimension as our sessions and md tracks. Nobody agreed to that; both
- * sides picked it independently. That coincidence is the whole reason this file
- * can exist: the rows already carry text AND vector, so importing them costs zero
- * embedding API calls.
+ * itself, with OpenRouter `baai/bge-m3` at 1024d (rebuilt from zero 2026-11-25).
+ * The rows already carry text AND vector, so importing them costs zero embedding
+ * API calls. The store is stamped `openrouter-bge-m3-1024` and every import pins
+ * the producer literal from OpenClaw's own meta (OPENCLAW_PRODUCER); a mixed or
+ * foreign artifact is refused before any row.
  *
  * What we do NOT own here (GLG ruling 2026-09-03): OpenClaw's chunking, model, or
  * scope. Retrieval quality of these chunks is its configuration, not our tuning
@@ -26,6 +26,7 @@
  * retention rule — which we have not measured — would otherwise become our loss.
  * A row that arrives again with the same id replaces itself; nothing else moves.
  */
+import { OPENCLAW_PRODUCER, OPENCLAW_PROFILE, writeStoreStamp, type StampProducer } from "./embedding-profile.js";
 import * as fs from "fs";
 import * as path from "path";
 import * as zlib from "zlib";
@@ -35,7 +36,8 @@ import { ensureOpenclawFts, describeFtsHealth } from "./openclaw-fts.js";
 import { assertOpenclawWriteLock } from "./openclaw-lock.js";
 import { indexAuthorityRefusal } from "./session-policy.js";
 
-const OPENCLAW_DIM = 4096;
+/** The OpenClaw harvest generation (embedding-profile.ts): OpenRouter BGE-M3 1024d. */
+const OPENCLAW_DIM = OPENCLAW_PROFILE.dimensions;
 
 /** Same rules as scripts/redact-credentials.py, token boundaries included. */
 const CREDENTIAL_RULES: Array<[string, RegExp]> = [
@@ -100,6 +102,14 @@ export function prepareRow(r: OpenclawRow): RowVerdict {
 	if (vector.length !== OPENCLAW_DIM) {
 		return { kind: "drop-vector", reason: `dim=${vector.length}` };
 	}
+	// Same reply contract as our own provider (embedding-profile.ts): finite and
+	// non-zero, or the row is not a vector of this generation.
+	let sumSq = 0;
+	for (const x of vector) {
+		if (typeof x !== "number" || !Number.isFinite(x)) return { kind: "drop-vector", reason: "non-finite" };
+		sumSq += x * x;
+	}
+	if (!(sumSq > 0) || !Number.isFinite(sumSq)) return { kind: "drop-vector", reason: "zero-vector" };
 
 	return {
 		kind: "import",
@@ -396,6 +406,38 @@ export function stagingState(): {
 	};
 }
 
+/**
+ * Producer facts per agent from the staged manifest (memory_index_meta_v1 +
+ * memory_index_state revision). The harvest is a generation only if every
+ * agent says it embedded with OPENCLAW_PRODUCER; one agent that does not makes
+ * the whole artifact a mixed generation, and the import refuses it before a
+ * single row is read. Exported for tests.
+ */
+export function openclawProducerFromManifest(manifestLines: Iterable<string>): StampProducer {
+	const revisions: Record<string, string | number | null> = {};
+	const chunkingVersions: Record<string, number | null> = {};
+	let agents = 0;
+	for (const line of manifestLines) {
+		if (!line.trim()) continue;
+		const r = JSON.parse(line) as { kind?: string; agent?: string; state?: string; revision?: unknown; meta?: { memory_index_meta_v1?: Record<string, unknown> } };
+		if (r.kind !== "agent" || typeof r.agent !== "string") continue;
+		if (r.state === "no-index") continue;
+		agents++;
+		const m = r.meta?.memory_index_meta_v1;
+		if (!m) throw new Error(`openclaw-producer-meta-missing: agent ${r.agent}`);
+		if (m.model !== OPENCLAW_PRODUCER.model || m.provider !== OPENCLAW_PRODUCER.provider || m.vectorDims !== OPENCLAW_PRODUCER.vectorDims) {
+			throw new Error(
+				`openclaw-producer-mismatch: agent ${r.agent} says model=${String(m.model)} provider=${String(m.provider)} vectorDims=${String(m.vectorDims)}; ` +
+					`this harvest generation is ${OPENCLAW_PRODUCER.model}/${OPENCLAW_PRODUCER.provider}/${OPENCLAW_PRODUCER.vectorDims}`,
+			);
+		}
+		revisions[r.agent] = typeof r.revision === "number" || typeof r.revision === "string" ? r.revision : null;
+		chunkingVersions[r.agent] = typeof m.chunkingVersion === "number" ? m.chunkingVersion : null;
+	}
+	if (agents === 0) throw new Error("openclaw-producer-meta-missing: the staged manifest names no indexed agent");
+	return { kind: "openclaw-harvest", ...OPENCLAW_PRODUCER, revisions, chunkingVersions };
+}
+
 export async function importOpenclaw(
 	stagingPath: string = getStagingPath(),
 	opts: { dryRun?: boolean; host?: string | null } = {},
@@ -420,8 +462,20 @@ export async function importOpenclaw(
 		);
 	}
 
-	const store = new VectorStore(getOpenclawDbPath(), OPENCLAW_DIM);
+	// Producer identity before the store: a mixed or foreign artifact refuses here.
+	const manifestPath = path.join(path.dirname(stagingPath), "manifest.jsonl.gz");
+	if (!fs.existsSync(manifestPath)) throw new Error(`openclaw-producer-meta-missing: no staged manifest at ${manifestPath}`);
+	const producer = openclawProducerFromManifest(zlib.gunzipSync(fs.readFileSync(manifestPath)).toString("utf-8").split("\n"));
+	const producerAgents = new Set(Object.keys(producer.revisions));
+
+	const store = new VectorStore(getOpenclawDbPath(), OPENCLAW_DIM, { profile: OPENCLAW_PROFILE, producer });
 	await store.init();
+	// Generation guard: an unstamped store with rows (e.g. an earlier
+	// harvest) or another generation's stamp refuses before any row is written.
+	if (!opts.dryRun) {
+		await store.ensureTable();
+		await store.assertCompatibleDim();
+	}
 
 	// Dimension is checked against the DB before a single row lands, the same
 	// preflight discipline the paid tracks use — except here a mismatch would not
@@ -467,6 +521,9 @@ export async function importOpenclaw(
 		if (!line.trim()) continue;
 		stats.seen++;
 		const r = JSON.parse(line) as OpenclawRow;
+		if (!producerAgents.has(r.agent)) {
+			throw new Error(`openclaw-producer-meta-missing: row of agent ${r.agent}, which the staged manifest does not vouch for`);
+		}
 		const verdict = prepareRow(r);
 
 		if (verdict.kind === "drop-credential") { stats.droppedCredential++; continue; }
@@ -483,6 +540,8 @@ export async function importOpenclaw(
 	await flush();
 
 	if (!opts.dryRun) {
+		// Record the producer revisions this import folded in (merged per agent).
+		writeStoreStamp(getOpenclawDbPath(), OPENCLAW_PROFILE, await store.getCount(), producer);
 		writeWatermark(stats.watermark, host);
 		// Keyed to the artifact's mtime, not to "now": that is what lets a later
 		// reader tell a folded export from a newly staged one.

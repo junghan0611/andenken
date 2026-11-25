@@ -19,8 +19,12 @@
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+import * as zlib from "zlib";
+import { readStoreStamp } from "./embedding-profile.ts";
 import {
 	prepareRow,
+	importOpenclaw,
+	openclawProducerFromManifest,
 	mergeWatermark,
 	partitionByChange,
 	type PreparedChunk,
@@ -40,8 +44,8 @@ function ok(label: string, cond: boolean) {
 	else { fail++; console.log(`  FAIL ${label}`); }
 }
 
-const DIM = 4096;
-const vec = (n = DIM) => JSON.stringify(Array.from({ length: n }, () => 0));
+const DIM = 1024;
+const vec = (n = DIM) => JSON.stringify(Array.from({ length: n }, () => 1));
 
 function row(over: Partial<OpenclawRow> = {}): OpenclawRow {
 	return {
@@ -54,6 +58,22 @@ function row(over: Partial<OpenclawRow> = {}): OpenclawRow {
 		embedding: vec(),
 		...over,
 	};
+}
+
+console.log("\n=== producer identity ===");
+{
+	const agent = (name: string, meta: unknown, revision = 1) => JSON.stringify({ kind: "agent", agent: name, state: "ok", revision, meta: { memory_index_meta_v1: meta } });
+	const valid = { model: "baai/bge-m3", provider: "openai", vectorDims: 1024, chunkingVersion: 2 };
+	const producer = openclawProducerFromManifest([agent("a", valid), agent("b", valid, 2)]);
+	ok("producer keeps revisions and chunking versions", producer.revisions.a === 1 && producer.revisions.b === 2 && producer.chunkingVersions?.a === 2);
+	for (const [label, lines, code] of [
+		["mixed generation", [agent("a", valid), agent("b", { ...valid, vectorDims: 4096 })], "openclaw-producer-mismatch"],
+		["missing meta", [agent("a", undefined)], "openclaw-producer-meta-missing"],
+	] as const) {
+		let message = "";
+		try { openclawProducerFromManifest(lines); } catch (e) { message = String(e); }
+		ok(label + " refused", message.includes(code));
+	}
 }
 
 console.log("\n=== openclaw harvest — row policy ===");
@@ -279,6 +299,33 @@ console.log("\n=== openclaw updated_at label (index time, not event date) ===");
 	ok("search-openclaw still emits per-hit updated_at", /updated_at: r\.timestamp,/.test(cli));
 	ok("search-openclaw adds updated_at_meaning at the top level",
 		/updated_at_meaning: OPENCLAW_UPDATED_AT_MEANING, results: out/.test(cli));
+}
+
+{
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "andenken-import-boundary-"));
+	const prev = process.env.ANDENKEN_DATA;
+	process.env.ANDENKEN_DATA = tmp;
+	const stage = path.join(tmp, "openclaw-staging");
+	fs.mkdirSync(stage);
+	const file = path.join(stage, "openclaw-chunks.jsonl.gz");
+	const manifest = (agent: string, revision: number) => fs.writeFileSync(path.join(stage, "manifest.jsonl.gz"), zlib.gzipSync(JSON.stringify({ kind: "agent", agent, state: "ok", revision, meta: { memory_index_meta_v1: { model: "baai/bge-m3", provider: "openai", vectorDims: 1024, chunkingVersion: 2 } } }) + "\n"));
+	const rows = (r: OpenclawRow) => fs.writeFileSync(file, zlib.gzipSync(JSON.stringify(r) + "\n"));
+	try {
+		manifest("a", 1); rows(row({ agent: "b" }));
+		let err = "";
+		try { await importOpenclaw(file); } catch (e) { err = String(e); }
+		ok("unvouched agent refused", err.includes("openclaw-producer-meta-missing"));
+		rows(row({ agent: "a" })); await importOpenclaw(file);
+		manifest("b", 2); rows(row({ agent: "b" })); await importOpenclaw(file);
+		const stamp = readStoreStamp(path.join(tmp, "openclaw.lance"));
+		ok("producer revisions merge across imports", stamp.state === "ok" && stamp.stamp.producer?.revisions.a === 1 && stamp.stamp.producer?.revisions.b === 2);
+		fs.unlinkSync(path.join(tmp, "openclaw.lance", "andenken-profile.json"));
+		err = ""; try { await importOpenclaw(file); } catch (e) { err = String(e); }
+		ok("unstamped populated store refused", err.includes("store-unstamped"));
+	} finally {
+		fs.rmSync(tmp, { recursive: true, force: true });
+		if (prev === undefined) delete process.env.ANDENKEN_DATA; else process.env.ANDENKEN_DATA = prev;
+	}
 }
 
 console.log(`\n${"─".repeat(40)}`);

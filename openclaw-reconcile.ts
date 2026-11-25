@@ -25,6 +25,7 @@
  *     verify, or that is absent upstream is never classified — a partial upstream
  *     must not look like an upstream that deleted things.
  */
+import { OPENCLAW_PROFILE } from "./embedding-profile.js";
 import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
@@ -39,7 +40,8 @@ import {
 	type StagedRun,
 } from "./openclaw-importer.js";
 
-const OPENCLAW_DIM = 4096;
+/** The OpenClaw harvest generation (embedding-profile.ts): OpenRouter BGE-M3 1024d. */
+const OPENCLAW_DIM = OPENCLAW_PROFILE.dimensions;
 
 // ── Manifest ──────────────────────────────────────────────────────────────────
 
@@ -52,6 +54,10 @@ export interface ManifestAgent {
 	maxUpdatedAt: number | null;
 	revision: number | null;
 	chunkingVersion: number | null;
+	/** Producer identity from memory_index_meta_v1 (null when absent). */
+	model: string | null;
+	provider: string | null;
+	vectorDims: number | null;
 	/** Newest source mtime OpenClaw recorded as indexed, per source kind (memory_index_sources). */
 	indexedMtime: Record<string, number | null>;
 	digest: string | null;
@@ -101,6 +107,9 @@ export function parseManifestLines(lines: Iterable<string>): Manifest {
 				maxUpdatedAt: r.max_updated_at ?? null,
 				revision: r.revision ?? null,
 				chunkingVersion: typeof meta?.chunkingVersion === "number" ? meta.chunkingVersion : null,
+				model: typeof meta?.model === "string" ? meta.model : null,
+				provider: typeof meta?.provider === "string" ? meta.provider : null,
+				vectorDims: typeof meta?.vectorDims === "number" ? meta.vectorDims : null,
 				indexedMtime: r.indexed_mtime ?? {},
 				digest: r.digest ?? null,
 				rowDigest: r.row_digest ?? null,

@@ -5,9 +5,10 @@
  * existing sessions maintenance paths run against durable rows.
  *
  * API 0. Network 0. Everything happens in a temp corpus, a temp data dir and a
- * temp LanceDB with a stub provider (4-dim vectors). Subprocesses get a vLLM
- * provider pointed at 127.0.0.1:9, so an accidental embedding call fails
- * instead of reaching a paid endpoint.
+ * temp LanceDB stamped for the ollama-bge-m3-1024 generation, with a stub
+ * provider (1024-dim vectors). Subprocesses get that profile pointed at
+ * 127.0.0.1:9, so an accidental embedding call fails at the runtime identity
+ * check; they run under a temp HOME with a synthetic ~/.current-device.
  */
 
 import * as fs from "node:fs";
@@ -28,6 +29,7 @@ import {
 } from "./durable-index.ts";
 import { readHitExcerpt, isHitExcerpt } from "./session-excerpt-dispatch.ts";
 import { VectorStore } from "./store.ts";
+import { DEAD_ENDPOINT, DIM, PROFILE, SYNTHETIC_DEVICE, isolatedEnv, profileEnv, syntheticHome, vec } from "./test-support-generation.ts";
 
 let passed = 0;
 let failed = 0;
@@ -177,14 +179,14 @@ class StubProvider implements DurableProvider {
   async embedDocumentBatch(texts: string[]): Promise<number[][]> {
     this.calls++;
     if (this.failOnCall && this.calls === this.failOnCall) throw new Error("stub embed failure");
-    return texts.map((t) => [t.length % 7, 1, 0, 0]);
+    return texts.map((t) => vec(t.length % 7, 1));
   }
 }
 
 async function freshStore(name: string): Promise<{ store: VectorStore; data: string }> {
   const data = path.join(tmp, name);
   fs.mkdirSync(data, { recursive: true });
-  const store = new VectorStore(path.join(data, "sessions.lance"), 4);
+  const store = new VectorStore(path.join(data, "sessions.lance"), DIM, { profile: PROFILE });
   await store.init();
   await store.ensureTable();
   return { store, data };
@@ -205,7 +207,7 @@ const OTHER_DURABLE = path.join(tmp, "elsewhere", "other", "session.sqlite");
 fs.mkdirSync(path.dirname(OTHER_DURABLE), { recursive: true });
 fs.copyFileSync(SAMPLE, OTHER_DURABLE);
 async function seed(store: VectorStore): Promise<void> {
-  const base = { text: "seed", project: "demo", timestamp: "2026-10-15T00:00:00.000Z", role: "user", metadata: {}, vector: [1, 0, 0, 0] };
+  const base = { text: "seed", project: "demo", timestamp: "2026-10-15T00:00:00.000Z", role: "user", metadata: {}, vector: vec(1) };
   await store.addChunksRaw([
     { ...base, id: `${SEED_JSONL}:1`, sessionFile: SEED_JSONL, lineNumber: 1, source: "pi" },
     { ...base, id: `${OTHER_DURABLE}:e5`, sessionFile: OTHER_DURABLE, lineNumber: 5, source: "pi-durable" },
@@ -411,17 +413,15 @@ console.log("\n# one lineage keeps one indexed path (winner churn)");
 // ---------------------------------------------------------------------------
 console.log("\n# the checkpoint never outlives its rows");
 // ---------------------------------------------------------------------------
-const subEnv = (data: string, corpus: string) => ({
-  ...process.env,
-  ANDENKEN_DATA: data,
-  ANDENKEN_SESSION_CORPUS: corpus,
-  ANDENKEN_SESSION_PROVIDER: "vllm",
-  ANDENKEN_SESSION_ENDPOINT: "http://127.0.0.1:9",
-  ANDENKEN_SESSION_MODEL: "stub-model",
-  ANDENKEN_SESSION_DIMENSIONS: "4",
-  ANDENKEN_INDEX_AUTHORITY: fs.readFileSync(path.join(os.homedir(), ".current-device"), "utf-8").trim(),
-  ANDENKEN_SESSIONS_LOCK_TOKEN: "",
-});
+const HOME = syntheticHome(path.join(tmp, "home"));
+const subEnv = (data: string, corpus: string) =>
+  isolatedEnv(HOME, {
+    ANDENKEN_DATA: data,
+    ANDENKEN_SESSION_CORPUS: corpus,
+    ...profileEnv("SESSION", DEAD_ENDPOINT),
+    ANDENKEN_INDEX_AUTHORITY: SYNTHETIC_DEVICE,
+    ANDENKEN_SESSIONS_LOCK_TOKEN: "",
+  });
 const TSX = path.join(repo, "node_modules", ".bin", "tsx");
 const indexer = (env: NodeJS.ProcessEnv, args: string[]) => spawnSync(TSX, [path.join(repo, "indexer.ts"), ...args], { env, cwd: repo, encoding: "utf-8" });
 {
@@ -437,7 +437,7 @@ const indexer = (env: NodeJS.ProcessEnv, args: string[]) => spawnSync(TSX, [path
 
   // index:sessions --force wipes the table → the durable checkpoint goes too.
   const f = indexer({ ...env, ANDENKEN_ALLOW_PAID_FULL_REBUILD: "1" }, ["sessions", "--force"]);
-  const s1 = new VectorStore(path.join(data, "sessions.lance"), 4);
+  const s1 = new VectorStore(path.join(data, "sessions.lance"), DIM, { profile: PROFILE });
   await s1.init();
   eq([f.status, fs.existsSync(mp), (await rowsOf(s1)).length], [0, false, 0], "sessions --force: rows and durable checkpoint gone together");
   await s1.ensureTable();
@@ -451,7 +451,7 @@ const indexer = (env: NodeJS.ProcessEnv, args: string[]) => spawnSync(TSX, [path
   truthy(c.status === 0 && c.stdout.includes("Durable checkpoints dropped: 1"), "cleanup sessions drops the orphan file's checkpoint with its rows");
   eq(loadDurableManifest(mp).files[file], undefined, "…the manifest no longer claims it");
   await admit(corpus, SNAP2);
-  const s2 = new VectorStore(path.join(data, "sessions.lance"), 4);
+  const s2 = new VectorStore(path.join(data, "sessions.lance"), DIM, { profile: PROFILE });
   await s2.init();
   const again = await runDurableIndex(deps(corpus, data, { store: s2, provider }));
   const rows = (await rowsOf(s2)).filter((x) => x.sessionFile === file);
@@ -473,7 +473,7 @@ const indexer = (env: NodeJS.ProcessEnv, args: string[]) => spawnSync(TSX, [path
   const env = subEnv(data, corpus);
   const lance = path.join(data, "sessions.lance");
   const fileRows = async () => {
-    const s = new VectorStore(lance, 4);
+    const s = new VectorStore(lance, DIM, { profile: PROFILE });
     await s.init();
     const rows = (await rowsOf(s)).filter((x) => x.sessionFile === file);
     await s.close();
@@ -489,7 +489,7 @@ const indexer = (env: NodeJS.ProcessEnv, args: string[]) => spawnSync(TSX, [path
     fs.chmodSync(dir, on ? 0o755 : 0o555);
   };
   const reindex = async () => {
-    const s = new VectorStore(lance, 4);
+    const s = new VectorStore(lance, DIM, { profile: PROFILE });
     await s.init();
     const r = await runDurableIndex(deps(corpus, data, { store: s, provider }));
     const rows = (await rowsOf(s)).filter((x) => x.sessionFile === file);
@@ -584,18 +584,10 @@ console.log("\n# excerpt dispatch (CLI and pi tool share it)");
 console.log("\n# existing maintenance paths keep durable rows (subprocess gates)");
 // ---------------------------------------------------------------------------
 {
-  const env = {
-    ...process.env,
-    ANDENKEN_DATA: gateData,
-    ANDENKEN_SESSION_CORPUS: gateCorpus,
-    ANDENKEN_SESSION_PROVIDER: "vllm",
-    ANDENKEN_SESSION_ENDPOINT: "http://127.0.0.1:9",
-    ANDENKEN_SESSION_MODEL: "stub-model",
-    ANDENKEN_SESSION_DIMENSIONS: "4",
-  };
+  const env = subEnv(gateData, gateCorpus);
   const tsx = path.join(repo, "node_modules", ".bin", "tsx");
   const run = (args: string[]) => spawnSync(tsx, [path.join(repo, "indexer.ts"), ...args], { env, cwd: repo, encoding: "utf-8" });
-  const countBefore = (await rowsOf(await (async () => { const s = new VectorStore(path.join(gateData, "sessions.lance"), 4); await s.init(); return s; })())).length;
+  const countBefore = (await rowsOf(await (async () => { const s = new VectorStore(path.join(gateData, "sessions.lance"), DIM, { profile: PROFILE }); await s.init(); return s; })())).length;
 
   const v = run(["verify", "sessions"]);
   truthy(v.status === 0 && v.stdout.includes("No orphan files"), "verify sessions passes with durable rows (corpus files exist)");
@@ -603,7 +595,7 @@ console.log("\n# existing maintenance paths keep durable rows (subprocess gates)
   truthy(c.status === 0 && /Orphan files: 0\b/.test(c.stdout) && /Duplicate IDs: 0\b/.test(c.stdout), "cleanup sessions --dry-run finds no orphans or duplicates");
   const g = run(["sessions"]);
   truthy(g.status === 0 && g.stdout.includes("All sessions indexed"), "JSONL sessions run (no JSONL in corpus) exits without embedding");
-  const s = new VectorStore(path.join(gateData, "sessions.lance"), 4);
+  const s = new VectorStore(path.join(gateData, "sessions.lance"), DIM, { profile: PROFILE });
   await s.init();
   const after = await rowsOf(s);
   eq([after.length, after.filter((r) => r.sessionFile === gateFile).length], [countBefore, 4], "row count unchanged; the 4 durable rows survive");

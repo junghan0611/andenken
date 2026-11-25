@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # sync-sessions.sh — sessions-only incremental for the local Ollama BGE-M3 1024d
 #   generation (ANDENKEN_SYNC_PROFILE, default ollama-bge-m3-1024), --local only.
-#   The legacy Qwen 4096d store is read-only since 2026-11-25 and refused by name.
+#   An unstamped store is an unknown generation and is refused by name.
 #
 # Operating cadence: hourly cron (30min~1h). Manifest-driven; never destroys
 # the index. Full rebuilds go through scripts/rebuild-sessions-full.sh.
@@ -89,14 +89,14 @@ done
 MODE="${MODE:-local}"
 
 # --- Generation (embedding-profile.ts) — resolved BEFORE gather / lock / API ---
-# 2026-11-25: MD + sessions have no active Qwen build. The only sync profile is
-# the local Ollama BGE-M3 1024d generation; the legacy 4096d store is read-only
-# (query + rollback) and is refused here by name, with nothing gathered,
+# The only sync profile is the local Ollama BGE-M3 1024d generation; an
+# unstamped store (any earlier generation) is an unknown generation and is
+# refused here by name, with nothing gathered,
 # written or requested. A new generation lives in its own ANDENKEN_DATA.
 SYNC_PROFILE="${ANDENKEN_SYNC_PROFILE:-ollama-bge-m3-1024}"
 case "$SYNC_PROFILE" in
   ollama-bge-m3-1024) EXPECTED_DIM=1024 ;;
-  *) echo "❌ refused: ANDENKEN_SYNC_PROFILE=$SYNC_PROFILE — the only sync generation is ollama-bge-m3-1024 (the Qwen 4096d generation is read-only). Nothing was done (API 0)." >&2; exit 2 ;;
+  *) echo "❌ refused: ANDENKEN_SYNC_PROFILE=$SYNC_PROFILE — the only sync generation is ollama-bge-m3-1024. Nothing was done (API 0)." >&2; exit 2 ;;
 esac
 if [ "$MODE" = "global" ]; then
   echo "❌ refused: --global publishes to the replica; the profiled generation's publish is a separate gate. Nothing was done (API 0)." >&2
@@ -104,7 +104,7 @@ if [ "$MODE" = "global" ]; then
 fi
 SYNC_DATA_DIR="${ANDENKEN_DATA:-data}"
 if [ -d "$SYNC_DATA_DIR/sessions.lance" ] && [ ! -f "$SYNC_DATA_DIR/sessions.lance/andenken-profile.json" ]; then
-  echo "❌ refused: $SYNC_DATA_DIR/sessions.lance has no generation stamp — it is the preserved legacy 4096d store (read-only)." >&2
+  echo "❌ refused: $SYNC_DATA_DIR/sessions.lance has no generation stamp — an unknown generation; this code does not read or extend it." >&2
   echo "   Build the new generation into a fresh ANDENKEN_DATA (candidate:sessions:plan/build). Nothing was gathered, written or requested (API 0)." >&2
   exit 2
 fi
@@ -232,7 +232,7 @@ fi
 #   - The strict `:?` check happens just before Step 4 (preflight). Indexing
 #     in Step 5 reuses the same exported value.
 # The profiled generation defines the whole provider: loopback Ollama, no key,
-# fixed model/digest/dim/batch, input length enforced. Any inherited Qwen-era
+# fixed model/digest/dim/batch, input length enforced. Any inherited model-string-era
 # SESSION_* line is removed so it cannot conflict (the profile builder would
 # refuse it) — nothing else from the operator env leaks in.
 unset ANDENKEN_SESSION_ENDPOINT ANDENKEN_SESSION_MODEL ANDENKEN_SESSION_PRESET ANDENKEN_SESSION_DIMENSIONS \

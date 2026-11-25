@@ -41,6 +41,9 @@ const {
 	validateEmbeddingResponse,
 	verifyRuntimeIdentity,
 	writeStoreStamp,
+	writeAttestation,
+	readAttestations,
+	attestationPath,
 } = await import("./embedding-profile.ts");
 type EmbeddingProfile = import("./embedding-profile.ts").EmbeddingProfile;
 const { VLLMProvider, createSessionProviderFromEnv, createMdProviderFromEnv, createOpenclawQueryProviderFromEnv } =
@@ -65,14 +68,12 @@ const json = (body: unknown, status = 200) =>
 	new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
 const BGE = PROFILES["ollama-bge-m3-1024"];
-const QWEN = PROFILES["openrouter-qwen3-8b-4096"];
 const OR_BGE = PROFILES["openrouter-bge-m3-1024"];
 /** Small-dimension twins so the LanceDB tests stay tiny. */
 const tiny = (base: EmbeddingProfile, id: string, extra: Partial<EmbeddingProfile> = {}): EmbeddingProfile => ({
 	...base,
 	id,
 	dimensions: 4,
-	legacyUnstamped: false,
 	...extra,
 });
 const vec = (seed: number, dim: number) => Array.from({ length: dim }, (_, i) => ((seed * 31 + i * 7) % 13) + 1);
@@ -91,7 +92,9 @@ test("P1 the runtime contract is encoded exactly (model, digest, loopback, ctx, 
 	strictEqual(BGE.endpoint, "http://127.0.0.1:11435");
 	deepStrictEqual([BGE.dimensions, BGE.maxInputTokens, BGE.maxBatchSize, BGE.timeoutMs], [1024, 2048, 4, 30_000]);
 	strictEqual(BGE.paidRemote, false);
-	ok(!BGE.legacyUnstamped && !OR_BGE.legacyUnstamped && QWEN.legacyUnstamped === true);
+	deepStrictEqual(Object.keys(PROFILES).sort(), ["ollama-bge-m3-1024", "openrouter-bge-m3-1024"], "no Qwen / 4096 generation is known");
+	strictEqual(BGE.provider, "ollama");
+	strictEqual(OR_BGE.provider, "openrouter");
 	strictEqual(getProfile("nope"), null);
 	strictEqual(getProfile("__proto__"), null);
 });
@@ -152,7 +155,7 @@ test("R2 every malformed shape is refused by code", () => {
 
 test("L1 bound = ctx − overhead − instruction; NFKC expansion counted", () => {
 	strictEqual(maxInputCodepoints(BGE, "document"), 2048 - 3);
-	strictEqual(maxInputCodepoints(QWEN, "document"), null);
+	strictEqual(maxInputCodepoints({ ...BGE, tokenOverhead: null }, "document"), null);
 	const limit = 2045;
 	assertInputsFit(BGE, "document", ["가".repeat(limit)]);
 	throws(() => assertInputsFit(BGE, "document", ["a", "가".repeat(limit + 1)]), (e: unknown) => {
@@ -164,8 +167,8 @@ test("L1 bound = ctx − overhead − instruction; NFKC expansion counted", () =
 	throws(() => assertInputsFit(BGE, "document", ["ﬃ".repeat(700)]), EmbeddingInputTooLong);
 	const plan = lengthPlan(BGE, "document", ["x", "y".repeat(3000), "z".repeat(2045)]);
 	deepStrictEqual(plan, { limit: 2045, total: 3, over: 1, maxCodepoints: 3000 });
-	// Qwen: no proven bound → never enforced here.
-	assertInputsFit(QWEN, "document", ["y".repeat(100_000)]);
+	// A profile with no proven bound is not enforced by code points.
+	assertInputsFit({ ...BGE, tokenOverhead: null }, "document", ["y".repeat(100_000)]);
 });
 
 test("L2 provider with a profile refuses an oversize input with ZERO requests", async () => {
@@ -265,23 +268,19 @@ const quiet = <T>(fn: () => T): T => {
 	}
 };
 
-test("E1 sessions/md env without a usable DIMENSIONS is refused (no auto-detect)", () => {
+test("E1 no PROFILE builds nothing: model strings, dimensions, presets and Gemini are gone", () => {
 	const base = { ANDENKEN_SESSION_PROVIDER: "vllm", ANDENKEN_SESSION_ENDPOINT: "http://127.0.0.1:11435" };
-	withEnv({ ...base, ANDENKEN_SESSION_MODEL: "bge-m3:latest" }, () => strictEqual(quiet(createSessionProviderFromEnv), null));
-	for (const bad of ["0", "-1", "1024x", "", " "]) {
-		withEnv({ ...base, ANDENKEN_SESSION_MODEL: "x", ANDENKEN_SESSION_DIMENSIONS: bad }, () =>
-			strictEqual(quiet(createSessionProviderFromEnv), null, `DIMENSIONS=${JSON.stringify(bad)}`),
-		);
+	withEnv({ ...base, ANDENKEN_SESSION_MODEL: "bge-m3:latest", ANDENKEN_SESSION_DIMENSIONS: "1024" }, () =>
+		strictEqual(quiet(createSessionProviderFromEnv), null, "a model string is not a generation"),
+	);
+	withEnv({ ANDENKEN_MD_PROVIDER: "openrouter", ANDENKEN_MD_ENDPOINT: "https://x.invalid", ANDENKEN_MD_MODEL: "qwen/qwen3-embedding-8b", ANDENKEN_MD_DIMENSIONS: "4096" }, () =>
+		strictEqual(quiet(createMdProviderFromEnv), null, "the Qwen env lines build nothing"),
+	);
+	withEnv({ ANDENKEN_MD_PROVIDER: "gemini" }, () => strictEqual(quiet(createMdProviderFromEnv), null));
+	for (const id of ["openrouter-qwen3-8b-4096", "openrouter-bge-m3-1024"]) {
+		withEnv({ ANDENKEN_SESSION_PROFILE: id }, () => strictEqual(quiet(createSessionProviderFromEnv), null, `${id} is not a buildable generation here`));
 	}
-	withEnv({ ...base, ANDENKEN_SESSION_MODEL: "x", ANDENKEN_SESSION_DIMENSIONS: "1024" }, () => {
-		const p = quiet(createSessionProviderFromEnv)!;
-		strictEqual(p.dimensions, 1024);
-		strictEqual(profileOfProvider(p as never), null); // unprofiled
-	});
-	withEnv({ ANDENKEN_MD_PROVIDER: "openrouter", ANDENKEN_MD_ENDPOINT: "https://x.invalid", ANDENKEN_MD_MODEL: "qwen/qwen3-embedding-8b", ANDENKEN_MD_DIMENSIONS: "4096" }, () => {
-		const p = quiet(createMdProviderFromEnv)!;
-		strictEqual(profileOfProvider(p as never)?.id, "openrouter-qwen3-8b-4096"); // legacy pair recognised
-	});
+	strictEqual(createSessionProviderFromEnv(), null, "absent namespace → null");
 });
 
 test("E2 PROFILE builds the profile; conflicting geometry keys are refusals, not overrides", () => {
@@ -320,12 +319,11 @@ test("E2 PROFILE builds the profile; conflicting geometry keys are refusals, not
 test("E3 OpenClaw query namespace is separate from sessions and refuses a broken config", () => {
 	strictEqual(createOpenclawQueryProviderFromEnv(), null);
 	withEnv({ ANDENKEN_OPENCLAW_QUERY_PROVIDER: "gemini" }, () => throws(() => quiet(createOpenclawQueryProviderFromEnv)));
-	withEnv({ ANDENKEN_OPENCLAW_QUERY_PROVIDER: "openrouter", ANDENKEN_OPENCLAW_QUERY_MODEL: "x" }, () =>
-		throws(() => quiet(createOpenclawQueryProviderFromEnv)),
+	withEnv({ ANDENKEN_OPENCLAW_QUERY_PROFILE: "openrouter-bge-m3-1024" }, () =>
+		throws(() => quiet(createOpenclawQueryProviderFromEnv), "no paid OpenRouter query path"),
 	);
-	withEnv(
-		{ ANDENKEN_OPENCLAW_QUERY_PROVIDER: "openrouter", ANDENKEN_OPENCLAW_QUERY_PROFILE: "openrouter-qwen3-8b-4096", ANDENKEN_OPENCLAW_QUERY_ENDPOINT: "https://x.invalid" },
-		() => strictEqual(profileOfProvider(quiet(createOpenclawQueryProviderFromEnv)! as never)?.id, "openrouter-qwen3-8b-4096"),
+	withEnv({ ANDENKEN_OPENCLAW_QUERY_PROFILE: "ollama-bge-m3-1024", ANDENKEN_OPENCLAW_QUERY_ENDPOINT: "http://127.0.0.1:40123" }, () =>
+		strictEqual(profileOfProvider(quiet(createOpenclawQueryProviderFromEnv)!)?.id, "ollama-bge-m3-1024"),
 	);
 });
 
@@ -362,7 +360,6 @@ test("D1 digest check: ok / mismatch / absent / unreachable / not loopback / no 
 
 const A = tiny(BGE, "t-ollama-a");
 const B = tiny(OR_BGE, "t-hosted-b"); // same dim, different generation
-const LEG = tiny(QWEN, "t-legacy", { legacyUnstamped: true });
 let dbN = 0;
 const newDb = () => path.join(TMP, `db-${++dbN}.lance`);
 const row = (i: number, dim = 4) => ({
@@ -410,13 +407,16 @@ test("S2 same-dimension different generation: write, reset and query all refused
 	await other.init();
 	await rejects(other.assertCompatibleDim(), (e: unknown) => e instanceof StoreProfileRefused && e.code === "store-profile-mismatch");
 	await rejects(other.reset(), (e: unknown) => e instanceof StoreProfileRefused && e.code === "store-profile-mismatch");
-	deepStrictEqual(await other.checkProfile(), { ok: false, code: "store-profile-mismatch" });
+	deepStrictEqual(await other.checkProfile("write"), { ok: false, code: "store-profile-mismatch" });
 	const reader = new VectorStore(db, 4, { readOnly: true, profile: B });
 	await reader.init();
-	deepStrictEqual(await reader.checkProfile(), { ok: false, code: "store-profile-mismatch" });
+	deepStrictEqual(await reader.checkProfile("query"), { ok: false, code: "query-generation-not-attested" });
 	const unprofiled = new VectorStore(db, 4, { profile: null });
 	await unprofiled.init();
-	deepStrictEqual(await unprofiled.checkProfile(), { ok: false, code: "unprofiled-provider-on-stamped-store" });
+	deepStrictEqual(await unprofiled.checkProfile(), { ok: false, code: "unprofiled-provider" });
+	const silent = new VectorStore(db, 4, { readOnly: true });
+	await silent.init();
+	deepStrictEqual(await silent.checkProfile(), { ok: false, code: "no-profile-given" });
 	await rejects(unprofiled.reset(), StoreProfileRefused);
 	const check = new VectorStore(db, 4, { readOnly: true });
 	await check.init();
@@ -424,28 +424,79 @@ test("S2 same-dimension different generation: write, reset and query all refused
 	strictEqual(readStoreStamp(db).state === "ok" && (readStoreStamp(db) as { stamp: { profileId: string } }).stamp.profileId, "t-ollama-a");
 });
 
-test("S3 unstamped non-empty store: only the legacy profile may use it; it is never stamped retroactively", async () => {
+test("S3 unstamped non-empty store: an unknown generation for everyone, never stamped retroactively", async () => {
 	const db = newDb();
-	const legacyWriter = new VectorStore(db, 4); // pre-stamp writer (no profile)
-	await legacyWriter.ensureTable();
-	await legacyWriter.addChunks([row(1)]);
-	await legacyWriter.close();
+	const preStamp = new VectorStore(db, 4); // a writer that names no generation
+	await preStamp.ensureTable();
+	await preStamp.addChunks([row(1)]);
+	await preStamp.close();
 	strictEqual(readStoreStamp(db).state, "absent");
+	for (const p of [A, B]) {
+		const s = new VectorStore(db, 4, { profile: p });
+		await s.init();
+		deepStrictEqual(await s.checkProfile("query"), { ok: false, code: "store-unstamped" });
+		deepStrictEqual(await s.checkProfile("write"), { ok: false, code: "store-unstamped" });
+		await rejects(s.reset(), StoreProfileRefused, "a generation cannot --force over an unknown store");
+		strictEqual(await s.getCount(), 1);
+	}
+	throws(() => writeStoreStamp(db, A, 1), (e: unknown) => e instanceof StoreProfileRefused && e.code === "store-unstamped-has-rows");
+});
 
-	const leg = new VectorStore(db, 4, { profile: LEG });
-	await leg.init();
-	deepStrictEqual(await leg.checkProfile(), { ok: true, basis: "legacy-unstamped" });
-	await leg.ensureTable();
-	await leg.assertCompatibleDim();
-	await leg.addChunks([row(2)]);
-	strictEqual(readStoreStamp(db).state, "absent", "incremental write on a legacy store adds no stamp");
+test("S6 dimension unknown: a table is never created without a dimension", async () => {
+	const s = new VectorStore(newDb());
+	await rejects(s.ensureTable(), (e: unknown) => e instanceof StoreProfileRefused && e.code === "store-dimension-unknown");
+});
 
-	const bge = new VectorStore(db, 4, { profile: A });
-	await bge.init();
-	deepStrictEqual(await bge.checkProfile(), { ok: false, code: "store-unstamped-unknown-generation" });
-	await rejects(bge.reset(), StoreProfileRefused, "a new generation cannot --force over the preserved store");
-	strictEqual(await bge.getCount(), 2);
-	throws(() => writeStoreStamp(db, A, 2), (e: unknown) => e instanceof StoreProfileRefused && e.code === "store-unstamped-has-rows");
+test("S7 query attestation: names exact store + query fingerprints and evidence; query-only; invalid file refuses", async () => {
+	const db = newDb();
+	const w = new VectorStore(db, 4, { profile: B }); // documents of the hosted generation
+	await w.ensureTable();
+	await w.addChunks([row(1)]);
+	await w.close();
+	deepStrictEqual(decideStoreAccess(db, A, 1, 4, "query"), { ok: false, code: "query-generation-not-attested" });
+	throws(() => writeAttestation(db, A, [], "glg"), (e: unknown) => (e as { code?: string }).code === "attestation-evidence-required");
+	throws(() => writeAttestation(db, A, ["receipt"], " "), (e: unknown) => (e as { code?: string }).code === "attestation-attester-required");
+	throws(() => writeAttestation(db, B, ["receipt"], "glg"), (e: unknown) => (e as { code?: string }).code === "attestation-not-needed-same-generation");
+	throws(() => writeAttestation(db, { ...A, dimensions: 8 }, ["receipt"], "glg"), (e: unknown) => (e as { code?: string }).code === "store-dimension-mismatch");
+	const rec = writeAttestation(db, A, ["parity #843", "acceptance receipt"], "glg");
+	deepStrictEqual([rec.storeFingerprint, rec.queryFingerprint], [profileFingerprint(B), profileFingerprint(A)]);
+	deepStrictEqual(decideStoreAccess(db, A, 1, 4, "query"), { ok: true, basis: "attested" });
+	deepStrictEqual(decideStoreAccess(db, A, 1, 4, "write"), { ok: false, code: "store-profile-mismatch" }, "never permits writes");
+	const other = { ...A, digest: "0".repeat(64) };
+	deepStrictEqual(decideStoreAccess(db, other, 1, 4, "query"), { ok: false, code: "query-generation-not-attested" }, "another runtime digest is another generation");
+	writeAttestation(db, A, ["again"], "glg");
+	const list = readAttestations(db);
+	ok(list.state === "ok" && list.list.length === 1, "idempotent per (store, query)");
+	fs.writeFileSync(attestationPath(db), "[{}]");
+	deepStrictEqual(decideStoreAccess(db, A, 1, 4, "query"), { ok: false, code: "attestation-invalid" });
+	// attestations are bound to the store fingerprint: a store of another generation ignores them
+	fs.rmSync(attestationPath(db));
+});
+
+test("S8 stamp v2 records provider / revision / preprocess; harvest producer merges, mismatch refuses", async () => {
+	const db = newDb();
+	const w = new VectorStore(db, 4, { profile: A });
+	await w.ensureTable();
+	const st = readStoreStamp(db);
+	ok(st.state === "ok");
+	if (st.state === "ok") {
+		deepStrictEqual([st.stamp.kind, st.stamp.provider, st.stamp.digest], ["andenken-store-profile-v2", "ollama", A.digest]);
+		deepStrictEqual(st.stamp.preprocess, { queryInstruction: "", documentInstruction: "", split: { target: 1845, maxCodepoints: 2045 } });
+	}
+	const hdb = newDb();
+	const prod = { kind: "openclaw-harvest" as const, model: "baai/bge-m3", provider: "openai", vectorDims: 4, revisions: { a: 1 }, chunkingVersions: { a: 6 } };
+	const h = new VectorStore(hdb, 4, { profile: B, producer: prod });
+	await h.ensureTable();
+	await h.addChunks([row(1)]);
+	const merged = writeStoreStamp(hdb, B, 1, { ...prod, revisions: { b: 7 }, chunkingVersions: { b: 6 } });
+	deepStrictEqual(merged.producer?.revisions, { a: 1, b: 7 });
+	strictEqual(merged.preprocess.split, null, "a harvest records the producer's split, not ours");
+	throws(() => writeStoreStamp(hdb, B, 1, { ...prod, model: "other" }), (e: unknown) => (e as { code?: string }).code === "store-producer-mismatch");
+	// a v1 stamp (pre-2026-11-26 format) is unreadable, not silently accepted
+	const v1 = newDb();
+	fs.mkdirSync(v1, { recursive: true });
+	fs.writeFileSync(stampPath(v1), JSON.stringify({ kind: "andenken-store-profile-v1", profileId: "x", fingerprint: "a".repeat(64), model: "m", digest: null, dimensions: 4, createdAt: "" }));
+	strictEqual(readStoreStamp(v1).state, "invalid");
 });
 
 test("S4 dimension mismatch is reported before identity; a bad stamp is refused, not ignored", async () => {
@@ -458,7 +509,7 @@ test("S4 dimension mismatch is reported before identity; a bad stamp is refused,
 	throws(() => new VectorStore(db, 8, { profile: A }), StoreProfileRefused);
 	fs.writeFileSync(stampPath(db), "{not json");
 	deepStrictEqual(decideStoreAccess(db, A, 1, 4), { ok: false, code: "store-stamp-invalid" });
-	deepStrictEqual(decideStoreAccess(db, null, 1, 4), { ok: false, code: "store-stamp-invalid" });
+	deepStrictEqual(decideStoreAccess(db, null, 1, 4), { ok: false, code: "unprofiled-provider" });
 	// empty / absent store: allowed, the writer stamps on creation
 	deepStrictEqual(decideStoreAccess(path.join(TMP, "never.lance"), A, 0, null), { ok: true, basis: "empty-store" });
 	ok(!fs.existsSync(path.join(TMP, "never.lance")), "a decision never creates the axis");
@@ -520,9 +571,9 @@ const { extractSessionChunks, extractSessionChunksDetailed, withEmbedSplit, spli
 const { embedSplitFor } = await import("./embedding-profile.ts");
 const { Readable } = await import("node:stream");
 
-test("X1 embedSplitFor: BGE → target limit−200 / ceiling limit; Qwen → none (historical split)", () => {
+test("X1 embedSplitFor: BGE → target limit−200 / ceiling limit; no bound → none (historical split)", () => {
 	deepStrictEqual(embedSplitFor(BGE), { target: 1845, maxCodepoints: 2045 });
-	strictEqual(embedSplitFor(QWEN), undefined);
+	strictEqual(embedSplitFor({ ...BGE, tokenOverhead: null }), undefined);
 	strictEqual(embedSplitFor(null), undefined);
 });
 
@@ -569,9 +620,9 @@ test("W1 CachingProvider forwards profile / model / isPaidRemote (pi extension w
 	strictEqual(profileOfProvider(wrapped as never)?.id, "ollama-bge-m3-1024");
 	strictEqual((wrapped as unknown as { model: string }).model, "bge-m3:latest");
 	strictEqual((wrapped as unknown as { isPaidRemote: boolean }).isPaidRemote, false);
-	const paid = new CachingProvider(quiet(() => new VLLMProvider({ endpoint: "https://x.invalid", model: "qwen/qwen3-embedding-8b", dimensions: 4096, paidRemote: true })));
+	const paid = new CachingProvider(quiet(() => new VLLMProvider({ endpoint: "https://x.invalid", model: "m", dimensions: 4, paidRemote: true })));
 	strictEqual((paid as unknown as { isPaidRemote: boolean }).isPaidRemote, true, "the /memory --force paid gate sees a paid endpoint");
-	strictEqual(profileOfProvider(paid as never)?.id, "openrouter-qwen3-8b-4096");
+	strictEqual(profileOfProvider(paid as never), null, "no profile is inferred from a model string");
 	// a stamped BGE store accepts the WRAPPED profiled provider
 	const db = newDb();
 	const w = new VectorStore(db, 1024, { profile: profileOfProvider(wrapped as never) });
@@ -606,17 +657,13 @@ test("W3 splitTextToCodepoints on a 1 MB single-line blob is linear and lossless
 
 const { writerRefusal } = await import("./embedding-profile.ts");
 
-test("W4 writer rule: the legacy Qwen generation is read-only (explicit, old-style env, or wrapped)", () => {
-	const qwenOld = quiet(() => new VLLMProvider({ endpoint: "https://x.invalid", model: "qwen/qwen3-embedding-8b", dimensions: 4096 }));
-	ok(writerRefusal(qwenOld)?.startsWith("legacy-generation-read-only"));
-	ok(writerRefusal(new CachingProvider(qwenOld) as never)?.startsWith("legacy-generation-read-only"));
-	const qwenProfiled = new VLLMProvider({ endpoint: "https://x.invalid", model: QWEN.model, dimensions: 4096, profile: QWEN });
-	ok(writerRefusal(qwenProfiled));
+test("W4 writer rule: only a profiled provider writes; nothing is inferred (explicit or wrapped)", () => {
+	const unprofiled = quiet(() => new VLLMProvider({ endpoint: "https://x.invalid", model: "qwen/qwen3-embedding-8b", dimensions: 4096 }));
+	ok(writerRefusal(unprofiled)?.startsWith("unprofiled-writer"));
+	ok(writerRefusal(new CachingProvider(unprofiled) as never)?.startsWith("unprofiled-writer"));
 	const bge = new VLLMProvider({ endpoint: BGE.endpoint!, model: BGE.model, dimensions: 1024, profile: BGE });
 	strictEqual(writerRefusal(bge), null);
 	strictEqual(writerRefusal(new CachingProvider(bge) as never), null);
-	// unprofiled stub/custom providers keep the dimension + stamp guards
-	strictEqual(writerRefusal(new VLLMProvider({ endpoint: "http://stub.invalid", model: "stub", dimensions: 4 })), null);
 });
 
 // ---------------------------------------------------------------------------
