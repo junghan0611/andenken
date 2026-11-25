@@ -506,7 +506,7 @@ if (ARGS.barrierOnly) {
 const { VectorStore, ftsReady } = await import("./store.ts");
 const { fdinfoHoldsFlockWrite } = await import("./openclaw-lock.ts");
 const { OPENCLAW_FTS_PROTOCOL, OPENCLAW_FTS_HEALTHY_MARK } = await import("./openclaw-fts.ts");
-const { OPENCLAW_PROFILE } = await import("./embedding-profile.ts");
+const { OPENCLAW_PROFILE, OPENCLAW_PRODUCER } = await import("./embedding-profile.ts");
 
 const REPO = ARGS.repo;
 const PROD_DATA = path.join(REPO, "data");
@@ -599,8 +599,12 @@ async function withData<T>(data: string, fn: () => Promise<T>): Promise<T> {
 	try { return await fn(); }
 	finally { if (prev === undefined) delete process.env.ANDENKEN_DATA; else process.env.ANDENKEN_DATA = prev; }
 }
+// A seeded store is a harvest store: stamped with the OpenClaw generation and
+// the producer that the staged manifest below vouches for (agent fxa, revision 1).
+const PRODUCER_META = { model: OPENCLAW_PRODUCER.model, provider: OPENCLAW_PRODUCER.provider, vectorDims: OPENCLAW_PRODUCER.vectorDims, chunkingVersion: 6 };
+const SEED_PRODUCER = { kind: "openclaw-harvest" as const, ...OPENCLAW_PRODUCER, revisions: { fxa: 1 }, chunkingVersions: { fxa: 6 } };
 async function seedStore(db: string, rows: ReturnType<typeof row>[], withIndex: boolean): Promise<void> {
-	const s = new VectorStore(db, DIM);
+	const s = new VectorStore(db, DIM, { profile: OPENCLAW_PROFILE, producer: SEED_PRODUCER });
 	await s.init();
 	await s.addChunksRaw(rows);
 	if (withIndex) await s.createFtsIndex();
@@ -842,6 +846,8 @@ try {
 		const lines = rows.map((r) => JSON.stringify({ agent: "fxa", id: r.id, path: "/fixture/" + r.id, source: "memory", updated_at: r.ts, text: r.text, embedding: JSON.stringify(VEC) }));
 		fs.writeFileSync(path.join(dir, "openclaw-chunks.jsonl.gz"), zlib.gzipSync(lines.join("\n") + "\n"));
 		fs.writeFileSync(path.join(dir, "host"), "fixturehost\n");
+		// The export's manifest vouches for the producer of every staged agent.
+		fs.writeFileSync(path.join(dir, "manifest.jsonl.gz"), zlib.gzipSync(JSON.stringify({ kind: "agent", agent: "fxa", state: "ok", revision: 1, meta: { memory_index_meta_v1: PRODUCER_META } }) + "\n"));
 	};
 	const unstage = (b: Box) => fs.rmSync(path.join(b.data, "openclaw-staging", "openclaw-chunks.jsonl.gz"), { force: true });
 	const IMPORT = "node --import tsx openclaw-importer.ts";
