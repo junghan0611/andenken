@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "allowImportingTsExtensions": true
+  },
+  "include": [
+    "status-contract.ts", "status-contract.test.ts", "embedding-profile.ts", "embedding-provider.ts", "store.ts"
+  ],
+  "exclude": ["node_modules"]
+}

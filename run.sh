@@ -107,6 +107,10 @@ Usage: ./run.sh <command> [args]
                               state is reported and never fails
   status                      Show index statistics (text)
   status:json                 Show index statistics (machine-readable JSON)
+  status:contract --json      Axis contract v1 per sessions/md/openclaw: index vs query
+                              state, selected provider vs stamped generation, coverage
+                              (unknown unless a receipt binds the table version).
+                              Read-only: no network, no embedding, no writes
   estimate [sessions|md|all]  Dry-run per-track cost estimate (API 0)
   estimate:sessions [--full]  PR-B: sessions OpenRouter 8B estimate (API 0)
                               Pinned data dir: control-v1 send set, S0-held reported
@@ -217,6 +221,7 @@ Usage: ./run.sh <command> [args]
                               sourced, opened or used by run.sh, child scripts or providers;
                               unset = unchanged; unknown value refuses (API 0)
   test:absent                 Fixture tests for the absent-axis invariant — a read never creates (API 0)
+  test:contract               Synthetic suite for status:contract (API 0, fetch stubbed, no writes)
   test:parity                 Credential regex parity: python ↔ typescript (API 0)
   test:diagnostics            Type fence (tsconfig.diagnostics.json) + tests for the
                               full-text leg diagnostics (store, md core, CLI/pi report
@@ -480,6 +485,8 @@ case "${1:-help}" in
     load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts status ;;
   status:json)
     load_env; cd "$SCRIPT_DIR" && pnpm exec tsx indexer.ts status --json ;;
+  status:contract)
+    shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx status-contract.ts "$@" ;;
 
   # === Search ===
   search)
@@ -519,6 +526,10 @@ case "${1:-help}" in
     cd "$SCRIPT_DIR" && pnpm exec tsx env-mode.test.ts ;;
   test:absent)
     cd "$SCRIPT_DIR" && pnpm exec tsx axis-absent.test.ts ;;
+  test:contract)
+    # API 0: no load_env; temp HOME/ANDENKEN_DATA, process-only env, fetch stubbed.
+    cd "$SCRIPT_DIR" && node node_modules/typescript/bin/tsc -p tsconfig.contract.json \
+      && node --import tsx status-contract.test.ts ;;
   test:parity)
     cd "$SCRIPT_DIR" && pnpm exec tsx credential-parity.test.ts ;;
   test:diagnostics)

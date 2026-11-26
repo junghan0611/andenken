@@ -1122,6 +1122,28 @@ export class VectorStore {
     }
   }
 
+  /**
+   * Read-only shape probe for `status:contract`: rows, the dimension of one
+   * sampled vector, and the LanceDB table version. Unlike `getActualVectorDim`
+   * / `checkCompatibleDim` (which fold a read failure into "empty" or
+   * "mismatch" — fine for a guard that refuses either way), every I/O error is
+   * THROWN so a report can call it unknown. `table: false` = connected but no
+   * table (the caller already ruled out an absent axis). Never writes.
+   */
+  async probeShapeStrict(): Promise<
+    { table: false } | { table: true; rows: number; dim: number | null; version: number }
+  > {
+    await this.ensureInitialized();
+    if (!this.table) return { table: false };
+    const rows = await this.table.countRows();
+    const version = await this.table.version();
+    if (rows === 0) return { table: true, rows, dim: null, version };
+    const sample = await this.table.query().limit(1).toArray();
+    const v = sample[0]?.vector;
+    const dim = Array.isArray(v) ? v.length : v && typeof v.length === "number" ? (v.length as number) : null;
+    return { table: true, rows, dim, version };
+  }
+
   /** Configured vector dimension passed to the constructor. */
   get configuredDim(): number {
     return this.vectorDim;

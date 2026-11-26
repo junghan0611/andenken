@@ -1026,6 +1026,17 @@ export function createOpenclawQueryProviderFromEnv(): EmbeddingProvider | null {
   return p;
 }
 
+/**
+ * Whether `ANDENKEN_<ns>_PROFILE` or `_PROVIDER` is set (process env, then the
+ * dotenv unless process-only) — the same reads the factories above make. Lets a
+ * read-only report tell "not configured" from "configured but refused", which
+ * both reach a caller as `null`. Pure read; builds nothing.
+ */
+export function providerNamespaceDeclared(ns: "SESSION" | "MD" | "OPENCLAW_QUERY"): boolean {
+  const read = (suffix: string) => readEnvWithFileFallback(`ANDENKEN_${ns}_` + suffix);
+  return read("PROFILE") !== undefined || read("PROVIDER") !== undefined;
+}
+
 /** Shared namespaced builder: profile only; PROVIDER, when given, must be vllm. */
 function buildFromNamespace(read: (suffix: string) => string | undefined, tag: string): VLLMProvider | null {
   const rawType = read("PROVIDER");

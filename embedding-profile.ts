@@ -491,14 +491,37 @@ export type StampRead = { state: "absent" } | { state: "ok"; stamp: StoreStamp }
 
 const isStr = (v: unknown): v is string => typeof v === "string";
 
-export function readStoreStamp(dbPath: string): StampRead {
-	let raw: string;
+/**
+ * Typed read evidence for read-only reporting (`status:contract`). The guard
+ * readers below fold an I/O error into `invalid` — correct for a guard, which
+ * must refuse either way — but a report has to say WHICH: a file it could not
+ * read is unknown, not malformed. Guards keep using the folded readers.
+ */
+export type FileReadIo = { state: "io-error"; errno: string };
+
+function readFileTyped(file: string): { state: "absent" } | FileReadIo | { state: "raw"; raw: string } {
 	try {
-		raw = fs.readFileSync(stampPath(dbPath), "utf-8");
+		return { state: "raw", raw: fs.readFileSync(file, "utf-8") };
 	} catch (e) {
-		if ((e as NodeJS.ErrnoException).code === "ENOENT") return { state: "absent" };
-		return { state: "invalid" };
+		const code = (e as NodeJS.ErrnoException).code;
+		if (code === "ENOENT") return { state: "absent" };
+		return { state: "io-error", errno: code ?? "unknown" };
 	}
+}
+
+/** `readStoreStamp` with an I/O failure kept apart from a malformed stamp. */
+export function readStoreStampTyped(dbPath: string): StampRead | FileReadIo {
+	const f = readFileTyped(stampPath(dbPath));
+	if (f.state !== "raw") return f;
+	return parseStoreStamp(f.raw);
+}
+
+export function readStoreStamp(dbPath: string): StampRead {
+	const r = readStoreStampTyped(dbPath);
+	return r.state === "io-error" ? { state: "invalid" } : r;
+}
+
+function parseStoreStamp(raw: string): StampRead {
 	try {
 		const s = JSON.parse(raw) as Partial<StoreStamp>;
 		const pre = s.preprocess as Partial<StampPreprocess> | undefined;
@@ -631,14 +654,19 @@ export function attestationPath(dbPath: string): string {
 
 export type AttestRead = { state: "absent" } | { state: "ok"; list: QueryAttestation[] } | { state: "invalid" };
 
+/** `readAttestations` with an I/O failure kept apart from a malformed file. */
+export function readAttestationsTyped(dbPath: string): AttestRead | FileReadIo {
+	const f = readFileTyped(attestationPath(dbPath));
+	if (f.state !== "raw") return f;
+	return parseAttestations(f.raw);
+}
+
 export function readAttestations(dbPath: string): AttestRead {
-	let raw: string;
-	try {
-		raw = fs.readFileSync(attestationPath(dbPath), "utf-8");
-	} catch (e) {
-		if ((e as NodeJS.ErrnoException).code === "ENOENT") return { state: "absent" };
-		return { state: "invalid" };
-	}
+	const r = readAttestationsTyped(dbPath);
+	return r.state === "io-error" ? { state: "invalid" } : r;
+}
+
+function parseAttestations(raw: string): AttestRead {
 	try {
 		const list = JSON.parse(raw) as unknown;
 		if (!Array.isArray(list)) return { state: "invalid" };
