@@ -362,6 +362,15 @@ Usage: ./run.sh <command> [args]
                               text. Requires ANDENKEN_SESSION_CORPUS. Exit 3 unless
                               status=complete (refused / changed / error / empty;
                               no retry).
+  test:fixture-gates          Synthetic characterization of selection gates, split
+                              fragmentation vs literal loss (API 0, temp files only)
+  test:fixture                Type fence (tsconfig.fixture.json) + suite for the
+                              synthetic fixture builder (mock only, API 0)
+  fixture:synthetic [--input synthetic|freeze …] [--native --ack-synthetic-only]
+                              Disposable synthetic-only sessions store in a fresh
+                              temp root (mock by default, API 0). Not an operational
+                              runner: no lock, no corpus, no ~/.env.local.
+                              See probes/synthetic-fixtures/README.md
   test:selection              Type fence (tsconfig.selection.json) + synthetic
                               fixtures for session-selection.ts, the detailed
                               extractor and the plan (API 0, temp files only)
@@ -669,6 +678,13 @@ case "${1:-help}" in
   # === Selection candidate (issue #18) — plan only ===
   candidate:sessions:plan)
     shift; load_env; cd "$SCRIPT_DIR" && pnpm exec tsx scripts/candidate-plan.ts "$@" ;;
+  test:fixture-gates)
+    cd "$SCRIPT_DIR" && pnpm exec tsx selection-gates.test.ts ;;
+  test:fixture)
+    cd "$SCRIPT_DIR" && pnpm exec tsc -p tsconfig.fixture.json && pnpm exec tsx synthetic-fixture.test.ts ;;
+  fixture:synthetic)
+    # No load_env: the builder builds its child environment from nothing.
+    shift; cd "$SCRIPT_DIR" && pnpm exec tsx scripts/synthetic-fixture.ts "$@" ;;
   test:selection)
     cd "$SCRIPT_DIR" && pnpm exec tsc -p tsconfig.selection.json && pnpm exec tsx session-selection.test.ts ;;
   candidate:sessions:build)

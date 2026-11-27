@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "query": "synthetic decision evidence",
+  "limit": 5,
+  "eligibleSource": "pi",
+  "target": "T",
+  "rows": {
+    "A": { "file": "synthetic/distractor.jsonl", "line": 1 },
+    "B": { "file": "synthetic/distractor.jsonl", "line": 2 },
+    "C": { "file": "synthetic/distractor.jsonl", "line": 3 },
+    "D": { "file": "synthetic/distractor.jsonl", "line": 4 },
+    "E": { "file": "synthetic/distractor.jsonl", "line": 5 },
+    "T": { "file": "synthetic/target.jsonl", "line": 1 }
+  },
+  "cases": [
+    {
+      "name": "target-in-vector-leg",
+      "vector": ["A", "B", "C", "T", "D", "E"],
+      "fts": ["A", "B", "C", "D", "E"],
+      "baselineRank": 6,
+      "variantRank": 4
+    },
+    {
+      "name": "positive-control-target-in-both-legs",
+      "vector": ["A", "B", "C", "T", "D", "E"],
+      "fts": ["A", "B", "C", "T", "D", "E"],
+      "baselineRank": 4,
+      "variantRank": 4
+    }
+  ]
+}
